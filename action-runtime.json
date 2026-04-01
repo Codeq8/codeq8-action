@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "node_major": "22",
+  "cli_tools": {
+    "codex": "0.117.0",
+    "codeq8": "0.2.1"
+  }
+}
