@@ -13,13 +13,13 @@ const GLOBAL_CLI_TOOLS = Object.freeze([
     label: "codex",
     packageName: "@openai/codex",
     binaryName: "codex",
-    desiredVersionPath: "codex-cli/package.json",
+    desiredVersionKey: "codex",
   },
   {
     label: "codeq8",
     packageName: "@codeq8/codeq8",
     binaryName: "codeq8",
-    desiredVersionPath: "codeq8-cli/package.json",
+    desiredVersionKey: "codeq8",
   },
 ]);
 
@@ -208,27 +208,36 @@ async function writeState(stateFilePath, payload) {
   await fs.writeFile(stateFilePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
-async function readDesiredToolVersion(tool, cwd = process.cwd()) {
-  const relativePath = normalizeText(tool?.desiredVersionPath);
-  if (!relativePath) {
-    return "";
-  }
+async function readActionRuntimeConfig(cwd = process.cwd()) {
   try {
-    const packageJsonPath = path.resolve(cwd, relativePath);
-    const raw = await fs.readFile(packageJsonPath, "utf8");
+    const configPath = path.resolve(cwd, "action-runtime.json");
+    const raw = await fs.readFile(configPath, "utf8");
     const parsed = JSON.parse(raw);
-    return normalizeText(parsed?.version);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch {
-    return "";
+    return {};
   }
 }
 
+function readDesiredToolVersion(tool, runtimeConfig = {}) {
+  const desiredVersionKey = normalizeText(tool?.desiredVersionKey);
+  if (!desiredVersionKey) {
+    return "";
+  }
+  const cliTools =
+    runtimeConfig && typeof runtimeConfig.cli_tools === "object" && !Array.isArray(runtimeConfig.cli_tools)
+      ? runtimeConfig.cli_tools
+      : {};
+  return normalizeText(cliTools[desiredVersionKey]);
+}
+
 async function resolveToolSnapshot({ env = process.env, cwd = process.cwd() } = {}) {
+  const runtimeConfig = await readActionRuntimeConfig(cwd);
   const snapshot = [];
   for (const tool of GLOBAL_CLI_TOOLS) {
     snapshot.push({
       ...tool,
-      desiredVersion: await readDesiredToolVersion(tool, cwd),
+      desiredVersion: readDesiredToolVersion(tool, runtimeConfig),
       binaryPath: await resolveBinaryPath({
         binaryName: tool.binaryName,
         env,

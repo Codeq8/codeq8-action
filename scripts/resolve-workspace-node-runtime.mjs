@@ -21,6 +21,28 @@ function normalizeNodeMajor(value) {
   return match ? match[1] : "";
 }
 
+async function readJsonObject(configPath) {
+  let raw = "";
+  try {
+    raw = await fs.readFile(configPath, "utf8");
+  } catch {
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+
+  const normalized = normalizeObject(parsed);
+  if (Object.keys(normalized).length === 0) {
+    return null;
+  }
+  return normalized;
+}
+
 function shellQuote(value) {
   return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
 }
@@ -143,33 +165,42 @@ async function readNodeMajorVersion(nodePath) {
   );
 }
 
-async function readWorkspaceRequiredNodeMajor(workspacePath) {
-  const configPath = path.join(path.resolve(workspacePath), "codeq8.json");
-  let raw = "";
-  try {
-    raw = await fs.readFile(configPath, "utf8");
-  } catch {
-    return "";
+async function readWorkspaceRequiredNodeConfig(workspacePath) {
+  const normalizedWorkspacePath = path.resolve(workspacePath);
+
+  const workspaceConfigPath = path.join(normalizedWorkspacePath, "codeq8.json");
+  const workspaceConfig = await readJsonObject(workspaceConfigPath);
+  if (workspaceConfig && normalizeText(workspaceConfig.version) === "1") {
+    const ci = normalizeObject(workspaceConfig.ci);
+    const requiredMajor = normalizeNodeMajor(
+      ci.node_version || ci.nodeVersion || workspaceConfig.ci_node_version || "",
+    );
+    if (requiredMajor) {
+      return {
+        requiredMajor,
+        sourcePath: workspaceConfigPath,
+      };
+    }
   }
 
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return "";
+  const actionRuntimeConfigPath = path.join(normalizedWorkspacePath, "action-runtime.json");
+  const actionRuntimeConfig = await readJsonObject(actionRuntimeConfigPath);
+  if (actionRuntimeConfig && normalizeText(actionRuntimeConfig.version) === "1") {
+    const requiredMajor = normalizeNodeMajor(
+      actionRuntimeConfig.node_major || actionRuntimeConfig.nodeMajor || "",
+    );
+    if (requiredMajor) {
+      return {
+        requiredMajor,
+        sourcePath: actionRuntimeConfigPath,
+      };
+    }
   }
 
-  const normalized = normalizeObject(parsed);
-  if (Object.keys(normalized).length === 0) {
-    return "";
-  }
-  if (normalizeText(normalized.version) !== "1") {
-    return "";
-  }
-  const ci = normalizeObject(normalized.ci);
-  return normalizeNodeMajor(
-    ci.node_version || ci.nodeVersion || normalized.ci_node_version || "",
-  );
+  return {
+    requiredMajor: "",
+    sourcePath: "",
+  };
 }
 
 function readNodeRuntimeCacheDirectory(env = process.env) {
@@ -381,7 +412,7 @@ export async function resolveWorkspaceNodeRuntime({
   workspacePath = process.cwd(),
   env = process.env,
 } = {}) {
-  const requiredMajor = await readWorkspaceRequiredNodeMajor(workspacePath);
+  const { requiredMajor, sourcePath } = await readWorkspaceRequiredNodeConfig(workspacePath);
   const candidatePaths = await buildNodeCandidatePaths(env);
   const inspected = [];
 
@@ -422,6 +453,8 @@ export async function resolveWorkspaceNodeRuntime({
   const inspectedSummary = inspected
     .map((candidate) => `${candidate.nodePath} (v${candidate.major})`)
     .join(", ");
+  const requiredMajorSource =
+    normalizeText(sourcePath) || path.resolve(workspacePath, "action-runtime.json");
   try {
     const provisionedNodePath = await resolveProvisionedNodeBinary({
       requiredMajor,
@@ -438,7 +471,7 @@ export async function resolveWorkspaceNodeRuntime({
     }
   } catch (error) {
     throw new Error(
-      `Node ${requiredMajor} is required by ${path.resolve(workspacePath, "codeq8.json")}. ` +
+      `Node ${requiredMajor} is required by ${requiredMajorSource}. ` +
         `Current runner node is ${process.version}. ` +
         `${error instanceof Error ? error.message : String(error)}` +
         `${inspectedSummary ? `; inspected: ${inspectedSummary}` : ""}.`,
@@ -446,7 +479,7 @@ export async function resolveWorkspaceNodeRuntime({
   }
 
   throw new Error(
-    `Node ${requiredMajor} is required by ${path.resolve(workspacePath, "codeq8.json")}. ` +
+    `Node ${requiredMajor} is required by ${requiredMajorSource}. ` +
       `Current runner node is ${process.version}. ` +
       `Matching node binary not found${inspectedSummary ? `; inspected: ${inspectedSummary}` : ""}.`,
   );
