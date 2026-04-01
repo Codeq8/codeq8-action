@@ -1,43 +1,12 @@
 {
-  "name": "codeq8",
+  "name": "codeq8-action-runtime",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "node ./scripts/lint-cloudflare-persistence-ban.mjs && node ./scripts/lint-github-action-runtime-contract.mjs && node ./scripts/lint-preview-auth-contract.mjs && eslint",
-    "test:e2e": "playwright test",
-    "test:node": "NODE_NO_WARNINGS=1 node --import ./scripts/register-node-typescript-loader.mjs --test scripts/*.test.mjs lib/*.test.mjs cloudflare/control-plane/tests/*.test.mjs",
-    "probe:codex-resume": "node scripts/codex-resume-bundle-probe.mjs",
-    "test:control-plane": "NODE_NO_WARNINGS=1 node --import ./scripts/register-node-typescript-loader.mjs --test cloudflare/control-plane/tests/*.test.mjs",
-    "runner:web-chat": "node scripts/web-chat-runner.mjs"
+  "type": "module",
+  "engines": {
+    "node": ">=22"
   },
   "dependencies": {
-    "@reduxjs/toolkit": "^2.11.2",
-    "@tanstack/react-virtual": "^3.13.21",
-    "eslint-plugin-boundaries": "^6.0.1",
-    "eslint-plugin-import": "^2.32.0",
-    "eslint-plugin-sonarjs": "^4.0.2",
-    "firebase": "^12.11.0",
-    "next": "16.1.6",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "react-markdown": "^10.1.0",
-    "react-redux": "^9.2.0",
-    "remark-gfm": "^4.0.1",
-    "tweetnacl": "^1.0.3",
     "zod": "^4.3.6"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.58.2",
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.1.6",
-    "tailwindcss": "^4",
-    "typescript": "^5"
   }
 }
