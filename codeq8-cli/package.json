@@ -1,0 +1,25 @@
+{
+  "name": "@codeq8/codeq8",
+  "version": "0.2.1",
+  "description": "Codeq8 CLI",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "codeq8": "bin/codeq8.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 ./test/*.test.mjs"
+  }
+}

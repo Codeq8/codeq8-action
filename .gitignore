@@ -1,0 +1,3 @@
+node_modules/
+.codeq8-action-runtime/
+npm-debug.log*
