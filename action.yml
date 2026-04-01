@@ -1,0 +1,80 @@
+name: Codeq8 Web Chat Run
+description: Run the shared Codeq8 GitHub Actions web chat bridge inside a checked-out target workspace.
+
+inputs:
+  github_token:
+    description: GitHub token available to the runner for repository operations.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare Codeq8 action runtime
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if ! command -v node >/dev/null 2>&1; then
+          echo "::error::node is required on the self-hosted runner."
+          exit 1
+        fi
+        codeq8_action_repo_root="$(cd "$GITHUB_ACTION_PATH" && pwd)"
+        runtime_assignments="$(
+          node "$codeq8_action_repo_root/scripts/resolve-workspace-node-runtime.mjs" \
+            --workspace-path "$codeq8_action_repo_root" \
+            --format shell
+        )"
+        eval "$runtime_assignments"
+        resolved_node_dir="$(dirname "$CODEQ8_RESOLVED_NODE_BIN")"
+        export PATH="$resolved_node_dir:$PATH"
+        echo "$resolved_node_dir" >> "$GITHUB_PATH"
+        echo "NODE=$CODEQ8_RESOLVED_NODE_BIN" >> "$GITHUB_ENV"
+        echo "CODEQ8_ACTION_REPO_ROOT=$codeq8_action_repo_root" >> "$GITHUB_ENV"
+
+        if ! command -v git >/dev/null 2>&1; then
+          echo "::error::git is required on the self-hosted runner."
+          exit 1
+        fi
+        if ! command -v npm >/dev/null 2>&1 && [ ! -x "$resolved_node_dir/npm" ]; then
+          echo "::error::npm is required on the self-hosted runner."
+          exit 1
+        fi
+        if ! command -v curl >/dev/null 2>&1; then
+          echo "::error::curl is required on the self-hosted runner."
+          exit 1
+        fi
+
+        npm_bin="$(command -v npm || true)"
+        if [ -z "$npm_bin" ] && [ -x "$resolved_node_dir/npm" ]; then
+          npm_bin="$resolved_node_dir/npm"
+        fi
+        if [ -z "$npm_bin" ]; then
+          echo "::error::npm is required on the self-hosted runner."
+          exit 1
+        fi
+
+        "$CODEQ8_RESOLVED_NODE_BIN" --version
+        "$npm_bin" --version
+        "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/ensure-codeq8-action-runtime.mjs" \
+          --repo-root "$codeq8_action_repo_root" \
+          --node-path "$CODEQ8_RESOLVED_NODE_BIN" \
+          --npm-path "$npm_bin"
+
+    - name: Prepare global npm tool prefix
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        npm_global_prefix="${HOME}/.npm-global"
+        mkdir -p "${npm_global_prefix}/bin"
+        echo "NPM_CONFIG_PREFIX=${npm_global_prefix}" >> "$GITHUB_ENV"
+        echo "${npm_global_prefix}/bin" >> "$GITHUB_PATH"
+
+    - name: Run Codeq8 chat bridge
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+      run: |
+        set -euo pipefail
+
+        "$NODE" "$CODEQ8_ACTION_REPO_ROOT/scripts/github-actions-web-chat-runner-bridge.mjs"
