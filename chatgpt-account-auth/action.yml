@@ -15,8 +15,8 @@ runs:
         fi
         codeq8_action_repo_root="$(cd "$GITHUB_ACTION_PATH/.." && pwd)"
         runtime_assignments="$(
-          node "$codeq8_action_repo_root/scripts/resolve-workspace-node-runtime.mjs" \
-            --workspace-path "$codeq8_action_repo_root" \
+          node "$codeq8_action_repo_root/scripts/resolve-action-node-runtime.mjs" \
+            --action-root "$codeq8_action_repo_root" \
             --format shell
         )"
         eval "$runtime_assignments"

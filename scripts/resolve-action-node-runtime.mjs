@@ -7,40 +7,18 @@ import path from "node:path";
 import process from "node:process";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import {
+  readRequiredActionNodeMajor,
+  resolveActionRuntimeConfigPath,
+} from "./action-runtime-config.mjs";
 
 function normalizeText(value) {
   return String(value || "").trim();
 }
 
-function normalizeObject(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-
 function normalizeNodeMajor(value) {
   const match = normalizeText(value).match(/^v?(\d{1,3})/);
   return match ? match[1] : "";
-}
-
-async function readJsonObject(configPath) {
-  let raw = "";
-  try {
-    raw = await fs.readFile(configPath, "utf8");
-  } catch {
-    return null;
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-
-  const normalized = normalizeObject(parsed);
-  if (Object.keys(normalized).length === 0) {
-    return null;
-  }
-  return normalized;
 }
 
 function shellQuote(value) {
@@ -163,44 +141,6 @@ async function readNodeMajorVersion(nodePath) {
   return normalizeNodeMajor(
     await readCommandOutput(normalizedNodePath, ["-p", "process.versions.node.split('.')[0]"]),
   );
-}
-
-async function readWorkspaceRequiredNodeConfig(workspacePath) {
-  const normalizedWorkspacePath = path.resolve(workspacePath);
-
-  const workspaceConfigPath = path.join(normalizedWorkspacePath, "codeq8.json");
-  const workspaceConfig = await readJsonObject(workspaceConfigPath);
-  if (workspaceConfig && normalizeText(workspaceConfig.version) === "1") {
-    const ci = normalizeObject(workspaceConfig.ci);
-    const requiredMajor = normalizeNodeMajor(
-      ci.node_version || ci.nodeVersion || workspaceConfig.ci_node_version || "",
-    );
-    if (requiredMajor) {
-      return {
-        requiredMajor,
-        sourcePath: workspaceConfigPath,
-      };
-    }
-  }
-
-  const actionRuntimeConfigPath = path.join(normalizedWorkspacePath, "action-runtime.json");
-  const actionRuntimeConfig = await readJsonObject(actionRuntimeConfigPath);
-  if (actionRuntimeConfig && normalizeText(actionRuntimeConfig.version) === "1") {
-    const requiredMajor = normalizeNodeMajor(
-      actionRuntimeConfig.node_major || actionRuntimeConfig.nodeMajor || "",
-    );
-    if (requiredMajor) {
-      return {
-        requiredMajor,
-        sourcePath: actionRuntimeConfigPath,
-      };
-    }
-  }
-
-  return {
-    requiredMajor: "",
-    sourcePath: "",
-  };
 }
 
 function readNodeRuntimeCacheDirectory(env = process.env) {
@@ -408,11 +348,12 @@ async function buildNodeCandidatePaths(env = process.env) {
   return uniqueCandidates;
 }
 
-export async function resolveWorkspaceNodeRuntime({
-  workspacePath = process.cwd(),
+export async function resolveActionNodeRuntime({
+  actionRoot = process.cwd(),
   env = process.env,
 } = {}) {
-  const { requiredMajor, sourcePath } = await readWorkspaceRequiredNodeConfig(workspacePath);
+  const normalizedActionRoot = path.resolve(actionRoot);
+  const requiredMajor = await readRequiredActionNodeMajor({ actionRoot: normalizedActionRoot });
   const candidatePaths = await buildNodeCandidatePaths(env);
   const inspected = [];
 
@@ -453,8 +394,7 @@ export async function resolveWorkspaceNodeRuntime({
   const inspectedSummary = inspected
     .map((candidate) => `${candidate.nodePath} (v${candidate.major})`)
     .join(", ");
-  const requiredMajorSource =
-    normalizeText(sourcePath) || path.resolve(workspacePath, "action-runtime.json");
+  const requiredMajorSource = resolveActionRuntimeConfigPath(normalizedActionRoot);
   try {
     const provisionedNodePath = await resolveProvisionedNodeBinary({
       requiredMajor,
@@ -502,9 +442,9 @@ function formatShellAssignments(resolution) {
 }
 
 async function main() {
-  const workspacePath = readArgumentValue(process.argv, "--workspace-path") || process.cwd();
+  const actionRoot = readArgumentValue(process.argv, "--action-root") || process.cwd();
   const format = readArgumentValue(process.argv, "--format") || "json";
-  const resolution = await resolveWorkspaceNodeRuntime({ workspacePath });
+  const resolution = await resolveActionNodeRuntime({ actionRoot });
   if (format === "shell") {
     process.stdout.write(`${formatShellAssignments(resolution)}\n`);
     return;
