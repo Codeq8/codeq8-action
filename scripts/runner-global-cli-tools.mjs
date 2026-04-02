@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { readDesiredActionCliToolVersions } from "./action-runtime-config.mjs";
 
 const GLOBAL_CLI_TOOLS = Object.freeze([
   {
@@ -208,36 +209,21 @@ async function writeState(stateFilePath, payload) {
   await fs.writeFile(stateFilePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
-async function readActionRuntimeConfig(cwd = process.cwd()) {
-  try {
-    const configPath = path.resolve(cwd, "action-runtime.json");
-    const raw = await fs.readFile(configPath, "utf8");
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function readDesiredToolVersion(tool, runtimeConfig = {}) {
+function readDesiredToolVersion(tool, desiredToolVersions = {}) {
   const desiredVersionKey = normalizeText(tool?.desiredVersionKey);
   if (!desiredVersionKey) {
     return "";
   }
-  const cliTools =
-    runtimeConfig && typeof runtimeConfig.cli_tools === "object" && !Array.isArray(runtimeConfig.cli_tools)
-      ? runtimeConfig.cli_tools
-      : {};
-  return normalizeText(cliTools[desiredVersionKey]);
+  return normalizeText(desiredToolVersions[desiredVersionKey]);
 }
 
 async function resolveToolSnapshot({ env = process.env, cwd = process.cwd() } = {}) {
-  const runtimeConfig = await readActionRuntimeConfig(cwd);
+  const desiredToolVersions = await readDesiredActionCliToolVersions({ actionRoot: cwd });
   const snapshot = [];
   for (const tool of GLOBAL_CLI_TOOLS) {
     snapshot.push({
       ...tool,
-      desiredVersion: readDesiredToolVersion(tool, runtimeConfig),
+      desiredVersion: readDesiredToolVersion(tool, desiredToolVersions),
       binaryPath: await resolveBinaryPath({
         binaryName: tool.binaryName,
         env,
