@@ -1940,9 +1940,19 @@ function buildRunnerGitOwnershipPromptLines({ branch = "" } = {}) {
   const remoteBranch = normalizedBranch ? `origin/${normalizedBranch}` : "the remote branch";
   return [
     "- The runner will not create commits, push branches, or resolve git divergence for you.",
-    "- If you make repo changes that should be kept, you are responsible for committing and pushing them before you finish.",
+    "- If you make repo changes that should be kept, you are responsible for committing and pushing them at the checkpoints that make sense for the user's request, and before you finish.",
     `- If \`git push\` is rejected because ${remoteBranch} changed, inspect the divergence, merge or rebase deliberately, resolve conflicts, and push again yourself.`,
     "- If those git conflicts require an unclear product decision, stop and explain the blocker instead of guessing.",
+  ];
+}
+
+function buildLoopStylePromptLines() {
+  return [
+    "- By default, handle the current user request as a normal single-pass run; do not turn it into open-ended loop-style work unless the user clearly asks for that.",
+    "- If the user clearly asks for loop-style or iterative work, you may stay in this run and work through multiple cycles of changes, commits, pushes, checks, and follow-up fixes when that matches the request.",
+    "- If the user asks for loop-style work and the intended loop is unclear, stop and ask the user to clarify before you start making repo changes.",
+    "- When you are working in a requested loop, stop when you hit a real blocker, when the user's goal is satisfied, or when you judge that the loop has reached a sensible stopping point within this run.",
+    "- Do not treat requested loop-style work as permission to create a background or automatically resumed workflow across turns; keep the work bounded to this run unless the user asks again later.",
   ];
 }
 
@@ -4048,7 +4058,7 @@ function buildCodexPrompt({
         "- Before making repo changes, create and switch to a normal git branch with a human-readable name.",
       );
       lines.push(
-        "- Do the work on that branch and push it when you are done so the runner can remember it for this thread and open or update the PR.",
+        "- Do the work on that branch and push it at the checkpoints that make sense for the user's request, and before you finish, so the runner can remember it for this thread and open or update the PR.",
       );
     }
   } else {
@@ -4085,8 +4095,9 @@ function buildCodexPrompt({
   lines.push(
     "- Never push the base branch, default branch, or any protected branch directly.",
   );
+  lines.push(...buildLoopStylePromptLines());
   lines.push(
-    "- If you make repo changes that should be kept, create a normal git commit with a concise human-readable subject before you finish.",
+    "- If you make repo changes that should be kept, create normal git commits with concise human-readable subjects at the checkpoints that make sense for the user's request, and make sure kept work is committed before you finish.",
   );
   lines.push(
     ...buildRunnerGitOwnershipPromptLines({
@@ -4265,8 +4276,9 @@ function buildResumePrompt({
       "- Normal git commits and pushes on the checked-out working branch are allowed when they match the thread policy.",
     );
     lines.push(
-      "- If you make repo changes that should be kept, create a normal git commit with a concise human-readable subject before you finish.",
+      "- If you make repo changes that should be kept, create normal git commits with concise human-readable subjects at the checkpoints that make sense for the user's request, and make sure kept work is committed before you finish.",
     );
+    lines.push(...buildLoopStylePromptLines());
     lines.push(
       ...buildRunnerGitOwnershipPromptLines({
         branch:
