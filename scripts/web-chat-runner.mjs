@@ -1961,6 +1961,248 @@ async function currentBranch({ workspacePath, commandEnv }) {
   return normalizeBranchName(branchResult.stdout);
 }
 
+function isRecoverableWorkspaceRefRefreshFailure(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return (
+    normalized.includes("could not parse commit") ||
+    normalized.includes("could not read ") ||
+    normalized.includes("bad object refs/remotes/origin/") ||
+    normalized.includes("did not send all necessary objects")
+  );
+}
+
+function parseBrokenShallowBoundaryCommits(value) {
+  const commits = [];
+  const lines = String(value || "").split(/\r?\n/g);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = normalizeText(lines[index]);
+    const brokenLinkMatch = /^broken link from\s+commit\s+([0-9a-f]{40})$/i.exec(line);
+    if (!brokenLinkMatch) {
+      continue;
+    }
+    const nextLine = normalizeText(lines[index + 1]);
+    if (!/^to\s+commit\s+[0-9a-f]{40}$/i.test(nextLine)) {
+      continue;
+    }
+    commits.push(brokenLinkMatch[1].toLowerCase());
+  }
+  return Array.from(new Set(commits));
+}
+
+async function repairWorkspaceShallowBoundaries({
+  workspacePath,
+  commandEnv,
+  runProcessCaptureImpl = runProcessCapture,
+}) {
+  const shallowPath = path.join(workspacePath, ".git", "shallow");
+  if (!(await pathExists(shallowPath))) {
+    return {
+      repaired: false,
+      shallowBoundaryCommitsAdded: [],
+    };
+  }
+
+  const fsckResult = await runProcessCaptureImpl("git", ["fsck", "--full", "--no-dangling"], {
+    cwd: workspacePath,
+    env: commandEnv,
+  });
+  const candidateCommits = parseBrokenShallowBoundaryCommits(
+    [fsckResult.stdout, fsckResult.stderr].filter(Boolean).join("\n"),
+  );
+  if (candidateCommits.length === 0) {
+    return {
+      repaired: false,
+      shallowBoundaryCommitsAdded: [],
+    };
+  }
+
+  const validBoundaryCommits = [];
+  for (const commitId of candidateCommits) {
+    const commitType = await runProcessCaptureImpl("git", ["cat-file", "-t", commitId], {
+      cwd: workspacePath,
+      env: commandEnv,
+    });
+    if (commitType.ok && normalizeText(commitType.stdout).toLowerCase() === "commit") {
+      validBoundaryCommits.push(commitId);
+    }
+  }
+  if (validBoundaryCommits.length === 0) {
+    return {
+      repaired: false,
+      shallowBoundaryCommitsAdded: [],
+    };
+  }
+
+  const shallowContents = await fs.readFile(shallowPath, "utf8").catch(() => "");
+  const existingBoundaryCommits = Array.from(
+    new Set(
+      String(shallowContents || "")
+        .split(/\r?\n/g)
+        .map((entry) => normalizeText(entry).toLowerCase())
+        .filter((entry) => /^[0-9a-f]{40}$/.test(entry)),
+    ),
+  );
+  const existingBoundarySet = new Set(existingBoundaryCommits);
+  const shallowBoundaryCommitsAdded = validBoundaryCommits.filter(
+    (commitId) => !existingBoundarySet.has(commitId),
+  );
+  if (shallowBoundaryCommitsAdded.length === 0) {
+    return {
+      repaired: false,
+      shallowBoundaryCommitsAdded: [],
+    };
+  }
+
+  const mergedBoundaryCommits = Array.from(
+    new Set([...existingBoundaryCommits, ...shallowBoundaryCommitsAdded]),
+  ).sort();
+  await fs.writeFile(shallowPath, `${mergedBoundaryCommits.join("\n")}\n`, "utf8");
+  return {
+    repaired: true,
+    shallowBoundaryCommitsAdded,
+  };
+}
+
+async function findBrokenRemoteTrackingRefs({
+  workspacePath,
+  commandEnv,
+  runProcessCaptureImpl = runProcessCapture,
+}) {
+  const listedRefs = await runProcessCaptureImpl(
+    "git",
+    ["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes/origin"],
+    {
+      cwd: workspacePath,
+      env: commandEnv,
+    },
+  );
+  if (!listedRefs.ok) {
+    return [];
+  }
+
+  const brokenRefs = [];
+  const lines = String(listedRefs.stdout || "").split(/\r?\n/g);
+  for (const line of lines) {
+    const [refName = "", objectId = ""] = normalizeText(line).split(/\s+/, 2);
+    if (!normalizeText(refName) || !/^[0-9a-f]{40}$/i.test(normalizeText(objectId))) {
+      continue;
+    }
+    const objectExists = await runProcessCaptureImpl("git", ["cat-file", "-e", objectId], {
+      cwd: workspacePath,
+      env: commandEnv,
+    });
+    if (!objectExists.ok) {
+      brokenRefs.push({
+        refName: normalizeText(refName),
+        objectId: normalizeText(objectId),
+      });
+    }
+  }
+
+  return brokenRefs;
+}
+
+async function refreshWorkspaceRemoteRefs({
+  workspacePath,
+  commandEnv,
+  runProcessCaptureImpl = runProcessCapture,
+}) {
+  const fetched = await runProcessCaptureImpl("git", ["fetch", "--prune", "origin"], {
+    cwd: workspacePath,
+    env: commandEnv,
+  });
+  if (fetched.ok) {
+    return {
+      ok: true,
+      recovered: false,
+      degraded: false,
+      brokenRefsRemoved: [],
+      shallowBoundaryCommitsAdded: [],
+      error: "",
+    };
+  }
+
+  let fetchError = summarizeGitProcessFailure(fetched);
+  const shallowRepair = await repairWorkspaceShallowBoundaries({
+    workspacePath,
+    commandEnv,
+    runProcessCaptureImpl,
+  });
+  const shallowBoundaryCommitsAdded = shallowRepair.shallowBoundaryCommitsAdded;
+  if (shallowRepair.repaired) {
+    const shallowFetchRetry = await runProcessCaptureImpl("git", ["fetch", "--prune", "origin"], {
+      cwd: workspacePath,
+      env: commandEnv,
+    });
+    if (shallowFetchRetry.ok) {
+      return {
+        ok: true,
+        recovered: true,
+        degraded: false,
+        brokenRefsRemoved: [],
+        shallowBoundaryCommitsAdded,
+        error: "",
+      };
+    }
+    fetchError = summarizeGitProcessFailure(shallowFetchRetry);
+  }
+
+  const brokenRefs = await findBrokenRemoteTrackingRefs({
+    workspacePath,
+    commandEnv,
+    runProcessCaptureImpl,
+  });
+  const brokenRefNames = brokenRefs.map((entry) => entry.refName);
+
+  if (brokenRefs.length > 0) {
+    for (const brokenRef of brokenRefs) {
+      await runProcessCaptureImpl("git", ["update-ref", "-d", brokenRef.refName], {
+        cwd: workspacePath,
+        env: commandEnv,
+      }).catch(() => {});
+    }
+
+    const retriedFetch = await runProcessCaptureImpl("git", ["fetch", "--prune", "origin"], {
+      cwd: workspacePath,
+      env: commandEnv,
+    });
+    if (retriedFetch.ok) {
+      return {
+        ok: true,
+        recovered: true,
+        degraded: false,
+        brokenRefsRemoved: brokenRefNames,
+        shallowBoundaryCommitsAdded,
+        error: "",
+      };
+    }
+
+    const retryError = summarizeGitProcessFailure(retriedFetch);
+    const recoverable = isRecoverableWorkspaceRefRefreshFailure(retryError);
+    return {
+      ok: recoverable,
+      recovered: false,
+      degraded: recoverable,
+      brokenRefsRemoved: brokenRefNames,
+      shallowBoundaryCommitsAdded,
+      error: retryError,
+    };
+  }
+
+  const recoverable = isRecoverableWorkspaceRefRefreshFailure(fetchError);
+  return {
+    ok: recoverable,
+    recovered: false,
+    degraded: recoverable,
+    brokenRefsRemoved: [],
+    shallowBoundaryCommitsAdded,
+    error: fetchError,
+  };
+}
+
 async function ensureWorkspaceRepository({
   workspacePath,
   repository,
@@ -2029,13 +2271,31 @@ async function ensureWorkspaceRepository({
     blockedBranches: [],
   });
 
-  const fetched = await runProcessCapture("git", ["fetch", "--prune", "origin"], {
-    cwd: normalizedWorkspacePath,
-    env: commandEnv,
+  const refreshedRefs = await refreshWorkspaceRemoteRefs({
+    workspacePath: normalizedWorkspacePath,
+    commandEnv,
   });
-  if (!fetched.ok) {
+  if (!refreshedRefs.ok) {
     throw new Error(
-      `Failed to fetch latest workspace refs for ${normalizedRepository}: ${summarizeGitProcessFailure(fetched)}`,
+      `Failed to fetch latest workspace refs for ${normalizedRepository}: ${normalizeText(refreshedRefs.error) || "Workspace ref refresh failed."}`,
+    );
+  }
+  if (refreshedRefs.recovered) {
+    const recoveryDetails = [];
+    if (refreshedRefs.shallowBoundaryCommitsAdded.length > 0) {
+      recoveryDetails.push(`shallow=${refreshedRefs.shallowBoundaryCommitsAdded.join(", ")}`);
+    }
+    if (refreshedRefs.brokenRefsRemoved.length > 0) {
+      recoveryDetails.push(`refs=${refreshedRefs.brokenRefsRemoved.join(", ")}`);
+    }
+    log(
+      "Recovered workspace git metadata",
+      `repository=${normalizedRepository}${recoveryDetails.length > 0 ? ` ${recoveryDetails.join(" ")}` : ""}`,
+    );
+  } else if (refreshedRefs.degraded) {
+    log(
+      "WARN",
+      `Workspace ref refresh failed, continuing with targeted branch fetches | repository=${normalizedRepository} error=${truncate(refreshedRefs.error, 500)}`,
     );
   }
 
@@ -6299,9 +6559,11 @@ export {
   loadCodexSessionStateForExecution,
   clearRecoverableCodexSessionErrorState,
   configureWorkspacePushPolicy,
+  findBrokenRemoteTrackingRefs,
   applyCodeq8CliRuntimeEnv,
   extractAssistantThreadResolutionDirective,
   isInvalidCodexSessionBundleError,
+  isRecoverableWorkspaceRefRefreshFailure,
   isRecoverableCodexTransportFailure,
   isRecoverableCodexResumeFailure,
   isRecoverableCodexSessionErrorState,
@@ -6314,6 +6576,7 @@ export {
   prepareCodeq8Cli,
   prepareChatGptAccountAuth,
   prepareGitHubCliAuth,
+  refreshWorkspaceRemoteRefs,
   syncChatGptAccountAuth,
   validateChatGptAccountAuth,
   readFirstCommitPresentation,
