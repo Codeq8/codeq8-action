@@ -127,6 +127,11 @@ export function normalizeGitHubActionsChatRunPayload(value) {
     Array.isArray(normalized.attachments) && normalized.attachments.length > 0
       ? normalized.attachments
       : [];
+  const referencedThreads =
+    Array.isArray(normalized.referenced_threads || normalized.referencedThreads) &&
+    (normalized.referenced_threads || normalized.referencedThreads).length > 0
+      ? normalized.referenced_threads || normalized.referencedThreads
+      : [];
 
   return {
     run_id: normalizeText(normalized.run_id || normalized.runId),
@@ -166,6 +171,10 @@ export function normalizeGitHubActionsChatRunPayload(value) {
     attachments_json:
       normalizeText(normalized.attachments_json || normalized.attachmentsJson) ||
       stringifyJson(attachments),
+    referenced_threads_json:
+      normalizeText(
+        normalized.referenced_threads_json || normalized.referencedThreadsJson,
+      ) || stringifyJson(referencedThreads),
     workspace_path: normalizeText(
       normalized.workspace_path || normalized.workspacePath,
     ),
@@ -278,6 +287,8 @@ export function buildWebChatRunnerEnv({
       normalizedPayload.recent_user_messages_prompt_text,
     CODE_CHAT_RECENT_CHECKS_PROMPT_TEXT:
       normalizedPayload.recent_checks_prompt_text,
+    CODE_CHAT_REFERENCED_THREADS_JSON:
+      normalizedPayload.referenced_threads_json,
     CODE_CHAT_DEFAULT_BRANCH: normalizedPayload.branch_context.default_branch,
     CODE_CHAT_PROTECTED_BRANCHES: stringifyJson(
       normalizedPayload.branch_context.protected_branches,

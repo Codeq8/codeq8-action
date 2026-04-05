@@ -32,6 +32,7 @@ const DEFAULT_GIT_HTTP_LOW_SPEED_TIME = "45";
 const MAX_CONTEXT_MESSAGES = 40;
 const MAX_MESSAGE_CHARS = 2000;
 const MAX_OUTPUT_CHARS = 120000;
+const MAX_REFERENCED_THREAD_MESSAGES = 8;
 const MAX_THREAD_TARGET_RESTARTS = 2;
 const MAX_CHATGPT_ACCOUNT_RECOVERY_ATTEMPTS = 8;
 const MAX_CODEX_RESUME_RECOVERY_ATTEMPTS = 1;
@@ -543,6 +544,109 @@ function parseAttachmentList(value) {
         : [];
   return candidates
     .map((entry) => normalizeAttachmentRecord(entry))
+    .filter(Boolean);
+}
+
+function normalizePromptAttachmentRecord(value) {
+  const normalized = normalizeObject(value);
+  const name = normalizeAttachmentName(
+    normalized.name || normalized.file_name || normalized.fileName || "",
+  );
+  if (!name) {
+    return null;
+  }
+  return { name };
+}
+
+function parsePromptAttachmentList(value) {
+  const candidates =
+    typeof value === "string"
+      ? (() => {
+          try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : Array.isArray(value)
+        ? value
+        : [];
+  return candidates
+    .map((entry) => normalizePromptAttachmentRecord(entry))
+    .filter(Boolean);
+}
+
+function normalizeReferencedThreadMessageRecord(value) {
+  const normalized = normalizeObject(value);
+  const messageId = normalizeText(normalized.message_id || normalized.messageId || "");
+  const role = normalizeText(normalized.role).toLowerCase();
+  const content = truncate(normalizeText(normalized.content), MAX_MESSAGE_CHARS);
+  const attachments = parsePromptAttachmentList(
+    normalized.attachments || normalizeObject(normalized.metadata).attachments || [],
+  );
+  if ((!content && attachments.length === 0) || (role !== "user" && role !== "assistant")) {
+    return null;
+  }
+  return {
+    message_id: messageId,
+    role,
+    content,
+    attachments,
+    created_at: parseTimestampMs(normalized.created_at || normalized.createdAt),
+  };
+}
+
+function normalizeReferencedThreadRecord(value) {
+  const normalized = normalizeObject(value);
+  const threadId = normalizeThreadId(normalized.thread_id || normalized.threadId || "");
+  const repository = normalizeRepository(
+    normalized.workspace_repository || normalized.workspaceRepository || normalized.repository,
+  );
+  if (!threadId || !repository) {
+    return null;
+  }
+  return {
+    thread_id: threadId,
+    workspace_repository: repository,
+    title: normalizeText(normalized.title || ""),
+    source_type: normalizeText(normalized.source_type || normalized.sourceType || ""),
+    branch_context: normalizeThreadBranchContext(
+      normalized.branch_context || normalized.branchContext || {},
+    ),
+    messages: (
+      Array.isArray(normalized.messages) ? normalized.messages : []
+    )
+      .map((entry) => normalizeReferencedThreadMessageRecord(entry))
+      .filter(Boolean)
+      .sort((left, right) => {
+        const leftCreatedAt = parseTimestampMs(left.created_at);
+        const rightCreatedAt = parseTimestampMs(right.created_at);
+        if (leftCreatedAt !== rightCreatedAt) {
+          return leftCreatedAt - rightCreatedAt;
+        }
+        return normalizeText(left.message_id).localeCompare(normalizeText(right.message_id));
+      })
+      .slice(-MAX_REFERENCED_THREAD_MESSAGES),
+  };
+}
+
+function parseReferencedThreadList(value) {
+  const candidates =
+    typeof value === "string"
+      ? (() => {
+          try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : Array.isArray(value)
+        ? value
+        : [];
+  return candidates
+    .map((entry) => normalizeReferencedThreadRecord(entry))
     .filter(Boolean);
 }
 
@@ -3190,6 +3294,48 @@ function buildAttachmentPromptLines(attachments) {
   ];
 }
 
+function buildReferencedThreadPromptLines(referencedThreads) {
+  const normalizedReferencedThreads = Array.isArray(referencedThreads)
+    ? referencedThreads
+    : [];
+  if (normalizedReferencedThreads.length === 0) {
+    return [];
+  }
+
+  const lines = [
+    "",
+    "Referenced Codeq8 threads mentioned in the pending request:",
+  ];
+  for (const thread of normalizedReferencedThreads) {
+    const normalizedThread = normalizeObject(thread);
+    lines.push(
+      `- ${normalizeText(normalizedThread.workspace_repository)} thread ${normalizeText(normalizedThread.thread_id)} | title: ${normalizeText(normalizedThread.title) || "Untitled"} | source: ${normalizeText(normalizedThread.source_type) || "default_branch"} | context branch: ${normalizeText(normalizeObject(normalizedThread.branch_context).context_branch) || "<unknown>"}`,
+    );
+    const threadMessages = Array.isArray(normalizedThread.messages)
+      ? normalizedThread.messages
+      : [];
+    if (threadMessages.length === 0) {
+      lines.push("  Recent messages: none loaded.");
+      continue;
+    }
+    lines.push("  Recent messages (oldest to newest):");
+    for (const message of threadMessages) {
+      const normalizedMessage = normalizeObject(message);
+      const role = normalizeText(normalizedMessage.role).toLowerCase();
+      const speaker = role === "assistant" ? "Codeq8" : "User";
+      const content = truncate(normalizeText(normalizedMessage.content), MAX_MESSAGE_CHARS);
+      const attachments = parsePromptAttachmentList(normalizedMessage.attachments || []);
+      const attachmentSuffix =
+        attachments.length > 0
+          ? ` [attachments: ${attachments.map((entry) => entry.name).join(", ")}]`
+          : "";
+      lines.push(`  ${speaker}: ${content || "(attached files only)"}${attachmentSuffix}`);
+    }
+  }
+
+  return lines;
+}
+
 async function resolveCodeq8Path(commandEnv) {
   const explicit = normalizeText(commandEnv.CODEQ8_PATH || process.env.CODEQ8_PATH);
   if (explicit && (await isExecutableFile(explicit))) {
@@ -3429,11 +3575,12 @@ async function prepareCodeq8Cli({
     };
   }
 
-  const githubToken = resolveWebChatGitHubUserToken(commandEnv);
+  const githubToken = resolveWebChatGitHubWriteToken(commandEnv);
   if (!githubToken) {
     return {
       available: false,
-      reason: "codeq8 CLI is installed, but no GitHub token was available for login.",
+      reason:
+        "codeq8 CLI is installed, but the repository GitHub App token was unavailable for login.",
     };
   }
 
@@ -3996,6 +4143,7 @@ function buildCodexPrompt({
   recentChecksPromptText = "",
   codeq8Cli,
   attachments = [],
+  referencedThreads = [],
 }) {
   const promptLines = Array.isArray(priorMessages)
     ? priorMessages.map((message) => toPromptMessageLine(message)).filter(Boolean)
@@ -4122,7 +4270,7 @@ function buildCodexPrompt({
     lines.push("");
     lines.push("Tooling priority:");
     lines.push(
-      `- The codeq8 CLI is installed and already authenticated for this thread (${normalizeText(threadId)}). Use it as the default interface for Codeq8, GitHub, thread, and run work in this repo.`,
+      `- The codeq8 CLI is installed and authenticated with this run's repository GitHub App token for thread ${normalizeText(threadId)}. Use it as the default interface for Codeq8, GitHub, thread, and run work in this repo.`,
     );
     lines.push(
       "- Before reaching for `gh`, web search, or ad-hoc API calls, check whether `codeq8` already covers the task.",
@@ -4140,7 +4288,7 @@ function buildCodexPrompt({
     lines.push("");
     lines.push("Codeq8 CLI:");
     lines.push(
-      `- The codeq8 CLI is installed and already authenticated for this thread (${normalizeText(threadId)}).`,
+      `- The codeq8 CLI is installed and authenticated with this run's repository GitHub App token for thread ${normalizeText(threadId)}.`,
     );
     lines.push(
       "- Use `codeq8 --help` to discover the available capability buckets.",
@@ -4168,6 +4316,9 @@ function buildCodexPrompt({
     );
     lines.push(
       "- Thread listing, creation, messaging, inspection, and retargeting live under `codeq8 chat thread`; use `codeq8 chat thread --help` to discover the available thread operations.",
+    );
+    lines.push(
+      "- If the user mentions another Codeq8 thread URL or thread id, inspect it with `codeq8 chat thread show <thread-id>` and `codeq8 chat thread messages <thread-id> --json` instead of claiming you cannot read it.",
     );
     lines.push(
       "- Do not guess branch names or PR numbers when retargeting the thread. This does not prevent you from creating a normal git working branch yourself when the branch policy requires one.",
@@ -4209,6 +4360,7 @@ function buildCodexPrompt({
   }
 
   lines.push(...buildAttachmentPromptLines(attachments));
+  lines.push(...buildReferencedThreadPromptLines(referencedThreads));
   const normalizedRecentChecksPromptText = normalizeText(recentChecksPromptText);
   if (normalizedRecentChecksPromptText) {
     lines.push("");
@@ -4231,6 +4383,7 @@ function buildResumePrompt({
   recentUserMessagesPromptText = "",
   recentChecksPromptText = "",
   attachments = [],
+  referencedThreads = [],
   targetShift = null,
 }) {
   const lines = [];
@@ -4296,6 +4449,7 @@ function buildResumePrompt({
   lines.push(...buildThreadResolutionPromptLines());
   lines.push("");
   lines.push(...buildAttachmentPromptLines(attachments));
+  lines.push(...buildReferencedThreadPromptLines(referencedThreads));
   const normalizedRecentUserMessagesPromptText = normalizeText(recentUserMessagesPromptText);
   if (normalizedRecentUserMessagesPromptText) {
     lines.push("");
@@ -5486,6 +5640,9 @@ async function main() {
   const recentChecksPromptText = normalizeText(
     process.env.CODE_CHAT_RECENT_CHECKS_PROMPT_TEXT,
   );
+  const referencedThreads = parseReferencedThreadList(
+    process.env.CODE_CHAT_REFERENCED_THREADS_JSON || "[]",
+  );
   const latestMessageAttachments = parseAttachmentList(
     process.env.CODE_CHAT_ATTACHMENTS_JSON || "[]",
   );
@@ -5875,6 +6032,7 @@ async function main() {
               recentUserMessagesPromptText,
               recentChecksPromptText,
               attachments: materializedAttachments,
+              referencedThreads,
               targetShift: resumeTargetShift ? targetBeforeAttempt : null,
             });
           } else {
@@ -5910,6 +6068,7 @@ async function main() {
               recentChecksPromptText,
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
+              referencedThreads,
             });
           }
         } catch (sessionError) {
