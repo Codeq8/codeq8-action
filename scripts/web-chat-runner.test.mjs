@@ -1,7 +1,20 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 
-import { buildCodexPrompt, buildResumePrompt } from "./web-chat-runner.mjs";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import {
+  buildCodexPrompt,
+  buildPullRequestPresentation,
+  buildResumePrompt,
+} from "./web-chat-runner.mjs";
+
+function git(workspacePath, args) {
+  execFileSync("git", args, { cwd: workspacePath, env: process.env });
+}
 
 test("buildCodexPrompt keeps single-pass work as the default but allows explicit loop-style runs", () => {
   const prompt = buildCodexPrompt({
@@ -136,4 +149,70 @@ test("buildResumePrompt renders thread specs above workspace state and out of th
   assert.ok(prompt.indexOf("Thread spec:") < prompt.indexOf("Runner workspace state before this turn:"));
   assert.match(prompt, /User message:\nkeep going/);
   assert.doesNotMatch(prompt, /User message:\nThread spec:/);
+});
+
+test("buildPullRequestPresentation prefers the thread title and assistant summary", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-pr-presentation-"));
+  try {
+    await fs.writeFile(path.join(workspacePath, "README.md"), "test\n");
+    git(workspacePath, ["init", "-b", "main"]);
+    git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
+    git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
+    git(workspacePath, ["add", "README.md"]);
+    git(workspacePath, ["commit", "-m", "first commit"]);
+    git(workspacePath, ["remote", "add", "origin", workspacePath]);
+    git(workspacePath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(workspacePath, ["checkout", "-b", "feature/thread-title"]);
+    git(workspacePath, ["update-ref", "refs/remotes/origin/feature/thread-title", "HEAD"]);
+    await fs.writeFile(path.join(workspacePath, "README.md"), "updated\n");
+    git(workspacePath, ["add", "README.md"]);
+    git(workspacePath, ["commit", "-m", "second commit", "-m", "commit body"]);
+
+    const presentation = await buildPullRequestPresentation({
+      workspacePath,
+      commandEnv: process.env,
+      branch: "feature/thread-title",
+      baseBranch: "main",
+      threadTitle: "Preserve loop state in thread registry",
+      assistantMessage: "Implemented the thread-registry persistence fix.\n\nAdded tests too.",
+    });
+
+    assert.equal(presentation.title, "Preserve loop state in thread registry");
+    assert.equal(
+      presentation.body,
+      "Implemented the thread-registry persistence fix.\n\nAdded tests too.",
+    );
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("buildPullRequestPresentation falls back to commit presentation when thread summary is blank", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-pr-presentation-fallback-"));
+  try {
+    await fs.writeFile(path.join(workspacePath, "README.md"), "test\n");
+    git(workspacePath, ["init", "-b", "main"]);
+    git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
+    git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
+    git(workspacePath, ["add", "README.md"]);
+    git(workspacePath, ["commit", "-m", "Initial real subject", "-m", "Useful body"]);
+    git(workspacePath, ["remote", "add", "origin", workspacePath]);
+    git(workspacePath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git(workspacePath, ["checkout", "-b", "feature/fallback"]);
+    git(workspacePath, ["update-ref", "refs/remotes/origin/feature/fallback", "HEAD"]);
+
+    const presentation = await buildPullRequestPresentation({
+      workspacePath,
+      commandEnv: process.env,
+      branch: "feature/fallback",
+      baseBranch: "main",
+      threadTitle: "New thread",
+      assistantMessage: "",
+    });
+
+    assert.equal(presentation.title, "Initial real subject");
+    assert.equal(presentation.body, "Useful body");
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
 });

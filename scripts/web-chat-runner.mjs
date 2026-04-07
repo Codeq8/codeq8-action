@@ -5083,6 +5083,50 @@ async function readFirstCommitPresentation({
   };
 }
 
+function isPlaceholderThreadTitle(value) {
+  const normalizedValue = normalizeText(value);
+  if (!normalizedValue) {
+    return true;
+  }
+  return /^new thread$/i.test(normalizedValue);
+}
+
+async function buildPullRequestPresentation({
+  workspacePath,
+  commandEnv,
+  branch,
+  baseBranch,
+  threadTitle = "",
+  assistantMessage = "",
+}) {
+  const headCommitPresentation = await readHeadCommitPresentation({
+    workspacePath,
+    commandEnv,
+  });
+  const firstCommitPresentation = await readFirstCommitPresentation({
+    workspacePath,
+    commandEnv,
+    branch,
+    baseBranch,
+  });
+  const normalizedThreadTitle = normalizeText(threadTitle);
+  const normalizedAssistantMessage = normalizeText(
+    stripLeadingCodexTransportNoise(assistantMessage),
+  );
+  return {
+    title:
+      (!isPlaceholderThreadTitle(normalizedThreadTitle) && normalizedThreadTitle) ||
+      normalizeText(headCommitPresentation.subject) ||
+      normalizeText(firstCommitPresentation.subject) ||
+      "",
+    body:
+      normalizedAssistantMessage ||
+      normalizeText(headCommitPresentation.body) ||
+      normalizeText(firstCommitPresentation.body) ||
+      "",
+  };
+}
+
 async function persistWorkspaceProgress({
   workspacePath,
   commandEnv,
@@ -5095,6 +5139,8 @@ async function persistWorkspaceProgress({
   gitToken = "",
   protectedBranches = [],
   baselineState = null,
+  threadTitle = "",
+  assistantMessage = "",
 }) {
   const normalizedBranch = normalizeBranchName(branch);
   const result = {
@@ -5175,11 +5221,13 @@ async function persistWorkspaceProgress({
       });
 
     if (shouldCreateOrAttachPullRequest) {
-      const pullRequestPresentation = await readFirstCommitPresentation({
+      const pullRequestPresentation = await buildPullRequestPresentation({
         workspacePath,
         commandEnv,
         branch: normalizedBranch,
         baseBranch,
+        threadTitle,
+        assistantMessage,
       });
       const pullRequest = await ensurePullRequest({
         repository,
@@ -6294,6 +6342,8 @@ async function main() {
           gitToken: workspaceGitToken,
           protectedBranches: preparedWorkspace.protectedBranches,
           baselineState: workspacePersistenceState,
+          threadTitle: activeThreadTitle,
+          assistantMessage,
         });
         lastPersistenceSummary = describeWorkspacePersistence({
           branch:
@@ -6576,6 +6626,7 @@ export {
   buildCodexPrompt,
   buildCodexRunMetadata,
   buildGitHubActionsControlPlaneUrl,
+  buildPullRequestPresentation,
   buildFreshPromptHistoryMessages,
   buildResumePrompt,
   captureCodexSessionBundle,
