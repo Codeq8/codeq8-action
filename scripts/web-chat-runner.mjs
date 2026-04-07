@@ -26,10 +26,10 @@ import {
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
 const DEFAULT_CODEX_MODEL = "gpt-5.4";
 const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
+const WEB_CHAT_RUNNER_RUNTIME_CONTRACT_VERSION = "web_chat_runner_runtime_v1";
 const DEFAULT_TIMEOUT_SECONDS = 6 * 60 * 60;
 const DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT = "1";
 const DEFAULT_GIT_HTTP_LOW_SPEED_TIME = "45";
-const MAX_CONTEXT_MESSAGES = 40;
 const MAX_MESSAGE_CHARS = 2000;
 const MAX_OUTPUT_CHARS = 120000;
 const MAX_REFERENCED_THREAD_MESSAGES = 8;
@@ -54,27 +54,6 @@ function normalizeText(value) {
   return String(value || "").trim();
 }
 
-function normalizePromptBlockText(value) {
-  return normalizeText(value).replace(/\r\n/g, "\n");
-}
-
-function stripLeadingThreadSpecPromptText(promptText, threadSpecText) {
-  const normalizedPromptText = normalizePromptBlockText(promptText);
-  const normalizedThreadSpecText = normalizePromptBlockText(threadSpecText);
-  if (!normalizedPromptText || !normalizedThreadSpecText) {
-    return normalizedPromptText;
-  }
-  const threadSpecPrefix = `Thread spec:\n${normalizedThreadSpecText}`;
-  if (normalizedPromptText === threadSpecPrefix) {
-    return "";
-  }
-  if (normalizedPromptText.startsWith(`${threadSpecPrefix}\n\n`)) {
-    return normalizePromptBlockText(
-      normalizedPromptText.slice(threadSpecPrefix.length + 2),
-    );
-  }
-  return normalizedPromptText;
-}
 
 function extractErrorMessage(value, fallback = "") {
   const normalizedFallback = normalizeText(fallback);
@@ -995,6 +974,42 @@ async function requestWorkspaceGitToken({
   }
 
   throw lastError || new Error("Unable to load workspace GitHub write token.");
+}
+
+async function requestWebChatRunnerRuntimeJson({
+  publicBaseUrl,
+  webChatRunToken,
+  path,
+  body,
+}) {
+  const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
+  const normalizedToken = normalizeText(webChatRunToken);
+  if (!normalizedToken || normalizedToken.split(".").length !== 3) {
+    throw new Error(
+      "A scoped CODE_WEB_CHAT_RUN_TOKEN is required for the Codeq8 runner runtime contract.",
+    );
+  }
+
+  const response = await fetchJson(new URL(path, normalizedPublicBaseUrl).toString(), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${normalizedToken}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(body || {}),
+  });
+  const contractVersion = normalizeText(response.payload?.contract_version);
+  if (
+    !response.ok ||
+    response.payload?.ok === false ||
+    contractVersion !== WEB_CHAT_RUNNER_RUNTIME_CONTRACT_VERSION
+  ) {
+    const errorMessage =
+      normalizeText(response.payload?.error || response.payload?.message || response.textBody) ||
+      `Codeq8 runner runtime request failed (${response.status}).`;
+    throw new Error(errorMessage);
+  }
+  return response.payload;
 }
 
 async function applyWorkspaceGitToken({
@@ -1921,27 +1936,6 @@ function shouldEnsurePullRequest({
   return normalizeSourceType(sourceType) === "branch" && meaningfulRepoWork;
 }
 
-function buildRunnerGitOwnershipPromptLines({ branch = "" } = {}) {
-  const normalizedBranch = normalizeBranchName(branch);
-  const remoteBranch = normalizedBranch ? `origin/${normalizedBranch}` : "the remote branch";
-  return [
-    "- The runner will not create commits, push branches, or resolve git divergence for you.",
-    "- If you make repo changes that should be kept, you are responsible for committing and pushing them at the checkpoints that make sense for the user's request, and before you finish.",
-    `- If \`git push\` is rejected because ${remoteBranch} changed, inspect the divergence, merge or rebase deliberately, resolve conflicts, and push again yourself.`,
-    "- If those git conflicts require an unclear product decision, stop and explain the blocker instead of guessing.",
-  ];
-}
-
-function buildLoopStylePromptLines() {
-  return [
-    "- By default, handle the current user request as a normal single-pass run; do not turn it into open-ended loop-style work unless the user clearly asks for that.",
-    "- If the user clearly asks for loop-style or iterative work, you may stay in this run and work through multiple cycles of changes, commits, pushes, checks, and follow-up fixes when that matches the request.",
-    "- If the user asks for loop-style work and the intended loop is unclear, stop and ask the user to clarify before you start making repo changes.",
-    "- When you are working in a requested loop, stop when you hit a real blocker, when the user's goal is satisfied, or when you judge that the loop has reached a sensible stopping point within this run.",
-    "- Do not treat requested loop-style work as permission to create a background or automatically resumed workflow across turns; keep the work bounded to this run unless the user asks again later.",
-  ];
-}
-
 async function currentBranch({ workspacePath, commandEnv }) {
   const branchResult = await runProcessCapture(
     "git",
@@ -2454,60 +2448,6 @@ function isProtectedBranch(branchName, protectedBranches) {
   return protectedBranches.some(
     (entry) => normalizeBranchName(entry).toLowerCase() === normalizedBranch.toLowerCase(),
   );
-}
-
-async function readWebChatMessages({ workerUrl, adminToken, threadId, limit = 40 }) {
-  const response = await workerJsonRequest({
-    workerUrl,
-    adminToken,
-    path: "/web-chat/messages/list",
-    method: "GET",
-    query: new URLSearchParams({
-      thread_id: normalizeText(threadId),
-      limit: String(Math.max(1, Math.min(200, limit))),
-    }),
-  });
-  if (!response.ok || response.payload.ok === false) {
-    throw new Error(
-      extractErrorMessage(response.payload.error) ||
-        `Failed to read web chat messages (${response.status}).`,
-    );
-  }
-  return {
-    thread: normalizeObject(response.payload.thread),
-    messages: Array.isArray(response.payload.messages) ? response.payload.messages : [],
-  };
-}
-
-async function loadWebChatMessages({
-  workerUrl,
-  adminToken,
-  threadId,
-  limit = 40,
-  fallbackThread = null,
-}) {
-  try {
-    return await readWebChatMessages({
-      workerUrl,
-      adminToken,
-      threadId,
-      limit,
-    });
-  } catch (error) {
-    const message = extractErrorMessage(error);
-    if (message !== "web chat thread was not found.") {
-      throw error;
-    }
-    log(
-      "WARN",
-      "Using fallback web chat message context after lookup failure",
-      `thread_id=${normalizeText(threadId)} worker=${normalizeBaseUrl(workerUrl)}`,
-    );
-    return {
-      thread: fallbackThread ? normalizeObject(fallbackThread) : {},
-      messages: [],
-    };
-  }
 }
 
 async function readWebChatAttachment({
@@ -3085,37 +3025,6 @@ async function clearRecoverableCodexSessionErrorState({
   }
 }
 
-function toPromptMessageLine(message) {
-  const normalizedMessage = normalizeObject(message);
-  const role = normalizeText(normalizedMessage.role).toLowerCase();
-  const content = truncate(normalizeText(normalizedMessage.content), MAX_MESSAGE_CHARS);
-  const attachments = parseAttachmentList(
-    normalizeObject(normalizedMessage.metadata).attachments || [],
-  );
-  if ((!content && attachments.length === 0) || (role !== "user" && role !== "assistant")) {
-    return "";
-  }
-  const speaker = role === "assistant" ? "Codeq8" : "User";
-  const attachmentSuffix =
-    attachments.length > 0
-      ? ` [attachments: ${attachments.map((entry) => entry.name).join(", ")}]`
-      : "";
-  return `${speaker}: ${content || "(attached files only)"}${attachmentSuffix}`;
-}
-
-function buildFreshPromptHistoryMessages({ messages, currentMessageId }) {
-  const normalizedCurrentMessageId = normalizeText(currentMessageId);
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return [];
-  }
-  return messages
-    .filter(
-      (message) =>
-        normalizeText(normalizeObject(message).message_id) !== normalizedCurrentMessageId,
-    )
-    .slice(-MAX_CONTEXT_MESSAGES);
-}
-
 function sanitizeAttachmentFileName(value) {
   const normalized = normalizeAttachmentName(value);
   return normalized.replace(/\s+/g, "-");
@@ -3156,66 +3065,6 @@ async function materializeWebChatAttachments({
     });
   }
   return materialized;
-}
-
-function buildAttachmentPromptLines(attachments) {
-  const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
-  if (normalizedAttachments.length === 0) {
-    return [];
-  }
-
-  return [
-    "",
-    "Files attached to the latest user request:",
-    ...normalizedAttachments.map((attachment) => {
-      const sizeSuffix = attachment.size_bytes > 0 ? `, ${attachment.size_bytes} bytes` : "";
-      return `- ${attachment.name} (${attachment.content_type || "application/octet-stream"}${sizeSuffix}) at ${attachment.local_path}`;
-    }),
-    "- Inspect these files directly if they are relevant to the request.",
-    "- Do not modify or delete the attached files.",
-  ];
-}
-
-function buildReferencedThreadPromptLines(referencedThreads) {
-  const normalizedReferencedThreads = Array.isArray(referencedThreads)
-    ? referencedThreads
-    : [];
-  if (normalizedReferencedThreads.length === 0) {
-    return [];
-  }
-
-  const lines = [
-    "",
-    "Referenced Codeq8 threads mentioned in the pending request:",
-  ];
-  for (const thread of normalizedReferencedThreads) {
-    const normalizedThread = normalizeObject(thread);
-    lines.push(
-      `- ${normalizeText(normalizedThread.workspace_repository)} thread ${normalizeText(normalizedThread.thread_id)} | title: ${normalizeText(normalizedThread.title) || "Untitled"} | source: ${normalizeText(normalizedThread.source_type) || "default_branch"} | context branch: ${normalizeText(normalizeObject(normalizedThread.branch_context).context_branch) || "<unknown>"}`,
-    );
-    const threadMessages = Array.isArray(normalizedThread.messages)
-      ? normalizedThread.messages
-      : [];
-    if (threadMessages.length === 0) {
-      lines.push("  Recent messages: none loaded.");
-      continue;
-    }
-    lines.push("  Recent messages (oldest to newest):");
-    for (const message of threadMessages) {
-      const normalizedMessage = normalizeObject(message);
-      const role = normalizeText(normalizedMessage.role).toLowerCase();
-      const speaker = role === "assistant" ? "Codeq8" : "User";
-      const content = truncate(normalizeText(normalizedMessage.content), MAX_MESSAGE_CHARS);
-      const attachments = parsePromptAttachmentList(normalizedMessage.attachments || []);
-      const attachmentSuffix =
-        attachments.length > 0
-          ? ` [attachments: ${attachments.map((entry) => entry.name).join(", ")}]`
-          : "";
-      lines.push(`  ${speaker}: ${content || "(attached files only)"}${attachmentSuffix}`);
-    }
-  }
-
-  return lines;
 }
 
 async function resolveCodeq8Path(commandEnv) {
@@ -4013,14 +3862,17 @@ async function finalizeChatGptAccountAuth({
   };
 }
 
-function buildCodexPrompt({
+async function buildCodexPrompt({
+  publicBaseUrl,
+  webChatRunToken,
   repository,
   threadTitle,
   threadId,
+  runId,
+  messageId,
   sourceType,
   branchContext,
   workspacePersistenceState = null,
-  priorMessages,
   threadSpecText = "",
   promptText,
   recentChecksPromptText = "",
@@ -4028,246 +3880,44 @@ function buildCodexPrompt({
   attachments = [],
   referencedThreads = [],
 }) {
-  const promptLines = Array.isArray(priorMessages)
-    ? priorMessages.map((message) => toPromptMessageLine(message)).filter(Boolean)
-    : [];
-  const normalizedSourceType = normalizeText(sourceType).toLowerCase();
-  const protectedBranches = parseBranchList(branchContext.protected_branches || []);
-  const promptBaseBranch =
-    normalizeText(branchContext.pull_request_base_branch) ||
-    normalizeText(branchContext.base_branch) ||
-    normalizeText(branchContext.default_branch);
-  const currentWorkingBranch =
-    normalizeText(workspacePersistenceState?.branch) ||
-    normalizeText(branchContext.pull_request_head_branch) ||
-    normalizeText(branchContext.write_branch) ||
-    normalizeText(branchContext.context_branch);
-  const normalizedThreadSpecText = normalizePromptBlockText(threadSpecText);
-  const normalizedPromptText = stripLeadingThreadSpecPromptText(
-    promptText,
-    normalizedThreadSpecText,
-  );
-  const lines = [
-    "You are Codex responding inside the Codeq8 web chat runner.",
-    `Workspace repository: ${normalizeText(repository)}.`,
-    `Thread title: ${normalizeText(threadTitle) || "New thread"}.`,
-    `Thread source type: ${normalizeText(sourceType) || "default_branch"}.`,
-    `Context branch: ${normalizeText(branchContext.context_branch) || "<unknown>"}.`,
-    `Write mode: ${normalizeText(branchContext.write_mode) || "<unknown>"}.`,
-    `Working branch: ${normalizeText(branchContext.write_branch) || "<none yet>"}.`,
-    `Base branch: ${normalizeText(branchContext.base_branch) || "<none>"}.`,
-    `Default branch: ${normalizeText(branchContext.default_branch) || "<unknown>"}.`,
-    `Protected branches: ${protectedBranches.length > 0 ? protectedBranches.join(", ") : "<none>"}.`,
-  ];
-
-  if (normalizeText(branchContext.production_branch)) {
-    lines.push(`Production branch: ${normalizeText(branchContext.production_branch)}.`);
+  const payload = await requestWebChatRunnerRuntimeJson({
+    publicBaseUrl,
+    webChatRunToken,
+    path: "/api/chat/runs/prompt",
+    body: {
+      mode: "fresh",
+      workspace_repository: normalizeText(repository),
+      thread_id: normalizeText(threadId),
+      run_id: normalizeText(runId),
+      message_id: normalizeText(messageId),
+      thread_title: normalizeText(threadTitle),
+      source_type: normalizeText(sourceType),
+      branch_context: normalizeObject(branchContext),
+      workspace_persistence_state: workspacePersistenceState || null,
+      thread_spec_text: normalizeText(threadSpecText),
+      prompt_text: normalizeText(promptText),
+      recent_user_messages_prompt_text: "",
+      recent_checks_prompt_text: normalizeText(recentChecksPromptText),
+      attachments: Array.isArray(attachments) ? attachments : [],
+      referenced_threads: Array.isArray(referencedThreads) ? referencedThreads : [],
+      codeq8_cli_available: Boolean(codeq8Cli?.available),
+      target_shift: false,
+    },
+  });
+  const prompt = normalizeText(payload.prompt);
+  if (!prompt) {
+    throw new Error("Codeq8 returned an empty runner prompt.");
   }
-  if (branchContext.pull_request_number > 0) {
-    lines.push(`Linked pull request: #${branchContext.pull_request_number}.`);
-  }
-  if (normalizeText(branchContext.pull_request_url)) {
-    lines.push(`Pull request URL: ${normalizeText(branchContext.pull_request_url)}.`);
-  }
-
-  if (normalizedThreadSpecText) {
-    lines.push("");
-    lines.push("Thread spec:");
-    lines.push(normalizedThreadSpecText);
-  }
-
-  lines.push("");
-  lines.push("Branch policy instructions:");
-  if (normalizeText(branchContext.write_mode) === "branch_and_pr") {
-    lines.push(
-      `- Never push directly to ${normalizeText(branchContext.base_branch) || normalizeText(branchContext.default_branch)} or any protected branch.`,
-    );
-    if (normalizeBranchName(branchContext.write_branch)) {
-      lines.push(
-        `- This thread is already associated with branch ${normalizeText(branchContext.write_branch)}; keep working there unless you intentionally switch the thread to a different branch.`,
-      );
-      lines.push(
-        `- Treat changes for ${normalizeText(branchContext.base_branch) || normalizeText(branchContext.default_branch)} as pull-request work on ${normalizeText(branchContext.write_branch)}; do not treat the protected base branch as a blocker.`,
-      );
-    } else {
-      lines.push(
-        `- Start from the checked-out context branch ${normalizeText(workspacePersistenceState?.branch) || normalizeText(branchContext.context_branch) || normalizeText(branchContext.base_branch) || normalizeText(branchContext.default_branch)}.`,
-      );
-      lines.push(
-        `- Treat changes for ${normalizeText(branchContext.base_branch) || normalizeText(branchContext.default_branch)} as pull-request work; if the task needs repo changes, branch first instead of stopping because the base branch is protected.`,
-      );
-      lines.push(
-        "- Before making repo changes, create and switch to a normal git branch with a human-readable name.",
-      );
-      lines.push(
-        "- Do the work on that branch and push it at the checkpoints that make sense for the user's request, and before you finish, so the runner can remember it for this thread and open or update the PR.",
-      );
-    }
-  } else {
-    lines.push(`- Writes are allowed directly on ${normalizeText(branchContext.write_branch)}.`);
-    lines.push(
-      `- Keep working on the checked-out branch ${normalizeText(workspacePersistenceState?.branch) || normalizeText(branchContext.write_branch) || normalizeText(branchContext.context_branch)}.`,
-    );
-  }
-  if (normalizedSourceType === "pull_request") {
-    lines.push(
-      `- This thread is pinned to PR #${branchContext.pull_request_number || "?"}; keep working on the PR head branch ${normalizeText(branchContext.pull_request_head_branch) || normalizeText(branchContext.context_branch)}.`,
-    );
-    lines.push(
-      `- If the user asks to merge or rebase ${normalizeText(branchContext.pull_request_base_branch) || normalizeText(branchContext.base_branch) || normalizeText(branchContext.default_branch)} into this PR, do that on the checked-out PR head branch. Do not retarget the thread and do not switch to the base branch.`,
-    );
-  }
-  if (
-    promptBaseBranch &&
-    currentWorkingBranch &&
-    normalizeBranchName(promptBaseBranch) &&
-    normalizeBranchName(currentWorkingBranch) &&
-    normalizeBranchName(promptBaseBranch) !== normalizeBranchName(currentWorkingBranch) &&
-    ((normalizeText(branchContext.write_mode) === "branch_and_pr" &&
-      Boolean(normalizeBranchName(branchContext.write_branch))) ||
-      normalizedSourceType === "pull_request")
-  ) {
-    lines.push(
-      `- Keep working on ${currentWorkingBranch}; do not merge or rebase ${promptBaseBranch} into it unless the user explicitly asks for that branch update.`,
-    );
-  }
-  lines.push(
-    "- Normal git commits and pushes on the checked-out working branch are allowed when they match the thread policy.",
-  );
-  lines.push(
-    "- Never push the base branch, default branch, or any protected branch directly.",
-  );
-  lines.push(...buildLoopStylePromptLines());
-  lines.push(
-    "- If you make repo changes that should be kept, create normal git commits with concise human-readable subjects at the checkpoints that make sense for the user's request, and make sure kept work is committed before you finish.",
-  );
-  lines.push(
-    ...buildRunnerGitOwnershipPromptLines({
-      branch:
-        workspacePersistenceState?.branch ||
-        branchContext.write_branch ||
-        branchContext.pull_request_head_branch ||
-        branchContext.context_branch,
-    }),
-  );
-  lines.push(
-    "- If the user asks whether changes were pushed, answer from the runner workspace state below, not from stale memory about earlier local-only changes.",
-  );
-  lines.push(
-    "- Prefer already-fetched local refs like origin/main over repeated remote verification when they are sufficient for the task.",
-  );
-  lines.push(
-    "- Any remote git command must be bounded and attempted at most once. If fetch or ls-remote stalls or times out, stop and report the blocker instead of waiting indefinitely.",
-  );
-  lines.push("- Provide a concise final answer describing what changed or what blocked the work.");
-  if (codeq8Cli?.available) {
-    lines.push("");
-    lines.push("Tooling priority:");
-    lines.push(
-      `- The codeq8 CLI is installed and authenticated with this run's repository GitHub App token for thread ${normalizeText(threadId)}. Use it as the default interface for Codeq8, GitHub, thread, and run work in this repo.`,
-    );
-    lines.push(
-      "- Before reaching for `gh`, web search, or ad-hoc API calls, check whether `codeq8` already covers the task.",
-    );
-    lines.push(
-      "- If an equivalent `codeq8` command exists, use `codeq8` first and treat bypassing it as a mistake.",
-    );
-    lines.push(
-      "- Do not treat missing `gh` auth as a blocker until you have checked the equivalent `codeq8` command.",
-    );
-  }
-  if (codeq8Cli?.available) {
-    lines.push("");
-    lines.push("Codeq8 CLI:");
-    lines.push(
-      `- The codeq8 CLI is installed and authenticated with this run's repository GitHub App token for thread ${normalizeText(threadId)}.`,
-    );
-    lines.push(
-      "- Use `codeq8 --help` to discover the available capability buckets.",
-    );
-    lines.push(
-      "- Use `codeq8 github --help`, `codeq8 chat --help`, `codeq8 run --help`, and `codeq8 repo --help` to inspect what exists in each bucket.",
-    );
-    lines.push(
-      "- Use deeper help like `codeq8 github issue --help`, `codeq8 github pr --help`, or `codeq8 chat thread --help` to learn exact syntax before invoking a command you have not used yet.",
-    );
-    lines.push(
-      "- Prefer the Codeq8 CLI over gh when equivalent functionality exists there.",
-    );
-    lines.push(
-      "- All GitHub issue and pull request interactions should go through `codeq8 github`.",
-    );
-    lines.push(
-      "- When the user asks you to inspect or act on a GitHub issue, pull request, or GitHub URL, start with `codeq8 github` instead of web search or `gh`.",
-    );
-    lines.push(
-      "- GitHub issue and pull request operations live under `codeq8 github`.",
-    );
-    lines.push(
-      "- For checks, runs, and execution history, inspect `codeq8 run --help` before falling back to other tooling.",
-    );
-    lines.push(
-      "- Thread listing, creation, messaging, inspection, and retargeting live under `codeq8 chat thread`; use `codeq8 chat thread --help` to discover the available thread operations.",
-    );
-    lines.push(
-      "- If the user mentions another Codeq8 thread URL or thread id, inspect it with `codeq8 chat thread show <thread-id>` and `codeq8 chat thread messages <thread-id> --json` instead of claiming you cannot read it.",
-    );
-    lines.push(
-      "- Do not guess branch names or PR numbers when retargeting the thread. This does not prevent you from creating a normal git working branch yourself when the branch policy requires one.",
-    );
-    lines.push(
-      "- If you retarget the thread, do not make repository changes in the old context. Stop immediately after the thread target update and briefly note what changed; the runner will restart this same user request on the new branch or PR context.",
-    );
-  }
-
-  if (workspacePersistenceState) {
-    lines.push("");
-    lines.push("Runner workspace state before this turn:");
-    lines.push(
-      `- Checked-out branch: ${normalizeText(workspacePersistenceState.branch) || "<unknown>"}.`,
-    );
-    lines.push(
-      workspacePersistenceState.hasWorkingTreeChanges
-        ? "- The working tree currently has local modifications."
-        : "- The working tree is currently clean.",
-    );
-    if (workspacePersistenceState.hasRemoteBranch) {
-      lines.push(
-        workspacePersistenceState.aheadCount > 0
-          ? `- There are ${workspacePersistenceState.aheadCount} local commit(s) ahead of origin/${normalizeText(workspacePersistenceState.branch)}.`
-          : `- There are no local commits ahead of origin/${normalizeText(workspacePersistenceState.branch)}.`,
-      );
-    } else {
-      lines.push("- The working branch does not exist on origin yet.");
-    }
-    lines.push(
-      "- This current runner workspace state overrides any earlier statement you made about changes being only local or already pushed.",
-    );
-  }
-
-  if (promptLines.length > 0) {
-    lines.push("");
-    lines.push("Prior chat context (oldest to newest):");
-    lines.push(...promptLines);
-  }
-
-  lines.push(...buildAttachmentPromptLines(attachments));
-  lines.push(...buildReferencedThreadPromptLines(referencedThreads));
-  const normalizedRecentChecksPromptText = normalizeText(recentChecksPromptText);
-  if (normalizedRecentChecksPromptText) {
-    lines.push("");
-    lines.push(...normalizedRecentChecksPromptText.split(/\r?\n/g));
-  }
-
-  lines.push("");
-  lines.push("User message:");
-  lines.push(normalizedPromptText || "(no prompt text)");
-
-  return lines.join("\n").trim();
+  return prompt;
 }
 
-function buildResumePrompt({
+async function buildResumePrompt({
+  publicBaseUrl,
+  webChatRunToken,
   repository = "",
+  threadId = "",
+  runId = "",
+  messageId = "",
   sourceType = "",
   branchContext = {},
   workspacePersistenceState = null,
@@ -4279,94 +3929,35 @@ function buildResumePrompt({
   referencedThreads = [],
   targetShift = null,
 }) {
-  const normalizedThreadSpecText = normalizePromptBlockText(threadSpecText);
-  const normalizedPromptText = stripLeadingThreadSpecPromptText(
-    promptText,
-    normalizedThreadSpecText,
-  );
-  const lines = [];
-  if (targetShift) {
-    lines.push("Thread context update:");
-    lines.push(
-      `- Continue this same conversation in ${normalizeText(repository) || "the current repository"}.`,
-    );
-    if (normalizeText(sourceType).toLowerCase() === "pull_request") {
-      lines.push(
-        `- The thread is now pinned to PR #${branchContext.pull_request_number || "?"} on head branch ${normalizeText(branchContext.pull_request_head_branch) || normalizeText(branchContext.context_branch)} with base ${normalizeText(branchContext.pull_request_base_branch) || normalizeText(branchContext.base_branch) || normalizeText(branchContext.default_branch)}.`,
-      );
-    } else if (normalizeText(branchContext.context_branch)) {
-      lines.push(
-        `- The thread now targets branch ${normalizeText(branchContext.context_branch)}.`,
-      );
-    }
-    lines.push(
-      "- Do not use the previous branch target. Continue from the existing conversation state with this updated thread target.",
-    );
-    lines.push("");
+  const payload = await requestWebChatRunnerRuntimeJson({
+    publicBaseUrl,
+    webChatRunToken,
+    path: "/api/chat/runs/prompt",
+    body: {
+      mode: "resume",
+      workspace_repository: normalizeText(repository),
+      thread_id: normalizeText(threadId),
+      run_id: normalizeText(runId),
+      message_id: normalizeText(messageId),
+      thread_title: "",
+      source_type: normalizeText(sourceType),
+      branch_context: normalizeObject(branchContext),
+      workspace_persistence_state: workspacePersistenceState || null,
+      thread_spec_text: normalizeText(threadSpecText),
+      prompt_text: normalizeText(promptText),
+      recent_user_messages_prompt_text: normalizeText(recentUserMessagesPromptText),
+      recent_checks_prompt_text: normalizeText(recentChecksPromptText),
+      attachments: Array.isArray(attachments) ? attachments : [],
+      referenced_threads: Array.isArray(referencedThreads) ? referencedThreads : [],
+      codeq8_cli_available: false,
+      target_shift: Boolean(targetShift),
+    },
+  });
+  const prompt = normalizeText(payload.prompt);
+  if (!prompt) {
+    throw new Error("Codeq8 returned an empty runner prompt.");
   }
-  if (normalizedThreadSpecText) {
-    lines.push("Thread spec:");
-    lines.push(normalizedThreadSpecText);
-    lines.push("");
-  }
-  if (workspacePersistenceState) {
-    lines.push("Runner workspace state before this turn:");
-    lines.push(
-      `- Checked-out branch: ${normalizeText(workspacePersistenceState.branch) || "<unknown>"}.`,
-    );
-    lines.push(
-      workspacePersistenceState.hasWorkingTreeChanges
-        ? "- The working tree currently has local modifications."
-        : "- The working tree is currently clean.",
-    );
-    if (workspacePersistenceState.hasRemoteBranch) {
-      lines.push(
-        workspacePersistenceState.aheadCount > 0
-          ? `- There are ${workspacePersistenceState.aheadCount} local commit(s) ahead of origin/${normalizeText(workspacePersistenceState.branch)}.`
-          : `- There are no local commits ahead of origin/${normalizeText(workspacePersistenceState.branch)}.`,
-      );
-    } else {
-      lines.push("- The working branch does not exist on origin yet.");
-    }
-    lines.push(
-      "- Normal git commits and pushes on the checked-out working branch are allowed when they match the thread policy.",
-    );
-    lines.push(
-      "- If you make repo changes that should be kept, create normal git commits with concise human-readable subjects at the checkpoints that make sense for the user's request, and make sure kept work is committed before you finish.",
-    );
-    lines.push(...buildLoopStylePromptLines());
-    lines.push(
-      ...buildRunnerGitOwnershipPromptLines({
-        branch:
-          workspacePersistenceState.branch ||
-          branchContext.write_branch ||
-          branchContext.pull_request_head_branch ||
-          branchContext.context_branch,
-      }),
-    );
-    lines.push(
-      "- This current runner workspace state overrides any earlier statement you made about changes being only local or already pushed.",
-    );
-    lines.push("");
-  }
-  lines.push("");
-  lines.push(...buildAttachmentPromptLines(attachments));
-  lines.push(...buildReferencedThreadPromptLines(referencedThreads));
-  const normalizedRecentUserMessagesPromptText = normalizeText(recentUserMessagesPromptText);
-  if (normalizedRecentUserMessagesPromptText) {
-    lines.push("");
-    lines.push(...normalizedRecentUserMessagesPromptText.split(/\r?\n/g));
-  }
-  const normalizedRecentChecksPromptText = normalizeText(recentChecksPromptText);
-  if (normalizedRecentChecksPromptText) {
-    lines.push("");
-    lines.push(...normalizedRecentChecksPromptText.split(/\r?\n/g));
-  }
-  lines.push("");
-  lines.push("User message:");
-  lines.push(normalizedPromptText || "(no prompt text)");
-
-  return lines.join("\n").trim();
+  return prompt;
 }
 
 async function resolveCodexPath(commandEnv) {
@@ -5083,15 +4674,12 @@ async function readFirstCommitPresentation({
   };
 }
 
-function isPlaceholderThreadTitle(value) {
-  const normalizedValue = normalizeText(value);
-  if (!normalizedValue) {
-    return true;
-  }
-  return /^new thread$/i.test(normalizedValue);
-}
-
 async function buildPullRequestPresentation({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
   workspacePath,
   commandEnv,
   branch,
@@ -5110,30 +4698,37 @@ async function buildPullRequestPresentation({
     baseBranch,
   });
   const normalizedThreadTitle = normalizeText(threadTitle);
-  const normalizedAssistantMessage = normalizeText(
-    stripLeadingCodexTransportNoise(assistantMessage),
-  );
+  const payload = await requestWebChatRunnerRuntimeJson({
+    publicBaseUrl,
+    webChatRunToken,
+    path: "/api/chat/runs/pull-request-presentation",
+    body: {
+      workspace_repository: normalizeText(workspaceRepository),
+      thread_id: normalizeText(threadId),
+      run_id: normalizeText(runId),
+      thread_title: normalizedThreadTitle,
+      assistant_message: normalizeText(assistantMessage),
+      head_commit: headCommitPresentation,
+      first_commit: firstCommitPresentation,
+    },
+  });
   return {
-    title:
-      (!isPlaceholderThreadTitle(normalizedThreadTitle) && normalizedThreadTitle) ||
-      normalizeText(headCommitPresentation.subject) ||
-      normalizeText(firstCommitPresentation.subject) ||
-      "",
-    body:
-      normalizedAssistantMessage ||
-      normalizeText(headCommitPresentation.body) ||
-      normalizeText(firstCommitPresentation.body) ||
-      "",
+    title: normalizeText(payload.title),
+    body: normalizeText(payload.body),
   };
 }
 
 async function persistWorkspaceProgress({
+  publicBaseUrl,
+  webChatRunToken,
   workspacePath,
   commandEnv,
   sourceType = "",
   branch,
   writeMode = "",
   repository = "",
+  threadId = "",
+  runId = "",
   headRepository = "",
   baseBranch = "",
   gitToken = "",
@@ -5217,11 +4812,16 @@ async function persistWorkspaceProgress({
         sourceType,
         writeMode,
         hasBranchChangesForReview,
-        meaningfulRepoWork,
+      meaningfulRepoWork,
       });
 
     if (shouldCreateOrAttachPullRequest) {
       const pullRequestPresentation = await buildPullRequestPresentation({
+        publicBaseUrl,
+        webChatRunToken,
+        workspaceRepository: repository,
+        threadId,
+        runId,
         workspacePath,
         commandEnv,
         branch: normalizedBranch,
@@ -5234,7 +4834,7 @@ async function persistWorkspaceProgress({
         headRepository: headRepository || repository,
         headBranch: normalizedBranch,
         baseBranch,
-        title: pullRequestPresentation.subject,
+        title: pullRequestPresentation.title,
         body: pullRequestPresentation.body,
         token: gitToken,
       });
@@ -5938,8 +5538,13 @@ async function main() {
                 normalizeText(codexSessionState.target_signature) &&
                 normalizeText(codexSessionState.target_signature) !== currentTargetSignature
               );
-            prompt = buildResumePrompt({
+            prompt = await buildResumePrompt({
+              publicBaseUrl,
+              webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
               repository: activeWorkspaceRepository,
+              threadId,
+              runId,
+              messageId,
               sourceType: activeSourceType,
               branchContext: activeBranchContext,
               workspacePersistenceState,
@@ -5952,34 +5557,18 @@ async function main() {
               targetShift: resumeTargetShift ? targetBeforeAttempt : null,
             });
           } else {
-            let conversation;
-            try {
-              conversation = await loadWebChatMessages({
-                workerUrl,
-                adminToken,
-                threadId,
-                limit: MAX_CONTEXT_MESSAGES,
-                fallbackThread: thread,
-              });
-            } catch (error) {
-              throw new Error(
-                `Failed to load web chat message history: ${
-                  extractErrorMessage(error)
-                }`,
-              );
-            }
             executionMode = "fresh";
-            prompt = buildCodexPrompt({
+            prompt = await buildCodexPrompt({
+              publicBaseUrl,
+              webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
               repository: activeWorkspaceRepository,
               threadTitle: activeThreadTitle,
               threadId,
+              runId,
+              messageId,
               sourceType: activeSourceType,
               branchContext: activeBranchContext,
               workspacePersistenceState,
-              priorMessages: buildFreshPromptHistoryMessages({
-                messages: conversation.messages,
-                currentMessageId: messageId,
-              }),
               threadSpecText,
               promptText,
               recentChecksPromptText,
@@ -6331,12 +5920,16 @@ async function main() {
         workspaceGitTokenSource =
           normalizeText(refreshedWorkspaceGitToken.tokenSource) || workspaceGitTokenSource;
         const persistenceResult = await persistWorkspaceProgress({
+          publicBaseUrl,
+          webChatRunToken: resolveWebChatRunToken(commandEnv),
           workspacePath: preparedWorkspace.workspacePath,
           commandEnv,
           sourceType: activeSourceType,
           branch: finalBranch,
           writeMode: activeBranchContext.write_mode,
           repository: activeWorkspaceRepository,
+          threadId,
+          runId,
           headRepository: preparedWorkspace.cloneRepository,
           baseBranch: preparedWorkspace.baseBranch,
           gitToken: workspaceGitToken,
@@ -6627,7 +6220,6 @@ export {
   buildCodexRunMetadata,
   buildGitHubActionsControlPlaneUrl,
   buildPullRequestPresentation,
-  buildFreshPromptHistoryMessages,
   buildResumePrompt,
   captureCodexSessionBundle,
   checkoutPreparedWorkspaceBranch,
