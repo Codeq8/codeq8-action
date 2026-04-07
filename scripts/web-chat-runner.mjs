@@ -1906,134 +1906,6 @@ function resolveReviewBaseBranch({ sourceType, branchContext }) {
   return normalizedContextBranch || normalizedDefaultBranch;
 }
 
-function buildThreadUrl({ publicBaseUrl, repository, threadId }) {
-  const normalizedRepository = normalizeText(repository);
-  const normalizedThreadId = normalizeText(threadId);
-  if (!normalizedRepository || !normalizedThreadId) {
-    return "";
-  }
-
-  const [owner = "", repo = ""] = normalizedRepository.split("/", 2);
-  if (!owner || !repo) {
-    return "";
-  }
-
-  const base = normalizeCodePublicBaseUrl(publicBaseUrl);
-  return new URL(
-    `/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/thread/${encodeURIComponent(
-      normalizedThreadId,
-    )}`,
-    base,
-  ).toString();
-}
-
-function readThreadOriginIssue(thread) {
-  const normalizedRepository = normalizeRepository(thread?.workspace_repository);
-  const githubContext = normalizeObject(thread?.github_context);
-  const originIssue = normalizeObject(githubContext.origin_issue || githubContext.originIssue);
-  const issueRepository = normalizeRepository(originIssue.repository || normalizedRepository);
-  const issueNumber = parsePositiveInteger(
-    originIssue.number || originIssue.issue_number || originIssue.issueNumber,
-    0,
-  );
-  if (!normalizedRepository || !issueRepository || !issueNumber) {
-    return null;
-  }
-  if (issueRepository.toLowerCase() !== normalizedRepository.toLowerCase()) {
-    return null;
-  }
-  return {
-    repository: issueRepository,
-    number: issueNumber,
-  };
-}
-
-function normalizeThreadResolutionDirective(value) {
-  const normalized = normalizeText(value).toLowerCase();
-  return normalized === "closes" || normalized === "references" ? normalized : "";
-}
-
-function parsePullRequestBodyThreadDirective(body = "") {
-  const normalizedBody = String(body || "");
-  const threadLinkMatch = normalizedBody.match(/\[Codeq8 thread\]\((https?:\/\/[^\s)]+)\)/i);
-  const closeDirectiveMatch = normalizedBody.match(
-    /^\s*Closes Codeq8 thread:\s*(https?:\/\/\S+)\s*$/im,
-  );
-  if (closeDirectiveMatch?.[1]) {
-    return {
-      threadResolution: "closes",
-      threadUrl: normalizeText(closeDirectiveMatch[1]),
-    };
-  }
-  const referenceDirectiveMatch = normalizedBody.match(
-    /^\s*References Codeq8 thread:\s*(https?:\/\/\S+)\s*$/im,
-  );
-  if (referenceDirectiveMatch?.[1]) {
-    return {
-      threadResolution: "references",
-      threadUrl: normalizeText(referenceDirectiveMatch[1]),
-    };
-  }
-  return {
-    threadResolution: "",
-    threadUrl: normalizeText(threadLinkMatch?.[1] || ""),
-  };
-}
-
-function shouldUpdateManagedPullRequestBody({ existingBody, threadUrl }) {
-  const normalizedThreadUrl = normalizeText(threadUrl);
-  const normalizedExistingBody = normalizeText(existingBody);
-  if (!normalizedExistingBody) {
-    return true;
-  }
-  const directive = parsePullRequestBodyThreadDirective(normalizedExistingBody);
-  if (!directive.threadUrl) {
-    return false;
-  }
-  if (!normalizedThreadUrl) {
-    return true;
-  }
-  return directive.threadUrl === normalizedThreadUrl;
-}
-
-function extractAssistantThreadResolutionDirective(output = "") {
-  const rawOutput = stripLeadingCodexTransportNoise(output);
-  const match = rawOutput.match(
-    /(?:^|\r?\n)\s*Codeq8-Thread-Resolution:\s*(closes|references)\s*$/i,
-  );
-  if (!match) {
-    return {
-      assistantMessage: normalizeText(rawOutput),
-      threadResolution: "",
-    };
-  }
-  const matchIndex = typeof match.index === "number" ? match.index : rawOutput.length;
-  return {
-    assistantMessage: rawOutput.slice(0, matchIndex).trimEnd(),
-    threadResolution: normalizeThreadResolutionDirective(match[1]),
-  };
-}
-
-function buildPullRequestBody(threadUrl = "", threadResolution = "references", originIssue = null) {
-  const normalizedThreadUrl = normalizeText(threadUrl);
-  if (!normalizedThreadUrl) {
-    return "";
-  }
-  const normalizedResolution =
-    normalizeThreadResolutionDirective(threadResolution) || "references";
-  const directiveLine =
-    normalizedResolution === "closes"
-      ? `Closes Codeq8 thread: ${normalizedThreadUrl}`
-      : `References Codeq8 thread: ${normalizedThreadUrl}`;
-  const issueDirectiveLine =
-    originIssue && parsePositiveInteger(originIssue.number, 0) > 0
-      ? `${normalizedResolution === "closes" ? "Closes" : "Refs"} #${parsePositiveInteger(originIssue.number, 0)}`
-      : "";
-  return [`[Codeq8 thread](${normalizedThreadUrl})`, directiveLine, issueDirectiveLine]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
 function shouldEnsurePullRequest({
   sourceType = "",
   writeMode = "",
@@ -2047,18 +1919,6 @@ function shouldEnsurePullRequest({
     return true;
   }
   return normalizeSourceType(sourceType) === "branch" && meaningfulRepoWork;
-}
-
-function buildThreadResolutionPromptLines() {
-  return [
-    "Thread merge-resolution instructions:",
-    "- If you keep repo changes that should land through a pull request, decide whether merging that PR should close this thread.",
-    "- If merging the PR should close this thread, end your final answer with exactly: Codeq8-Thread-Resolution: closes",
-    "- If the PR is partial or follow-up work and this thread should stay open after merge, end your final answer with exactly: Codeq8-Thread-Resolution: references",
-    "- Put that trailer on its own final line.",
-    "- Omit the trailer when no PR-worthy repo changes were kept.",
-    "- Do not mention the trailer anywhere else.",
-  ];
 }
 
 function buildRunnerGitOwnershipPromptLines({ branch = "" } = {}) {
@@ -4316,8 +4176,6 @@ function buildCodexPrompt({
       "- Do not treat missing `gh` auth as a blocker until you have checked the equivalent `codeq8` command.",
     );
   }
-  lines.push("");
-  lines.push(...buildThreadResolutionPromptLines());
   if (codeq8Cli?.available) {
     lines.push("");
     lines.push("Codeq8 CLI:");
@@ -4491,7 +4349,6 @@ function buildResumePrompt({
     );
     lines.push("");
   }
-  lines.push(...buildThreadResolutionPromptLines());
   lines.push("");
   lines.push(...buildAttachmentPromptLines(attachments));
   lines.push(...buildReferencedThreadPromptLines(referencedThreads));
@@ -5229,14 +5086,10 @@ async function readFirstCommitPresentation({
 async function persistWorkspaceProgress({
   workspacePath,
   commandEnv,
-  publicBaseUrl = "",
-  threadId = "",
-  threadResolution = "",
   sourceType = "",
   branch,
   writeMode = "",
   repository = "",
-  thread = null,
   headRepository = "",
   baseBranch = "",
   gitToken = "",
@@ -5328,23 +5181,13 @@ async function persistWorkspaceProgress({
         branch: normalizedBranch,
         baseBranch,
       });
-      const threadUrl = buildThreadUrl({
-        publicBaseUrl,
-        repository,
-        threadId,
-      });
-      const normalizedThreadResolution =
-        normalizeThreadResolutionDirective(threadResolution) || "references";
-      const originIssue = readThreadOriginIssue(thread);
       const pullRequest = await ensurePullRequest({
         repository,
         headRepository: headRepository || repository,
         headBranch: normalizedBranch,
         baseBranch,
         title: pullRequestPresentation.subject,
-        body: buildPullRequestBody(threadUrl, normalizedThreadResolution, originIssue),
-        threadUrl,
-        threadResolution: normalizedThreadResolution,
+        body: pullRequestPresentation.body,
         token: gitToken,
       });
       if (!pullRequest.ok) {
@@ -5399,16 +5242,12 @@ async function ensurePullRequest({
   baseBranch,
   title,
   body,
-  threadUrl = "",
-  threadResolution = "",
   token,
 }) {
   const normalizedRepository = normalizeText(repository);
   const normalizedHeadRepository = normalizeText(headRepository || repository);
   const normalizedHeadBranch = normalizeBranchName(headBranch);
   const normalizedBaseBranch = normalizeBranchName(baseBranch);
-  const normalizedThreadUrl = normalizeText(threadUrl);
-  const normalizedThreadResolution = normalizeThreadResolutionDirective(threadResolution);
   const normalizedToken = normalizeText(token);
   if (!normalizedRepository || !normalizedHeadBranch || !normalizedBaseBranch || !normalizedToken) {
     return { ok: false, error: "repository, head_branch, base_branch, and token are required." };
@@ -5427,41 +5266,24 @@ async function ensurePullRequest({
     token: normalizedToken,
   });
   const existingPulls = Array.isArray(listed.payload) ? listed.payload : [];
-  const desiredPullRequestBody =
-    normalizeText(body) ||
-    buildPullRequestBody(
-      normalizedThreadUrl,
-      normalizedThreadResolution || "references",
-    );
+  const desiredPullRequestBody = normalizeText(body);
   if (listed.ok && existingPulls.length > 0) {
     const first = normalizeObject(existingPulls[0]);
     const existingPullRequestNumber = parsePositiveInteger(first.number, 0);
     let existingPullRequestTitle = normalizeText(first.title);
     let existingPullRequestUrl = normalizeText(first.html_url || first.url);
     const existingPullRequestBody = normalizeText(first.body);
-    const existingDirective = parsePullRequestBodyThreadDirective(existingPullRequestBody);
-    const effectiveThreadResolution =
-      normalizedThreadResolution || existingDirective.threadResolution || "references";
-    const effectivePullRequestBody =
-      normalizeText(body) ||
-      (normalizedThreadUrl
-        ? buildPullRequestBody(normalizedThreadUrl, effectiveThreadResolution)
-        : desiredPullRequestBody);
     if (
       existingPullRequestNumber > 0 &&
-      normalizedThreadUrl &&
-      shouldUpdateManagedPullRequestBody({
-        existingBody: existingPullRequestBody,
-        threadUrl: normalizedThreadUrl,
-      }) &&
-      existingPullRequestBody !== effectivePullRequestBody
+      desiredPullRequestBody &&
+      existingPullRequestBody !== desiredPullRequestBody
     ) {
       const updated = await githubApiJson({
         url: `https://api.github.com/repos/${encodeRepositoryPath(normalizedRepository)}/pulls/${existingPullRequestNumber}`,
         token: normalizedToken,
         method: "PATCH",
         body: {
-          body: effectivePullRequestBody,
+          body: desiredPullRequestBody,
         },
       });
       if (updated.ok) {
@@ -5746,7 +5568,6 @@ async function main() {
   let preparedCodeq8Cli = { available: false, reason: "" };
   let startedAt = 0;
   let assistantMessage = "";
-  let assistantThreadResolution = "";
   let persistedCodexSessionState = normalizeCodexSessionState(null);
   let nonFatalCodexSessionLoadWarning = "";
   let executionMode = "fresh";
@@ -6252,9 +6073,7 @@ async function main() {
           );
           continue;
         }
-        const assistantDirective = extractAssistantThreadResolutionDirective(execution.output);
-        assistantMessage = truncate(assistantDirective.assistantMessage, MAX_OUTPUT_CHARS);
-        assistantThreadResolution = assistantDirective.threadResolution;
+        assistantMessage = truncate(normalizeText(execution.output), MAX_OUTPUT_CHARS);
 
         const finalBranch = await currentBranch({
           workspacePath: preparedWorkspace.workspacePath,
@@ -6466,14 +6285,10 @@ async function main() {
         const persistenceResult = await persistWorkspaceProgress({
           workspacePath: preparedWorkspace.workspacePath,
           commandEnv,
-          publicBaseUrl,
-          threadId,
-          threadResolution: assistantThreadResolution,
           sourceType: activeSourceType,
           branch: finalBranch,
           writeMode: activeBranchContext.write_mode,
           repository: activeWorkspaceRepository,
-          thread: latestThread,
           headRepository: preparedWorkspace.cloneRepository,
           baseBranch: preparedWorkspace.baseBranch,
           gitToken: workspaceGitToken,
@@ -6576,9 +6391,6 @@ async function main() {
               signal: execution.signal || "",
               timed_out: execution.timedOut,
               duration_ms: execution.durationMs,
-              ...(assistantThreadResolution
-                ? { thread_resolution: assistantThreadResolution }
-                : {}),
               codex_session_mode: executionMode,
               codex_session_id: persistedCodexSessionState.session_id,
               codex_session_bundle_revision: persistedCodexSessionState.bundle_revision,
@@ -6615,9 +6427,6 @@ async function main() {
                 signal: execution.signal || "",
                 timed_out: execution.timedOut,
                 duration_ms: execution.durationMs,
-                ...(assistantThreadResolution
-                  ? { thread_resolution: assistantThreadResolution }
-                  : {}),
                 codex_session_id: persistedCodexSessionState.session_id,
                 codex_session_bundle_revision: persistedCodexSessionState.bundle_revision,
                 codex_session_cli_version: persistedCodexSessionState.cli_version,
@@ -6768,9 +6577,7 @@ export {
   buildCodexRunMetadata,
   buildGitHubActionsControlPlaneUrl,
   buildFreshPromptHistoryMessages,
-  buildPullRequestBody,
   buildResumePrompt,
-  buildThreadUrl,
   captureCodexSessionBundle,
   checkoutPreparedWorkspaceBranch,
   checkoutOriginBranch,
@@ -6780,7 +6587,6 @@ export {
   configureWorkspacePushPolicy,
   findBrokenRemoteTrackingRefs,
   applyCodeq8CliRuntimeEnv,
-  extractAssistantThreadResolutionDirective,
   isInvalidCodexSessionBundleError,
   isRecoverableWorkspaceRefRefreshFailure,
   isRecoverableCodexTransportFailure,
@@ -6788,7 +6594,6 @@ export {
   isRecoverableCodexSessionErrorState,
   parseCodexSessionBundleContents,
   isRetryableCodexSessionPersistenceError,
-  parsePullRequestBodyThreadDirective,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
   postRunCallback,
