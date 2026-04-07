@@ -74,3 +74,66 @@ test("buildResumePrompt carries loop-style guidance into resumed runs", () => {
     /If you make repo changes that should be kept, you are responsible for committing and pushing them at the checkpoints that make sense for the user's request, and before you finish\./,
   );
 });
+
+test("buildCodexPrompt renders thread specs above workspace state and out of the user message", () => {
+  const threadSpecText = "1. Clean code\n2. Reduce complexity\n3. Reduce future bugs";
+  const prompt = buildCodexPrompt({
+    repository: "Codeq8/Codeq8",
+    threadTitle: "Fix the runner",
+    threadId: "wct_123",
+    sourceType: "default_branch",
+    branchContext: {
+      context_branch: "main",
+      write_mode: "branch_and_pr",
+      write_branch: "",
+      base_branch: "main",
+      default_branch: "main",
+      protected_branches: ["main"],
+    },
+    workspacePersistenceState: {
+      branch: "main",
+      hasWorkingTreeChanges: false,
+      hasRemoteBranch: true,
+      aheadCount: 0,
+    },
+    priorMessages: [],
+    threadSpecText,
+    promptText: `Thread spec:\n${threadSpecText}\n\nhi`,
+    codeq8Cli: { available: false },
+  });
+
+  assert.ok(prompt.indexOf("Thread spec:") < prompt.indexOf("Runner workspace state before this turn:"));
+  assert.match(prompt, /Thread spec:\n1\. Clean code\n2\. Reduce complexity\n3\. Reduce future bugs/);
+  assert.match(prompt, /User message:\nhi/);
+  assert.doesNotMatch(prompt, /User message:\nThread spec:/);
+});
+
+test("buildResumePrompt renders thread specs above workspace state and out of the user message", () => {
+  const threadSpecText = "Prefer the smallest viable diff.\nExplain tradeoffs briefly.";
+  const prompt = buildResumePrompt({
+    repository: "Codeq8/Codeq8",
+    sourceType: "pull_request",
+    branchContext: {
+      context_branch: "feature/test",
+      write_mode: "direct_push",
+      write_branch: "feature/test",
+      base_branch: "main",
+      default_branch: "main",
+      pull_request_number: 42,
+      pull_request_head_branch: "feature/test",
+      pull_request_base_branch: "main",
+    },
+    workspacePersistenceState: {
+      branch: "feature/test",
+      hasWorkingTreeChanges: false,
+      hasRemoteBranch: true,
+      aheadCount: 0,
+    },
+    threadSpecText,
+    promptText: `Thread spec:\n${threadSpecText}\n\nkeep going`,
+  });
+
+  assert.ok(prompt.indexOf("Thread spec:") < prompt.indexOf("Runner workspace state before this turn:"));
+  assert.match(prompt, /User message:\nkeep going/);
+  assert.doesNotMatch(prompt, /User message:\nThread spec:/);
+});

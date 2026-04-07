@@ -54,6 +54,28 @@ function normalizeText(value) {
   return String(value || "").trim();
 }
 
+function normalizePromptBlockText(value) {
+  return normalizeText(value).replace(/\r\n/g, "\n");
+}
+
+function stripLeadingThreadSpecPromptText(promptText, threadSpecText) {
+  const normalizedPromptText = normalizePromptBlockText(promptText);
+  const normalizedThreadSpecText = normalizePromptBlockText(threadSpecText);
+  if (!normalizedPromptText || !normalizedThreadSpecText) {
+    return normalizedPromptText;
+  }
+  const threadSpecPrefix = `Thread spec:\n${normalizedThreadSpecText}`;
+  if (normalizedPromptText === threadSpecPrefix) {
+    return "";
+  }
+  if (normalizedPromptText.startsWith(`${threadSpecPrefix}\n\n`)) {
+    return normalizePromptBlockText(
+      normalizedPromptText.slice(threadSpecPrefix.length + 2),
+    );
+  }
+  return normalizedPromptText;
+}
+
 function extractErrorMessage(value, fallback = "") {
   const normalizedFallback = normalizeText(fallback);
   if (value instanceof Error) {
@@ -4139,6 +4161,7 @@ function buildCodexPrompt({
   branchContext,
   workspacePersistenceState = null,
   priorMessages,
+  threadSpecText = "",
   promptText,
   recentChecksPromptText = "",
   codeq8Cli,
@@ -4159,6 +4182,11 @@ function buildCodexPrompt({
     normalizeText(branchContext.pull_request_head_branch) ||
     normalizeText(branchContext.write_branch) ||
     normalizeText(branchContext.context_branch);
+  const normalizedThreadSpecText = normalizePromptBlockText(threadSpecText);
+  const normalizedPromptText = stripLeadingThreadSpecPromptText(
+    promptText,
+    normalizedThreadSpecText,
+  );
   const lines = [
     "You are Codex responding inside the Codeq8 web chat runner.",
     `Workspace repository: ${normalizeText(repository)}.`,
@@ -4180,6 +4208,12 @@ function buildCodexPrompt({
   }
   if (normalizeText(branchContext.pull_request_url)) {
     lines.push(`Pull request URL: ${normalizeText(branchContext.pull_request_url)}.`);
+  }
+
+  if (normalizedThreadSpecText) {
+    lines.push("");
+    lines.push("Thread spec:");
+    lines.push(normalizedThreadSpecText);
   }
 
   lines.push("");
@@ -4369,7 +4403,7 @@ function buildCodexPrompt({
 
   lines.push("");
   lines.push("User message:");
-  lines.push(normalizeText(promptText) || "(no prompt text)");
+  lines.push(normalizedPromptText || "(no prompt text)");
 
   return lines.join("\n").trim();
 }
@@ -4379,6 +4413,7 @@ function buildResumePrompt({
   sourceType = "",
   branchContext = {},
   workspacePersistenceState = null,
+  threadSpecText = "",
   promptText,
   recentUserMessagesPromptText = "",
   recentChecksPromptText = "",
@@ -4386,6 +4421,11 @@ function buildResumePrompt({
   referencedThreads = [],
   targetShift = null,
 }) {
+  const normalizedThreadSpecText = normalizePromptBlockText(threadSpecText);
+  const normalizedPromptText = stripLeadingThreadSpecPromptText(
+    promptText,
+    normalizedThreadSpecText,
+  );
   const lines = [];
   if (targetShift) {
     lines.push("Thread context update:");
@@ -4404,6 +4444,11 @@ function buildResumePrompt({
     lines.push(
       "- Do not use the previous branch target. Continue from the existing conversation state with this updated thread target.",
     );
+    lines.push("");
+  }
+  if (normalizedThreadSpecText) {
+    lines.push("Thread spec:");
+    lines.push(normalizedThreadSpecText);
     lines.push("");
   }
   if (workspacePersistenceState) {
@@ -4462,7 +4507,7 @@ function buildResumePrompt({
   }
   lines.push("");
   lines.push("User message:");
-  lines.push(normalizeText(promptText) || "(no prompt text)");
+  lines.push(normalizedPromptText || "(no prompt text)");
 
   return lines.join("\n").trim();
 }
@@ -5633,6 +5678,7 @@ async function main() {
     process.env.CODE_CHAT_CHATGPT_ACCOUNT_ID,
   );
   const threadTitle = normalizeText(process.env.CODE_CHAT_THREAD_TITLE);
+  const threadSpecText = normalizeText(process.env.CODE_CHAT_THREAD_SPEC_TEXT);
   const promptText = normalizeText(process.env.CODE_CHAT_PROMPT_TEXT);
   const recentUserMessagesPromptText = normalizeText(
     process.env.CODE_CHAT_RECENT_USER_MESSAGES_PROMPT_TEXT,
@@ -6028,6 +6074,7 @@ async function main() {
               sourceType: activeSourceType,
               branchContext: activeBranchContext,
               workspacePersistenceState,
+              threadSpecText,
               promptText,
               recentUserMessagesPromptText,
               recentChecksPromptText,
@@ -6064,6 +6111,7 @@ async function main() {
                 messages: conversation.messages,
                 currentMessageId: messageId,
               }),
+              threadSpecText,
               promptText,
               recentChecksPromptText,
               codeq8Cli: preparedCodeq8Cli,

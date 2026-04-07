@@ -65,6 +65,7 @@ test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => 
       message_id: "wcm_123",
       workspace_repository: "Codeq8/Codeq8",
       worker_url: "https://main-codeq8.bojamal7.workers.dev",
+      thread_spec: "Keep diffs narrow.",
       prompt_text: "Fix the failing run",
       branch_context: {
         default_branch: "main",
@@ -86,4 +87,5 @@ test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => 
     "https://github.com/Codeq8/Codeq8/actions/runs/987654321",
   );
   assert.equal(env.CODE_CHAT_REFERENCED_THREADS_JSON, '[{"thread_id":"wct_other"}]');
+  assert.equal(env.CODE_CHAT_THREAD_SPEC_TEXT, "Keep diffs narrow.");
 });

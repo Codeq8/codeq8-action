@@ -156,6 +156,7 @@ export function normalizeGitHubActionsChatRunPayload(value) {
     public_base_url: normalizeText(
       normalized.public_base_url || normalized.publicBaseUrl,
     ),
+    thread_spec: normalizeText(normalized.thread_spec || normalized.threadSpec),
     prompt_text: normalizeText(normalized.prompt_text || normalized.promptText),
     recent_user_messages_prompt_text: normalizeText(
       normalized.recent_user_messages_prompt_text ||
@@ -280,6 +281,7 @@ export function buildWebChatRunnerEnv({
     CODE_CHAT_MESSAGE_ID: normalizedPayload.message_id,
     CODE_CHAT_RUN_ID: normalizedPayload.run_id,
     CODE_CHAT_SOURCE_TYPE: normalizedPayload.source_type,
+    CODE_CHAT_THREAD_SPEC_TEXT: normalizedPayload.thread_spec,
     CODE_CHAT_GITHUB_LOGIN: normalizedPayload.github_login,
     CODE_CHAT_CHATGPT_ACCOUNT_ID: normalizedPayload.chatgpt_account_id,
     CODE_CHAT_PROMPT_TEXT: normalizedPayload.prompt_text,
