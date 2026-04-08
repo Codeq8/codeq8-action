@@ -101,6 +101,19 @@ function extractErrorMessage(value, fallback = "") {
   return normalizedFallback;
 }
 
+function extractUserVisibleFailureHeadline(value, fallback = "") {
+  const normalizedFallback = normalizeText(fallback);
+  const message = normalizeText(stripLeadingCodexTransportNoise(extractErrorMessage(value)));
+  if (!message) {
+    return normalizedFallback;
+  }
+  const lines = message
+    .split(/\r?\n/g)
+    .map((line) => normalizeText(line))
+    .filter(Boolean);
+  return lines[0] || normalizedFallback;
+}
+
 function resolveWebChatRunnerAdminToken(env = process.env) {
   const requestAuthSecret = normalizeText(resolveControlPlaneRequestAuthSecret(env));
   if (requestAuthSecret) {
@@ -346,7 +359,7 @@ function shouldTreatCodexFailureAsCompleted({
 }
 
 function toUserVisibleRunnerFailureMessage(value) {
-  const message = extractErrorMessage(value);
+  const message = extractUserVisibleFailureHeadline(value);
   if (!message) {
     return "I couldn't complete that run.";
   }
@@ -6277,12 +6290,10 @@ async function main() {
         }
 
         if (!execution.ok && !recoveredTransportFailure) {
-          const executionFailureDetails = [execution.reason, execution.diagnosticOutput]
-            .filter(Boolean)
-            .join("\n\n");
+          const executionFailureDetails =
+            execution.reason || execution.diagnosticOutput || "Web chat runner failed.";
           const userVisibleFailureMessage = toUserVisibleRunnerFailureMessage(
-            executionFailureDetails ||
-              "Web chat runner failed.",
+            executionFailureDetails,
           );
           assistantMessage = truncate(
             [
@@ -6572,6 +6583,7 @@ export {
   shouldEnsurePullRequest,
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,
+  extractUserVisibleFailureHeadline,
   toUserVisibleRunnerFailureMessage,
 };
 

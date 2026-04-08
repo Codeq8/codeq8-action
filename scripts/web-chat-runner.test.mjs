@@ -10,7 +10,9 @@ import {
   buildPullRequestPresentation,
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
+  extractUserVisibleFailureHeadline,
   prepareWebChatCodexSessionUpload,
+  toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
 } from "./web-chat-runner.mjs";
@@ -276,6 +278,30 @@ test("prepare/upload/discard codex session bundle calls the staged worker routes
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("extractUserVisibleFailureHeadline drops terminal log tails from failure blobs", () => {
+  const headline = extractUserVisibleFailureHeadline(`
+    Codex exited with code=1 signal=none.
+
+    OpenAI Codex v0.115.0 (research preview)
+    workdir: /Users/example/actions-runner/_work/Codeq8/Codeq8
+    Thread spec:
+    1. Example
+  `);
+
+  assert.equal(headline, "Codex exited with code=1 signal=none.");
+});
+
+test("toUserVisibleRunnerFailureMessage keeps generic exit failures concise", () => {
+  const message = toUserVisibleRunnerFailureMessage(`
+    Codex exited with code=1 signal=none.
+
+    Runner workspace state before this turn:
+    - Checked-out branch: codeq8/example
+  `);
+
+  assert.equal(message, "Codex exited with code=1 signal=none.");
 });
 
 test("buildUploadedCodexSessionStoredValue builds a wrapped version 3 envelope", async () => {
