@@ -44,6 +44,32 @@ const CODEX_SESSION_COMPACTION_TYPES = new Set([
   "context_compacted",
   "compacted",
 ]);
+const WEB_CHAT_RUNNER_RUNTIME_MANIFEST_PATH = "/api/chat/runs/runtime-manifest";
+const REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES = Object.freeze([
+  "server_owned_prompt",
+  "server_owned_pull_request_presentation",
+  "staged_codex_session_upload",
+  "recoverable_codex_session_errors",
+]);
+const REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS = Object.freeze([
+  "/api/github/workspace-git-token",
+  "/api/chat/runs/callback",
+  WEB_CHAT_RUNNER_RUNTIME_MANIFEST_PATH,
+  "/api/chat/runs/prompt",
+  "/api/chat/runs/pull-request-presentation",
+  "/chatgpt-accounts/get",
+  "/chatgpt-accounts/selection/claim",
+  "/chatgpt-accounts/upsert",
+  "/chatgpt-accounts/reauth-required",
+  "/web-chat/attachments/get",
+  "/web-chat/codex-session/get",
+  "/web-chat/codex-session/upload-prepare",
+  "/web-chat/codex-session/upload",
+  "/web-chat/codex-session/upload-discard",
+  "/web-chat/codex-session/upsert",
+  "/web-chat/codex-session/invalidate",
+  "/web-chat/threads/get",
+]);
 const WEB_CHAT_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const WEB_CHAT_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
@@ -1265,6 +1291,73 @@ async function requestWebChatRunnerRuntimeJson({
     throw new Error(errorMessage);
   }
   return response.payload;
+}
+
+async function requestWebChatRunnerRuntimeManifest({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+}) {
+  return requestWebChatRunnerRuntimeJson({
+    publicBaseUrl,
+    webChatRunToken,
+    path: WEB_CHAT_RUNNER_RUNTIME_MANIFEST_PATH,
+    body: {
+      workspace_repository: normalizeText(workspaceRepository),
+      thread_id: normalizeText(threadId),
+      run_id: normalizeText(runId),
+    },
+  });
+}
+
+function listMissingRuntimeEntries(requiredEntries = [], actualEntries = []) {
+  const actualEntrySet = new Set(
+    (Array.isArray(actualEntries) ? actualEntries : [])
+      .map((entry) => normalizeText(entry))
+      .filter(Boolean),
+  );
+  return (Array.isArray(requiredEntries) ? requiredEntries : []).filter(
+    (entry) => normalizeText(entry) && !actualEntrySet.has(normalizeText(entry)),
+  );
+}
+
+async function assertWebChatRunnerRuntimeCompatibility({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+}) {
+  const manifest = await requestWebChatRunnerRuntimeManifest({
+    publicBaseUrl,
+    webChatRunToken,
+    workspaceRepository,
+    threadId,
+    runId,
+  });
+  const missingCapabilities = listMissingRuntimeEntries(
+    REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+    manifest.capabilities,
+  );
+  const missingPaths = listMissingRuntimeEntries(
+    REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
+    manifest.authorized_paths,
+  );
+  if (missingCapabilities.length > 0 || missingPaths.length > 0) {
+    const problems = [];
+    if (missingCapabilities.length > 0) {
+      problems.push(`missing capabilities: ${missingCapabilities.join(", ")}`);
+    }
+    if (missingPaths.length > 0) {
+      problems.push(`missing authorized paths: ${missingPaths.join(", ")}`);
+    }
+    throw new Error(
+      `Codeq8 runner runtime manifest is incompatible (${problems.join("; ")}).`,
+    );
+  }
+  return manifest;
 }
 
 async function applyWorkspaceGitToken({
@@ -5528,6 +5621,19 @@ async function main() {
     `thread_id=${threadId} worker=${normalizeBaseUrl(workerUrl)}`,
   );
 
+  const webChatRunToken = resolveWebChatRunToken(commandEnv);
+  const runtimeManifest = await assertWebChatRunnerRuntimeCompatibility({
+    publicBaseUrl,
+    webChatRunToken,
+    workspaceRepository,
+    threadId,
+    runId,
+  });
+  log(
+    "Validated Codeq8 runner runtime manifest",
+    `contract=${normalizeText(runtimeManifest.contract_version)} capabilities=${Array.isArray(runtimeManifest.capabilities) ? runtimeManifest.capabilities.length : 0} authorized_paths=${Array.isArray(runtimeManifest.authorized_paths) ? runtimeManifest.authorized_paths.length : 0}`,
+  );
+
   const codexPath = await resolveCodexPath(commandEnv);
   let preparedWorkspace = null;
   let runRuntime = null;
@@ -6568,6 +6674,7 @@ export {
   discardPreparedWebChatCodexSessionBundle,
   readFirstCommitPresentation,
   requestWorkspaceGitToken,
+  requestWebChatRunnerRuntimeManifest,
   readBranchDivergenceCounts,
   resolveEffectiveWriteBranch,
   resolveGitIdentityFromGitHubUserToken,
@@ -6581,6 +6688,7 @@ export {
   requireWebChatGitHubWriteToken,
   requireWebChatGitHubUserToken,
   runCodex,
+  assertWebChatRunnerRuntimeCompatibility,
   shouldEnsurePullRequest,
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,

@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  assertWebChatRunnerRuntimeCompatibility,
   buildCodexPrompt,
   buildPullRequestPresentation,
   buildResumePrompt,
@@ -19,6 +20,116 @@ import {
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
+
+test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime manifest", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      method: init?.method || "GET",
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    return Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      capabilities: [
+        "server_owned_prompt",
+        "server_owned_pull_request_presentation",
+        "staged_codex_session_upload",
+        "recoverable_codex_session_errors",
+      ],
+      authorized_paths: [
+        "/api/github/workspace-git-token",
+        "/api/chat/runs/callback",
+        "/api/chat/runs/runtime-manifest",
+        "/api/chat/runs/prompt",
+        "/api/chat/runs/pull-request-presentation",
+        "/chatgpt-accounts/get",
+        "/chatgpt-accounts/selection/claim",
+        "/chatgpt-accounts/upsert",
+        "/chatgpt-accounts/reauth-required",
+        "/web-chat/attachments/get",
+        "/web-chat/codex-session/get",
+        "/web-chat/codex-session/upload-prepare",
+        "/web-chat/codex-session/upload",
+        "/web-chat/codex-session/upload-discard",
+        "/web-chat/codex-session/upsert",
+        "/web-chat/codex-session/invalidate",
+        "/web-chat/threads/get",
+      ],
+    });
+  };
+
+  try {
+    const manifest = await assertWebChatRunnerRuntimeCompatibility({
+      publicBaseUrl: "https://codeq8.example.com",
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_123",
+      runId: "wcr_123",
+    });
+
+    assert.equal(manifest.contract_version, CONTRACT_VERSION);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.url, "https://codeq8.example.com/api/chat/runs/runtime-manifest");
+    assert.equal(calls[0]?.method, "POST");
+    assert.deepEqual(calls[0]?.body, {
+      workspace_repository: "Codeq8/Codeq8",
+      thread_id: "wct_123",
+      run_id: "wcr_123",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload routes are missing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      capabilities: [
+        "server_owned_prompt",
+        "server_owned_pull_request_presentation",
+        "staged_codex_session_upload",
+        "recoverable_codex_session_errors",
+      ],
+      authorized_paths: [
+        "/api/github/workspace-git-token",
+        "/api/chat/runs/callback",
+        "/api/chat/runs/runtime-manifest",
+        "/api/chat/runs/prompt",
+        "/api/chat/runs/pull-request-presentation",
+        "/chatgpt-accounts/get",
+        "/chatgpt-accounts/selection/claim",
+        "/chatgpt-accounts/upsert",
+        "/chatgpt-accounts/reauth-required",
+        "/web-chat/attachments/get",
+        "/web-chat/codex-session/get",
+        "/web-chat/codex-session/upsert",
+        "/web-chat/codex-session/invalidate",
+        "/web-chat/threads/get",
+      ],
+    });
+
+  try {
+    await assert.rejects(
+      () =>
+        assertWebChatRunnerRuntimeCompatibility({
+          publicBaseUrl: "https://codeq8.example.com",
+          webChatRunToken: "header.payload.signature",
+          workspaceRepository: "Codeq8/Codeq8",
+          threadId: "wct_123",
+          runId: "wcr_123",
+        }),
+      /missing authorized paths: \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload, \/web-chat\/codex-session\/upload-discard/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 function git(workspacePath, args) {
   execFileSync("git", args, { cwd: workspacePath, env: process.env });
