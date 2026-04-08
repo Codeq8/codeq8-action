@@ -466,6 +466,7 @@ function isRecoverableCodexSessionErrorState(value) {
     return false;
   }
   return (
+    /authorization token path mismatch/i.test(normalized) ||
     /failed to update web chat codex session state/i.test(normalized) ||
     /web chat codex session revision conflict/i.test(normalized) ||
     /codex run finished without creating a session bundle/i.test(normalized) ||

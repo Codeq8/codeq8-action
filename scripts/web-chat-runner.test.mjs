@@ -11,6 +11,7 @@ import {
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
   extractUserVisibleFailureHeadline,
+  isRecoverableCodexSessionErrorState,
   prepareWebChatCodexSessionUpload,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
@@ -278,6 +279,17 @@ test("prepare/upload/discard codex session bundle calls the staged worker routes
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("isRecoverableCodexSessionErrorState treats token path mismatches as recoverable stale session state", () => {
+  assert.equal(
+    isRecoverableCodexSessionErrorState("Authorization token path mismatch."),
+    true,
+  );
+  assert.equal(
+    isRecoverableCodexSessionErrorState("Codex session state is in error status: Authorization token path mismatch."),
+    true,
+  );
 });
 
 test("extractUserVisibleFailureHeadline drops terminal log tails from failure blobs", () => {
