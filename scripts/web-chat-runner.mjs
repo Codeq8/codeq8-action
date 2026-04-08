@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { webcrypto } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
 import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
 import { readCodexAuthBundle } from "./codex-auth-bundle.mjs";
 import {
@@ -49,6 +51,7 @@ const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CODEX_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const CODEX_SESSION_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/;
 const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
+const WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE = "web_chat_codex_session_bundle";
 
 function normalizeText(value) {
   return String(value || "").trim();
@@ -185,6 +188,45 @@ function normalizeRunId(value) {
     return "";
   }
   return normalized;
+}
+
+function toBase64Url(bytes) {
+  return Buffer.from(bytes)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function fromBase64Url(value) {
+  const normalized = normalizeText(value).replace(/-/g, "+").replace(/_/g, "/");
+  if (!normalized) {
+    return new Uint8Array();
+  }
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  return new Uint8Array(Buffer.from(padded, "base64"));
+}
+
+function gzipUtf8TextBytes(value) {
+  return new Uint8Array(gzipSync(Buffer.from(String(value || ""), "utf8")));
+}
+
+function webChatCodexSessionAdditionalData({ threadId, storageKey }) {
+  const normalizedThreadId = normalizeThreadId(threadId);
+  const normalizedStorageKey = normalizeText(storageKey);
+  if (!normalizedThreadId || !normalizedStorageKey) {
+    return "";
+  }
+  return `${WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE}:${normalizedThreadId}:${normalizedStorageKey}`;
+}
+
+function webChatCodexSessionWrappedKeyAdditionalData({ threadId, storageKey }) {
+  const normalizedThreadId = normalizeThreadId(threadId);
+  const normalizedStorageKey = normalizeText(storageKey);
+  if (!normalizedThreadId || !normalizedStorageKey) {
+    return "";
+  }
+  return `${WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE}:key:${normalizedThreadId}:${normalizedStorageKey}`;
 }
 
 function parsePositiveInteger(value, fallback = 0) {
@@ -888,6 +930,205 @@ async function workerJsonRequest({ workerUrl, adminToken, path, method, query, b
     },
     ...(method === "POST" ? { body: JSON.stringify(body || {}) } : {}),
   });
+}
+
+async function prepareWebChatCodexSessionUpload({
+  workerUrl,
+  adminToken,
+  threadId,
+  expectedBundleRevision = null,
+}) {
+  const response = await workerJsonRequest({
+    workerUrl,
+    adminToken,
+    path: "/web-chat/codex-session/upload-prepare",
+    method: "POST",
+    body: {
+      thread_id: normalizeText(threadId),
+      ...(expectedBundleRevision !== null && expectedBundleRevision !== undefined
+        ? { expected_bundle_revision: parseNonNegativeInteger(expectedBundleRevision, 0) }
+        : {}),
+    },
+  });
+  if (!response.ok || response.payload.ok === false) {
+    throw new Error(
+      extractErrorMessage(response.payload.error) ||
+        `Failed to prepare web chat codex session upload (${response.status}).`,
+    );
+  }
+  const uploadPreparation = normalizeObject(
+    response.payload.upload_preparation || response.payload.uploadPreparation,
+  );
+  return {
+    thread: normalizeObject(response.payload.thread),
+    codexSessionState: normalizeCodexSessionState(
+      response.payload.codex_session_state || response.payload.codexSessionState,
+    ),
+    uploadPreparation: {
+      storageKey: normalizeText(uploadPreparation.storage_key || uploadPreparation.storageKey),
+      storageBucket: normalizeText(
+        uploadPreparation.storage_bucket || uploadPreparation.storageBucket,
+      ),
+      storageBackend: normalizeText(
+        uploadPreparation.storage_backend || uploadPreparation.storageBackend,
+      ),
+      uploadKey: normalizeText(uploadPreparation.upload_key || uploadPreparation.uploadKey),
+      wrappedKey: normalizeText(uploadPreparation.wrapped_key || uploadPreparation.wrappedKey),
+      wrappedKeyIv: normalizeText(
+        uploadPreparation.wrapped_key_iv || uploadPreparation.wrappedKeyIv,
+      ),
+      expectedBundleRevision: parseNonNegativeInteger(
+        uploadPreparation.expected_bundle_revision ??
+          uploadPreparation.expectedBundleRevision ??
+          0,
+        0,
+      ),
+      nextBundleRevision: parsePositiveInteger(
+        uploadPreparation.next_bundle_revision || uploadPreparation.nextBundleRevision || 0,
+        0,
+      ),
+    },
+  };
+}
+
+async function uploadPreparedWebChatCodexSessionBundle({
+  workerUrl,
+  adminToken,
+  threadId,
+  storageKey,
+  storageBucket,
+  storageBackend,
+  storedValue,
+}) {
+  const response = await workerJsonRequest({
+    workerUrl,
+    adminToken,
+    path: "/web-chat/codex-session/upload",
+    method: "POST",
+    body: {
+      thread_id: normalizeText(threadId),
+      storage_key: normalizeText(storageKey),
+      storage_bucket: normalizeText(storageBucket),
+      storage_backend: normalizeText(storageBackend),
+      stored_value: String(storedValue || ""),
+    },
+  });
+  if (!response.ok || response.payload.ok === false) {
+    throw new Error(
+      extractErrorMessage(response.payload.error) ||
+        `Failed to upload web chat codex session bundle (${response.status}).`,
+    );
+  }
+  return {
+    storageKey: normalizeText(
+      response.payload.storage_key || response.payload.storageKey || storageKey,
+    ),
+    storageBucket: normalizeText(
+      response.payload.storage_bucket || response.payload.storageBucket || storageBucket,
+    ),
+    storageBackend: normalizeText(
+      response.payload.storage_backend || response.payload.storageBackend || storageBackend,
+    ),
+  };
+}
+
+async function discardPreparedWebChatCodexSessionBundle({
+  workerUrl,
+  adminToken,
+  threadId,
+  storageKey,
+  storageBucket,
+  storageBackend,
+}) {
+  const response = await workerJsonRequest({
+    workerUrl,
+    adminToken,
+    path: "/web-chat/codex-session/upload-discard",
+    method: "POST",
+    body: {
+      thread_id: normalizeText(threadId),
+      storage_key: normalizeText(storageKey),
+      storage_bucket: normalizeText(storageBucket),
+      storage_backend: normalizeText(storageBackend),
+    },
+  });
+  if (!response.ok || response.payload.ok === false) {
+    throw new Error(
+      extractErrorMessage(response.payload.error) ||
+        `Failed to discard web chat codex session bundle (${response.status}).`,
+    );
+  }
+}
+
+async function buildUploadedCodexSessionStoredValue({
+  threadId,
+  storageKey,
+  uploadKey,
+  wrappedKey,
+  wrappedKeyIv,
+  sessionFileContents,
+}) {
+  const additionalData = webChatCodexSessionAdditionalData({ threadId, storageKey });
+  const wrappedKeyAdditionalData = webChatCodexSessionWrappedKeyAdditionalData({
+    threadId,
+    storageKey,
+  });
+  const normalizedContents = String(sessionFileContents || "");
+  if (
+    !additionalData ||
+    !wrappedKeyAdditionalData ||
+    !normalizedContents ||
+    !normalizeText(uploadKey) ||
+    !normalizeText(wrappedKey) ||
+    !normalizeText(wrappedKeyIv)
+  ) {
+    throw new Error(
+      "thread_id, storage_key, upload_key, wrapped_key, wrapped_key_iv, and session_file_contents are required.",
+    );
+  }
+
+  const rawBytes = new TextEncoder().encode(normalizedContents);
+  const compressedBytes = gzipUtf8TextBytes(normalizedContents);
+  const dataKeyBytes = fromBase64Url(uploadKey);
+  if (dataKeyBytes.byteLength !== 32) {
+    throw new Error("web chat codex session upload key is invalid.");
+  }
+  const dataKey = await webcrypto.subtle.importKey(
+    "raw",
+    dataKeyBytes,
+    { name: "AES-GCM" },
+    false,
+    ["encrypt"],
+  );
+  const iv = webcrypto.getRandomValues(new Uint8Array(12));
+  const encrypted = new Uint8Array(
+    await webcrypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv,
+        additionalData: new TextEncoder().encode(additionalData),
+      },
+      dataKey,
+      compressedBytes,
+    ),
+  );
+
+  return {
+    storedValue: JSON.stringify({
+      version: 3,
+      scope: WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE,
+      algorithm: "AES-GCM-256",
+      content_encoding: "gzip",
+      raw_size_bytes: rawBytes.length,
+      compressed_size_bytes: compressedBytes.length,
+      wrapped_key: normalizeText(wrappedKey),
+      wrapped_key_iv: normalizeText(wrappedKeyIv),
+      iv: toBase64Url(iv),
+      ciphertext: toBase64Url(encrypted),
+    }),
+    bundleSizeBytes: rawBytes.length,
+    bundleCompressedSizeBytes: compressedBytes.length,
+  };
 }
 
 async function requestWorkspaceGitToken({
@@ -2747,6 +2988,11 @@ async function upsertWebChatCodexSessionState({
   sessionId = "",
   sessionFileRelativePath = "",
   sessionFileContents = "",
+  uploadedBundleStorageKey = "",
+  uploadedBundleStorageBucket = "",
+  uploadedBundleStorageBackend = "",
+  uploadedBundleSizeBytes = 0,
+  uploadedBundleCompressedSizeBytes = 0,
   targetSignature = "",
   cliVersion = "",
   model = "",
@@ -2764,6 +3010,14 @@ async function upsertWebChatCodexSessionState({
       sessionFileRelativePath,
     ),
     session_file_contents: String(sessionFileContents || ""),
+    uploaded_bundle_storage_key: normalizeText(uploadedBundleStorageKey),
+    uploaded_bundle_storage_bucket: normalizeText(uploadedBundleStorageBucket),
+    uploaded_bundle_storage_backend: normalizeText(uploadedBundleStorageBackend),
+    uploaded_bundle_size_bytes: parsePositiveInteger(uploadedBundleSizeBytes, 0),
+    uploaded_bundle_compressed_size_bytes: parsePositiveInteger(
+      uploadedBundleCompressedSizeBytes,
+      0,
+    ),
     target_signature: normalizeText(targetSignature),
     cli_version: normalizeText(cliVersion),
     model: normalizeText(model),
@@ -2879,25 +3133,75 @@ async function persistCapturedCodexSessionBundle({
     existingSessionState,
     model,
   });
-  const persistedSession = await upsertWebChatCodexSessionState({
+  const uploadPreparation = await prepareWebChatCodexSessionUpload({
     workerUrl,
     adminToken,
     threadId,
-    sessionId: capturedSessionBundle.sessionId,
-    sessionFileRelativePath: capturedSessionBundle.sessionFileRelativePath,
-    sessionFileContents: capturedSessionBundle.sessionFileContents,
-    targetSignature,
-    cliVersion: capturedSessionBundle.cliVersion,
-    model: capturedSessionBundle.model || model,
-    lastRunId: runId,
-    lastResumedAt,
-    lastCompactionObservedAt: Math.max(
-      capturedSessionBundle.lastCompactionObservedAt,
-      normalizeCodexSessionState(existingSessionState).last_compaction_observed_at || 0,
-    ),
     expectedBundleRevision,
-    status: "ready",
   });
+  const preparedBundle = await buildUploadedCodexSessionStoredValue({
+    threadId,
+    storageKey: uploadPreparation.uploadPreparation.storageKey,
+    uploadKey: uploadPreparation.uploadPreparation.uploadKey,
+    wrappedKey: uploadPreparation.uploadPreparation.wrappedKey,
+    wrappedKeyIv: uploadPreparation.uploadPreparation.wrappedKeyIv,
+    sessionFileContents: capturedSessionBundle.sessionFileContents,
+  });
+  await uploadPreparedWebChatCodexSessionBundle({
+    workerUrl,
+    adminToken,
+    threadId,
+    storageKey: uploadPreparation.uploadPreparation.storageKey,
+    storageBucket: uploadPreparation.uploadPreparation.storageBucket,
+    storageBackend: uploadPreparation.uploadPreparation.storageBackend,
+    storedValue: preparedBundle.storedValue,
+  });
+
+  let persistedSession;
+  try {
+    persistedSession = await upsertWebChatCodexSessionState({
+      workerUrl,
+      adminToken,
+      threadId,
+      sessionId: capturedSessionBundle.sessionId,
+      sessionFileRelativePath: capturedSessionBundle.sessionFileRelativePath,
+      uploadedBundleStorageKey: uploadPreparation.uploadPreparation.storageKey,
+      uploadedBundleStorageBucket: uploadPreparation.uploadPreparation.storageBucket,
+      uploadedBundleStorageBackend: uploadPreparation.uploadPreparation.storageBackend,
+      uploadedBundleSizeBytes: preparedBundle.bundleSizeBytes,
+      uploadedBundleCompressedSizeBytes: preparedBundle.bundleCompressedSizeBytes,
+      targetSignature,
+      cliVersion: capturedSessionBundle.cliVersion,
+      model: capturedSessionBundle.model || model,
+      lastRunId: runId,
+      lastResumedAt,
+      lastCompactionObservedAt: Math.max(
+        capturedSessionBundle.lastCompactionObservedAt,
+        normalizeCodexSessionState(existingSessionState).last_compaction_observed_at || 0,
+      ),
+      expectedBundleRevision,
+      status: "ready",
+    });
+  } catch (error) {
+    try {
+      await discardPreparedWebChatCodexSessionBundle({
+        workerUrl,
+        adminToken,
+        threadId,
+        storageKey: uploadPreparation.uploadPreparation.storageKey,
+        storageBucket: uploadPreparation.uploadPreparation.storageBucket,
+        storageBackend: uploadPreparation.uploadPreparation.storageBackend,
+      });
+    } catch (discardError) {
+      log(
+        "WARN",
+        `Unable to discard uploaded web chat codex session bundle after metadata commit failure: ${
+          discardError instanceof Error ? discardError.message : String(discardError)
+        }`,
+      );
+    }
+    throw error;
+  }
   return persistedSession.codexSessionState;
 }
 
@@ -6221,6 +6525,7 @@ export {
   buildGitHubActionsControlPlaneUrl,
   buildPullRequestPresentation,
   buildResumePrompt,
+  buildUploadedCodexSessionStoredValue,
   captureCodexSessionBundle,
   checkoutPreparedWorkspaceBranch,
   checkoutOriginBranch,
@@ -6237,6 +6542,7 @@ export {
   isRecoverableCodexSessionErrorState,
   parseCodexSessionBundleContents,
   isRetryableCodexSessionPersistenceError,
+  prepareWebChatCodexSessionUpload,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
   postRunCallback,
@@ -6246,6 +6552,8 @@ export {
   refreshWorkspaceRemoteRefs,
   syncChatGptAccountAuth,
   validateChatGptAccountAuth,
+  uploadPreparedWebChatCodexSessionBundle,
+  discardPreparedWebChatCodexSessionBundle,
   readFirstCommitPresentation,
   requestWorkspaceGitToken,
   readBranchDivergenceCounts,

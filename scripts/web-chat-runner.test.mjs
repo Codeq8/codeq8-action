@@ -9,6 +9,10 @@ import {
   buildCodexPrompt,
   buildPullRequestPresentation,
   buildResumePrompt,
+  buildUploadedCodexSessionStoredValue,
+  prepareWebChatCodexSessionUpload,
+  uploadPreparedWebChatCodexSessionBundle,
+  discardPreparedWebChatCodexSessionBundle,
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
@@ -209,4 +213,94 @@ test("buildPullRequestPresentation sends local git commit facts to the server-ow
     globalThis.fetch = originalFetch;
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
+});
+
+test("prepare/upload/discard codex session bundle calls the staged worker routes", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      method: init?.method || "GET",
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    if (String(url).endsWith("/upload-prepare")) {
+      return Response.json({
+        ok: true,
+        upload_preparation: {
+          storage_key: "web_chat_codex_session_blob:wct_123:1:nonce",
+          storage_bucket: "bucket",
+          storage_backend: "firebase_storage",
+          upload_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          wrapped_key: "bbbb",
+          wrapped_key_iv: "cccc",
+          expected_bundle_revision: 0,
+          next_bundle_revision: 1,
+        },
+      });
+    }
+    return Response.json({ ok: true });
+  };
+
+  try {
+    const prepared = await prepareWebChatCodexSessionUpload({
+      workerUrl: "https://worker.example.com",
+      adminToken: "secret",
+      threadId: "wct_123",
+      expectedBundleRevision: 0,
+    });
+    assert.equal(prepared.uploadPreparation.storageKey, "web_chat_codex_session_blob:wct_123:1:nonce");
+
+    await uploadPreparedWebChatCodexSessionBundle({
+      workerUrl: "https://worker.example.com",
+      adminToken: "secret",
+      threadId: "wct_123",
+      storageKey: "web_chat_codex_session_blob:wct_123:1:nonce",
+      storageBucket: "bucket",
+      storageBackend: "firebase_storage",
+      storedValue: "{\"version\":3}",
+    });
+    await discardPreparedWebChatCodexSessionBundle({
+      workerUrl: "https://worker.example.com",
+      adminToken: "secret",
+      threadId: "wct_123",
+      storageKey: "web_chat_codex_session_blob:wct_123:1:nonce",
+      storageBucket: "bucket",
+      storageBackend: "firebase_storage",
+    });
+
+    assert.equal(calls.length, 3);
+    assert.equal(calls[0]?.url, "https://worker.example.com/web-chat/codex-session/upload-prepare");
+    assert.equal(calls[1]?.url, "https://worker.example.com/web-chat/codex-session/upload");
+    assert.equal(calls[2]?.url, "https://worker.example.com/web-chat/codex-session/upload-discard");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("buildUploadedCodexSessionStoredValue builds a wrapped version 3 envelope", async () => {
+  const uploadKeyBytes = new Uint8Array(32);
+  uploadKeyBytes.fill(7);
+
+  const built = await buildUploadedCodexSessionStoredValue({
+    threadId: "wct_123",
+    storageKey: "web_chat_codex_session_blob:wct_123:1:nonce",
+    uploadKey: Buffer.from(uploadKeyBytes)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, ""),
+    wrappedKey: "wrapped-key",
+    wrappedKeyIv: "wrapped-key-iv",
+    sessionFileContents: "{\"hello\":\"world\"}",
+  });
+
+  const envelope = JSON.parse(built.storedValue);
+  assert.equal(envelope.version, 3);
+  assert.equal(envelope.scope, "web_chat_codex_session_bundle");
+  assert.equal(envelope.content_encoding, "gzip");
+  assert.equal(envelope.wrapped_key, "wrapped-key");
+  assert.equal(envelope.wrapped_key_iv, "wrapped-key-iv");
+  assert.ok(built.bundleSizeBytes > 0);
+  assert.ok(built.bundleCompressedSizeBytes > 0);
 });
