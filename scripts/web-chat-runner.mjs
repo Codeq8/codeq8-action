@@ -25,10 +25,15 @@ import {
   resolveChatGptAccountWorkerBaseUrl,
   resolveWorkerBaseUrl,
 } from "../lib/code-worker-url.mjs";
+import {
+  REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+  REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
+  WEB_CHAT_RUNNER_RUNTIME_CONTRACT_VERSION,
+  WEB_CHAT_RUNNER_RUNTIME_MANIFEST_PATH,
+} from "../lib/web-chat-runner-runtime-manifest.mjs";
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
 const DEFAULT_CODEX_MODEL = "gpt-5.4";
 const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
-const WEB_CHAT_RUNNER_RUNTIME_CONTRACT_VERSION = "web_chat_runner_runtime_v1";
 const DEFAULT_TIMEOUT_SECONDS = 6 * 60 * 60;
 const DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT = "1";
 const DEFAULT_GIT_HTTP_LOW_SPEED_TIME = "45";
@@ -43,32 +48,6 @@ const CODEX_SESSION_COMPACTION_TYPES = new Set([
   "compaction",
   "context_compacted",
   "compacted",
-]);
-const WEB_CHAT_RUNNER_RUNTIME_MANIFEST_PATH = "/api/chat/runs/runtime-manifest";
-const REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES = Object.freeze([
-  "server_owned_prompt",
-  "server_owned_pull_request_presentation",
-  "staged_codex_session_upload",
-  "recoverable_codex_session_errors",
-]);
-const REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS = Object.freeze([
-  "/api/github/workspace-git-token",
-  "/api/chat/runs/callback",
-  WEB_CHAT_RUNNER_RUNTIME_MANIFEST_PATH,
-  "/api/chat/runs/prompt",
-  "/api/chat/runs/pull-request-presentation",
-  "/chatgpt-accounts/get",
-  "/chatgpt-accounts/selection/claim",
-  "/chatgpt-accounts/upsert",
-  "/chatgpt-accounts/reauth-required",
-  "/web-chat/attachments/get",
-  "/web-chat/codex-session/get",
-  "/web-chat/codex-session/upload-prepare",
-  "/web-chat/codex-session/upload",
-  "/web-chat/codex-session/upload-discard",
-  "/web-chat/codex-session/upsert",
-  "/web-chat/codex-session/invalidate",
-  "/web-chat/threads/get",
 ]);
 const WEB_CHAT_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const WEB_CHAT_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;

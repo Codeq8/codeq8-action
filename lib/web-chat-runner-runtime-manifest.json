@@ -1,0 +1,28 @@
+{
+  "contract_version": "web_chat_runner_runtime_v1",
+  "required_capabilities": [
+    "server_owned_prompt",
+    "server_owned_pull_request_presentation",
+    "staged_codex_session_upload",
+    "recoverable_codex_session_errors"
+  ],
+  "required_paths": [
+    "/api/github/workspace-git-token",
+    "/api/chat/runs/callback",
+    "/api/chat/runs/runtime-manifest",
+    "/api/chat/runs/prompt",
+    "/api/chat/runs/pull-request-presentation",
+    "/chatgpt-accounts/get",
+    "/chatgpt-accounts/selection/claim",
+    "/chatgpt-accounts/upsert",
+    "/chatgpt-accounts/reauth-required",
+    "/web-chat/attachments/get",
+    "/web-chat/codex-session/get",
+    "/web-chat/codex-session/upload-prepare",
+    "/web-chat/codex-session/upload",
+    "/web-chat/codex-session/upload-discard",
+    "/web-chat/codex-session/upsert",
+    "/web-chat/codex-session/invalidate",
+    "/web-chat/threads/get"
+  ]
+}
