@@ -13,6 +13,7 @@ import {
   buildUploadedCodexSessionStoredValue,
   extractUserVisibleFailureHeadline,
   isRecoverableCodexSessionErrorState,
+  persistWorkspaceProgress,
   prepareWebChatCodexSessionUpload,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
@@ -133,6 +134,20 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
 
 function git(workspacePath, args) {
   execFileSync("git", args, { cwd: workspacePath, env: process.env });
+}
+
+function readAheadCount(workspacePath, branch) {
+  const output = execFileSync(
+    "git",
+    ["rev-list", "--left-right", "--count", `origin/${branch}...refs/heads/${branch}`],
+    {
+      cwd: workspacePath,
+      env: process.env,
+      encoding: "utf8",
+    },
+  );
+  const [, aheadText = "0"] = String(output || "").trim().split(/\s+/, 2);
+  return Number.parseInt(aheadText, 10) || 0;
 }
 
 test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
@@ -326,6 +341,70 @@ test("buildPullRequestPresentation sends local git commit facts to the server-ow
   } finally {
     globalThis.fetch = originalFetch;
     await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("persistWorkspaceProgress explicitly pushes remembered branches that are ahead of origin", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-push-"));
+  const remotePath = path.join(tempRoot, "remote.git");
+  const seedPath = path.join(tempRoot, "seed");
+  const workspacePath = path.join(tempRoot, "workspace");
+
+  try {
+    git(tempRoot, ["init", "--bare", remotePath]);
+    await fs.mkdir(seedPath, { recursive: true });
+    git(seedPath, ["init"]);
+    git(seedPath, ["checkout", "-b", "main"]);
+    git(seedPath, ["config", "user.name", "Codeq8 Test"]);
+    git(seedPath, ["config", "user.email", "codeq8@example.com"]);
+    await fs.writeFile(path.join(seedPath, "README.md"), "seed\n");
+    git(seedPath, ["add", "README.md"]);
+    git(seedPath, ["commit", "-m", "Initial commit"]);
+    git(seedPath, ["remote", "add", "origin", remotePath]);
+    git(seedPath, ["push", "-u", "origin", "main"]);
+
+    git(tempRoot, ["clone", remotePath, workspacePath]);
+    git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
+    git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
+    git(workspacePath, ["checkout", "-b", "feature/test", "origin/main"]);
+    await fs.writeFile(path.join(workspacePath, "feature.txt"), "v1\n");
+    git(workspacePath, ["add", "feature.txt"]);
+    git(workspacePath, ["commit", "-m", "Feature start"]);
+    git(workspacePath, ["push", "-u", "origin", "feature/test"]);
+
+    await fs.writeFile(path.join(workspacePath, "feature.txt"), "v2\n");
+    git(workspacePath, ["add", "feature.txt"]);
+    git(workspacePath, ["commit", "-m", "Feature follow-up"]);
+
+    assert.equal(readAheadCount(workspacePath, "feature/test"), 1);
+
+    const result = await persistWorkspaceProgress({
+      publicBaseUrl: "https://codeq8.example.com",
+      webChatRunToken: "header.payload.signature",
+      workspacePath,
+      commandEnv: process.env,
+      sourceType: "default_branch",
+      branch: "feature/test",
+      writeMode: "direct_push",
+      repository: "Codeq8/codeq8-action",
+      threadId: "wct_123",
+      runId: "wcr_123",
+      headRepository: "Codeq8/codeq8-action",
+      baseBranch: "main",
+      gitToken: "",
+      protectedBranches: ["main"],
+      baselineState: null,
+      threadTitle: "test",
+      assistantMessage: "test",
+    });
+
+    assert.equal(result.error, "");
+    assert.equal(result.pendingRemoteSync, "");
+    assert.equal(result.pushed, true);
+    assert.equal(result.resolvedWriteBranch, "feature/test");
+    assert.equal(readAheadCount(workspacePath, "feature/test"), 0);
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
   }
 });
 

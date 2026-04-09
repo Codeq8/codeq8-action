@@ -4900,6 +4900,44 @@ function summarizeGitProcessFailure(result) {
   return stderr || stdout || `git exited with code ${result?.code ?? -1}`;
 }
 
+async function pushRememberedThreadBranch({
+  workspacePath,
+  commandEnv,
+  branch,
+}) {
+  const normalizedBranch = normalizeBranchName(branch);
+  if (!normalizedBranch) {
+    return {
+      ok: false,
+      error: "Working branch name is empty.",
+    };
+  }
+
+  // Remembered thread branches are the only place where the runner is allowed
+  // to rescue committed work Codex forgot to push. Keep this to one explicit
+  // push on the checked-out branch so AJ does not lose local commits to a
+  // prompt slip, but do not turn it into generic divergence resolution.
+  const pushed = await runProcessCapture(
+    "git",
+    ["push", "--set-upstream", "origin", `HEAD:refs/heads/${normalizedBranch}`],
+    {
+      cwd: workspacePath,
+      env: commandEnv,
+    },
+  );
+  if (!pushed.ok) {
+    return {
+      ok: false,
+      error: `Unable to push ${normalizedBranch}: ${summarizeGitProcessFailure(pushed)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    error: "",
+  };
+}
+
 async function clearGitOperationState({ workspacePath, commandEnv }) {
   const bestEffortAbortCommands = [
     ["rebase", "--abort"],
@@ -5143,7 +5181,7 @@ async function persistWorkspaceProgress({
   }
 
   try {
-    const currentState = await readWorkspacePersistenceState({
+    let currentState = await readWorkspacePersistenceState({
       workspacePath,
       commandEnv,
       branch: normalizedBranch,
@@ -5176,6 +5214,29 @@ async function persistWorkspaceProgress({
     }
 
     result.resolvedWriteBranch = normalizedBranch;
+    const shouldAttemptRescuePush =
+      meaningfulRepoWork &&
+      !currentState.hasWorkingTreeChanges &&
+      (!currentState.hasRemoteBranch || currentState.aheadCount > 0);
+    if (shouldAttemptRescuePush) {
+      const pushed = await pushRememberedThreadBranch({
+        workspacePath,
+        commandEnv,
+        branch: normalizedBranch,
+      });
+      if (!pushed.ok) {
+        result.pendingRemoteSync = pushed.error;
+        result.error = pushed.error;
+        return result;
+      }
+      result.pushed = true;
+      currentState = await readWorkspacePersistenceState({
+        workspacePath,
+        commandEnv,
+        branch: normalizedBranch,
+      });
+    }
+
     const requiresManualPush =
       meaningfulRepoWork && (!currentState.hasRemoteBranch || currentState.aheadCount > 0);
     if (requiresManualPush) {
@@ -6646,6 +6707,7 @@ export {
   prepareCodeq8Cli,
   prepareChatGptAccountAuth,
   prepareGitHubCliAuth,
+  pushRememberedThreadBranch,
   refreshWorkspaceRemoteRefs,
   syncChatGptAccountAuth,
   validateChatGptAccountAuth,
