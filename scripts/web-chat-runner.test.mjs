@@ -11,7 +11,6 @@ import {
   buildPullRequestPresentation,
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
-  extractRepoPromptSyncDirective,
   flushServerOwnedCodeq8File,
   hydrateServerOwnedCodeq8File,
   extractUserVisibleFailureHeadline,
@@ -21,6 +20,7 @@ import {
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
+  stripRepoPromptSyncDirective,
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
@@ -326,8 +326,8 @@ test("buildResumePrompt fetches the server-owned resume prompt", async () => {
   }
 });
 
-test("extractRepoPromptSyncDirective strips the hidden prompt sync block from assistant output", () => {
-  const extracted = extractRepoPromptSyncDirective([
+test("stripRepoPromptSyncDirective strips the hidden prompt sync block from assistant output", () => {
+  const stripped = stripRepoPromptSyncDirective([
     "Finished the work.",
     "",
     '<codeq8-prompt-sync expected_revision_id="rpr_prev" change_summary="Update the prompt">',
@@ -337,12 +337,7 @@ test("extractRepoPromptSyncDirective strips the hidden prompt sync block from as
     "</codeq8-prompt-sync>",
   ].join("\n"));
 
-  assert.equal(extracted.contentWithoutDirective, "Finished the work.");
-  assert.deepEqual(extracted.directive, {
-    expectedRevisionId: "rpr_prev",
-    changeSummary: "Update the prompt",
-    markdown: "# Codeq8\n\n- Updated memory",
-  });
+  assert.equal(stripped, "Finished the work.");
 });
 
 test("hydrateServerOwnedCodeq8File writes the prompt file into the workspace and hides it from git", async (t) => {

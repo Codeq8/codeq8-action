@@ -68,7 +68,7 @@ const CODEX_SESSION_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$
 const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
 const WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE = "web_chat_codex_session_bundle";
 const REPO_PROMPT_SYNC_DIRECTIVE_PATTERN =
-  /(?:^|\n)<codeq8-prompt-sync(?:\s+expected_revision_id="([^"\r\n]*)")?(?:\s+change_summary="([^"\r\n]*)")?\s*>\n?([\s\S]*?)\n?<\/codeq8-prompt-sync>\s*$/i;
+  /(?:^|\n)<codeq8-prompt-sync(?:\s+expected_revision_id="[^"\r\n]*")?(?:\s+change_summary="[^"\r\n]*")?\s*>\n?[\s\S]*?\n?<\/codeq8-prompt-sync>\s*$/i;
 
 function normalizeText(value) {
   return String(value || "").trim();
@@ -330,32 +330,19 @@ function stripLeadingCodexTransportNoise(value = "") {
   return normalizeText(lines.slice(index).join("\n"));
 }
 
-function extractRepoPromptSyncDirective(value = "") {
+function stripRepoPromptSyncDirective(value = "") {
   const normalized = String(value || "").replace(/\r\n?/g, "\n").trim();
   if (!normalized) {
-    return {
-      contentWithoutDirective: "",
-      directive: null,
-    };
+    return "";
   }
 
   const match = normalized.match(REPO_PROMPT_SYNC_DIRECTIVE_PATTERN);
   if (!match) {
-    return {
-      contentWithoutDirective: normalized,
-      directive: null,
-    };
+    return normalized;
   }
 
   const matchIndex = match.index ?? normalized.length;
-  return {
-    contentWithoutDirective: normalized.slice(0, matchIndex).trimEnd(),
-    directive: {
-      expectedRevisionId: normalizeText(match[1]).slice(0, 255),
-      changeSummary: normalizeText(match[2]).slice(0, 500),
-      markdown: String(match[3] || "").replace(/\r\n?/g, "\n").trim(),
-    },
-  };
+  return normalized.slice(0, matchIndex).trimEnd();
 }
 
 function isRecoverableCodexTransportFailure({ reason = "", output = "" } = {}) {
@@ -1546,7 +1533,7 @@ async function flushServerOwnedCodeq8File({
     };
   }
 
-  const extractedDirective = extractRepoPromptSyncDirective(assistantMessage);
+  const assistantMessageWithoutPromptSync = stripRepoPromptSyncDirective(assistantMessage);
   let currentMarkdown = "";
   try {
     currentMarkdown = await fs.readFile(hydratedFile.filePath, "utf8");
@@ -1561,7 +1548,7 @@ async function flushServerOwnedCodeq8File({
   let changeSummary = "";
   if (nextMarkdown === hydratedFile.promptMarkdown) {
     return {
-      assistantMessage: extractedDirective.contentWithoutDirective,
+      assistantMessage: assistantMessageWithoutPromptSync,
       promptSaved: false,
       latestRevisionId: hydratedFile.latestRevisionId,
       latestRevisionNumber: hydratedFile.latestRevisionNumber,
@@ -1579,7 +1566,7 @@ async function flushServerOwnedCodeq8File({
     changeSummary,
   });
   return {
-    assistantMessage: extractedDirective.contentWithoutDirective,
+    assistantMessage: assistantMessageWithoutPromptSync,
     promptSaved: !saved.unchanged,
     latestRevisionId: saved.latest_revision_id,
     latestRevisionNumber: saved.latest_revision_number,
@@ -7055,7 +7042,7 @@ export {
   shouldEnsurePullRequest,
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,
-  extractRepoPromptSyncDirective,
+  stripRepoPromptSyncDirective,
   extractUserVisibleFailureHeadline,
   saveServerOwnedCodeq8File,
   toUserVisibleRunnerFailureMessage,
