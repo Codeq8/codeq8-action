@@ -1559,16 +1559,6 @@ async function flushServerOwnedCodeq8File({
   let nextMarkdown = currentMarkdown;
   let expectedRevisionId = hydratedFile.latestRevisionId;
   let changeSummary = "";
-  const fileChanged = currentMarkdown !== hydratedFile.promptMarkdown;
-
-  if (!fileChanged && extractedDirective.directive) {
-    nextMarkdown = extractedDirective.directive.markdown;
-    expectedRevisionId =
-      extractedDirective.directive.expectedRevisionId || hydratedFile.latestRevisionId;
-    changeSummary = extractedDirective.directive.changeSummary;
-    await fs.writeFile(hydratedFile.filePath, nextMarkdown, "utf8");
-  }
-
   if (nextMarkdown === hydratedFile.promptMarkdown) {
     return {
       assistantMessage: extractedDirective.contentWithoutDirective,
@@ -4522,7 +4512,7 @@ function applyServerOwnedCodeq8FileGuidance({
     "Runner-owned prompt file:",
     `- The current per-user repo workflow prompt is hydrated into \`${normalizedPromptFilePath}\` in the workspace root for this run.`,
     `- Read and update \`${normalizedPromptFilePath}\` directly when the durable repo workflow memory should change.`,
-    `- If you update the prompt, edit \`${normalizedPromptFilePath}\` in place instead of emitting a hidden prompt-sync block in your assistant reply.`,
+    `- If you update the prompt, edit \`${normalizedPromptFilePath}\` in place and keep the visible assistant reply free of prompt-transport markup.`,
     "",
     normalizedPrompt,
   ].join("\n");

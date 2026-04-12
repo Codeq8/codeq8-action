@@ -259,7 +259,7 @@ test("buildCodexPrompt prepends runner-owned codeq8.md guidance when file sync i
     });
 
     assert.match(prompt, /Runner-owned prompt file:/);
-    assert.match(prompt, /edit `codeq8\.md` in place instead of emitting a hidden prompt-sync block/);
+    assert.match(prompt, /edit `codeq8\.md` in place and keep the visible assistant reply free of prompt-transport markup/);
     assert.match(prompt, /server-owned fresh prompt$/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -446,7 +446,7 @@ test("flushServerOwnedCodeq8File saves direct file edits and strips any hidden s
   assert.equal(calls[0]?.body?.expected_revision_id, "rpr_prev");
 });
 
-test("flushServerOwnedCodeq8File falls back to the hidden sync block when the file is unchanged", async (t) => {
+test("flushServerOwnedCodeq8File ignores hidden sync blocks when the prompt file is unchanged", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-hidden-sync-"));
   const promptFilePath = path.join(workspacePath, "codeq8.md");
   const originalFetch = globalThis.fetch;
@@ -498,12 +498,11 @@ test("flushServerOwnedCodeq8File falls back to the hidden sync block when the fi
   });
 
   assert.equal(result.assistantMessage, "Finished the work.");
-  assert.equal(result.promptSaved, true);
-  assert.equal(calls[0]?.body?.repo_workflow_prompt_markdown, "# Codeq8\n\n- Hidden fallback");
-  assert.equal(calls[0]?.body?.change_summary, "Update the prompt");
+  assert.equal(result.promptSaved, false);
+  assert.equal(calls.length, 0);
   assert.equal(
     await fs.readFile(promptFilePath, "utf8"),
-    "# Codeq8\n\n- Hidden fallback",
+    "# Codeq8\n\n- Original",
   );
 });
 
