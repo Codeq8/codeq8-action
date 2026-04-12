@@ -20,7 +20,6 @@ import {
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
-  stripRepoPromptSyncDirective,
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
@@ -326,20 +325,6 @@ test("buildResumePrompt fetches the server-owned resume prompt", async () => {
   }
 });
 
-test("stripRepoPromptSyncDirective strips the hidden prompt sync block from assistant output", () => {
-  const stripped = stripRepoPromptSyncDirective([
-    "Finished the work.",
-    "",
-    '<codeq8-prompt-sync expected_revision_id="rpr_prev" change_summary="Update the prompt">',
-    "# Codeq8",
-    "",
-    "- Updated memory",
-    "</codeq8-prompt-sync>",
-  ].join("\n"));
-
-  assert.equal(stripped, "Finished the work.");
-});
-
 test("hydrateServerOwnedCodeq8File writes the prompt file into the workspace and hides it from git", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-hydrate-"));
   const gitPath = path.join(workspacePath, ".git", "info");
@@ -379,7 +364,7 @@ test("hydrateServerOwnedCodeq8File writes the prompt file into the workspace and
   assert.match(await fs.readFile(path.join(workspacePath, ".git", "info", "exclude"), "utf8"), /\/codeq8\.md/);
 });
 
-test("flushServerOwnedCodeq8File saves direct file edits and strips any hidden sync block", async (t) => {
+test("flushServerOwnedCodeq8File saves direct file edits and preserves the visible assistant reply", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-flush-"));
   const promptFilePath = path.join(workspacePath, "codeq8.md");
   const originalFetch = globalThis.fetch;
@@ -420,15 +405,7 @@ test("flushServerOwnedCodeq8File saves direct file edits and strips any hidden s
       latestRevisionId: "rpr_prev",
       latestRevisionNumber: 4,
     },
-    assistantMessage: [
-      "Finished the work.",
-      "",
-      '<codeq8-prompt-sync expected_revision_id="rpr_prev" change_summary="Should be ignored because the file changed">',
-      "# Codeq8",
-      "",
-      "- Hidden fallback",
-      "</codeq8-prompt-sync>",
-    ].join("\n"),
+    assistantMessage: "Finished the work.",
   });
 
   assert.equal(result.assistantMessage, "Finished the work.");
@@ -441,7 +418,7 @@ test("flushServerOwnedCodeq8File saves direct file edits and strips any hidden s
   assert.equal(calls[0]?.body?.expected_revision_id, "rpr_prev");
 });
 
-test("flushServerOwnedCodeq8File ignores hidden sync blocks when the prompt file is unchanged", async (t) => {
+test("flushServerOwnedCodeq8File skips saves when the prompt file is unchanged", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-hidden-sync-"));
   const promptFilePath = path.join(workspacePath, "codeq8.md");
   const originalFetch = globalThis.fetch;
@@ -481,15 +458,7 @@ test("flushServerOwnedCodeq8File ignores hidden sync blocks when the prompt file
       latestRevisionId: "rpr_prev",
       latestRevisionNumber: 4,
     },
-    assistantMessage: [
-      "Finished the work.",
-      "",
-      '<codeq8-prompt-sync expected_revision_id="rpr_prev" change_summary="Update the prompt">',
-      "# Codeq8",
-      "",
-      "- Hidden fallback",
-      "</codeq8-prompt-sync>",
-    ].join("\n"),
+    assistantMessage: "Finished the work.",
   });
 
   assert.equal(result.assistantMessage, "Finished the work.");

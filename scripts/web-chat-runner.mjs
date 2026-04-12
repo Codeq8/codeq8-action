@@ -67,8 +67,6 @@ const CODEX_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const CODEX_SESSION_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/;
 const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
 const WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE = "web_chat_codex_session_bundle";
-const REPO_PROMPT_SYNC_DIRECTIVE_PATTERN =
-  /(?:^|\n)<codeq8-prompt-sync(?:\s+expected_revision_id="[^"\r\n]*")?(?:\s+change_summary="[^"\r\n]*")?\s*>\n?[\s\S]*?\n?<\/codeq8-prompt-sync>\s*$/i;
 
 function normalizeText(value) {
   return String(value || "").trim();
@@ -328,21 +326,6 @@ function stripLeadingCodexTransportNoise(value = "") {
     break;
   }
   return normalizeText(lines.slice(index).join("\n"));
-}
-
-function stripRepoPromptSyncDirective(value = "") {
-  const normalized = String(value || "").replace(/\r\n?/g, "\n").trim();
-  if (!normalized) {
-    return "";
-  }
-
-  const match = normalized.match(REPO_PROMPT_SYNC_DIRECTIVE_PATTERN);
-  if (!match) {
-    return normalized;
-  }
-
-  const matchIndex = match.index ?? normalized.length;
-  return normalized.slice(0, matchIndex).trimEnd();
 }
 
 function isRecoverableCodexTransportFailure({ reason = "", output = "" } = {}) {
@@ -1533,7 +1516,7 @@ async function flushServerOwnedCodeq8File({
     };
   }
 
-  const assistantMessageWithoutPromptSync = stripRepoPromptSyncDirective(assistantMessage);
+  const normalizedAssistantMessage = normalizeText(assistantMessage);
   let currentMarkdown = "";
   try {
     currentMarkdown = await fs.readFile(hydratedFile.filePath, "utf8");
@@ -1548,7 +1531,7 @@ async function flushServerOwnedCodeq8File({
   let changeSummary = "";
   if (nextMarkdown === hydratedFile.promptMarkdown) {
     return {
-      assistantMessage: assistantMessageWithoutPromptSync,
+      assistantMessage: normalizedAssistantMessage,
       promptSaved: false,
       latestRevisionId: hydratedFile.latestRevisionId,
       latestRevisionNumber: hydratedFile.latestRevisionNumber,
@@ -1566,7 +1549,7 @@ async function flushServerOwnedCodeq8File({
     changeSummary,
   });
   return {
-    assistantMessage: assistantMessageWithoutPromptSync,
+    assistantMessage: normalizedAssistantMessage,
     promptSaved: !saved.unchanged,
     latestRevisionId: saved.latest_revision_id,
     latestRevisionNumber: saved.latest_revision_number,
@@ -7042,7 +7025,6 @@ export {
   shouldEnsurePullRequest,
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,
-  stripRepoPromptSyncDirective,
   extractUserVisibleFailureHeadline,
   saveServerOwnedCodeq8File,
   toUserVisibleRunnerFailureMessage,
