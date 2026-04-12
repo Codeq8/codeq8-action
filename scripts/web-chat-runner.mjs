@@ -31,6 +31,16 @@ import {
   WEB_CHAT_RUNNER_RUNTIME_CONTRACT_VERSION,
   WEB_CHAT_RUNNER_RUNTIME_MANIFEST_PATH,
 } from "../lib/web-chat-runner-runtime-manifest.mjs";
+import {
+  WEB_CHAT_RUNNER_CODEQ8_FILE_PATH,
+  WEB_CHAT_RUNNER_CODEQ8_FILE_SAVE_PATH,
+  supportsServerOwnedCodeq8FileSync,
+  webChatRunnerCodeq8FileResponseSchema,
+  webChatRunnerCodeq8FileSaveResponseSchema,
+  webChatRunnerPromptResponseSchema,
+  webChatRunnerPullRequestPresentationResponseSchema,
+  webChatRunnerRuntimeManifestResponseSchema,
+} from "../lib/web-chat-runner-runtime-contract.mjs";
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
 const DEFAULT_CODEX_MODEL = "gpt-5.4";
 const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
@@ -57,6 +67,8 @@ const CODEX_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const CODEX_SESSION_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/;
 const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
 const WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE = "web_chat_codex_session_bundle";
+const REPO_PROMPT_SYNC_DIRECTIVE_PATTERN =
+  /(?:^|\n)<codeq8-prompt-sync(?:\s+expected_revision_id="([^"\r\n]*)")?(?:\s+change_summary="([^"\r\n]*)")?\s*>\n?([\s\S]*?)\n?<\/codeq8-prompt-sync>\s*$/i;
 
 function normalizeText(value) {
   return String(value || "").trim();
@@ -316,6 +328,34 @@ function stripLeadingCodexTransportNoise(value = "") {
     break;
   }
   return normalizeText(lines.slice(index).join("\n"));
+}
+
+function extractRepoPromptSyncDirective(value = "") {
+  const normalized = String(value || "").replace(/\r\n?/g, "\n").trim();
+  if (!normalized) {
+    return {
+      contentWithoutDirective: "",
+      directive: null,
+    };
+  }
+
+  const match = normalized.match(REPO_PROMPT_SYNC_DIRECTIVE_PATTERN);
+  if (!match) {
+    return {
+      contentWithoutDirective: normalized,
+      directive: null,
+    };
+  }
+
+  const matchIndex = match.index ?? normalized.length;
+  return {
+    contentWithoutDirective: normalized.slice(0, matchIndex).trimEnd(),
+    directive: {
+      expectedRevisionId: normalizeText(match[1]).slice(0, 255),
+      changeSummary: normalizeText(match[2]).slice(0, 500),
+      markdown: String(match[3] || "").replace(/\r\n?/g, "\n").trim(),
+    },
+  };
 }
 
 function isRecoverableCodexTransportFailure({ reason = "", output = "" } = {}) {
@@ -1241,6 +1281,8 @@ async function requestWebChatRunnerRuntimeJson({
   webChatRunToken,
   path,
   body,
+  schema = null,
+  responseLabel = "Codeq8 runner runtime response",
 }) {
   const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
   const normalizedToken = normalizeText(webChatRunToken);
@@ -1269,7 +1311,14 @@ async function requestWebChatRunnerRuntimeJson({
       `Codeq8 runner runtime request failed (${response.status}).`;
     throw new Error(errorMessage);
   }
-  return response.payload;
+  if (!schema) {
+    return response.payload;
+  }
+  const parsed = schema.safeParse(response.payload);
+  if (!parsed.success) {
+    throw new Error(`${normalizeText(responseLabel) || "Codeq8 runner runtime response"} is invalid.`);
+  }
+  return parsed.data;
 }
 
 async function requestWebChatRunnerRuntimeManifest({
@@ -1288,6 +1337,8 @@ async function requestWebChatRunnerRuntimeManifest({
       thread_id: normalizeText(threadId),
       run_id: normalizeText(runId),
     },
+    schema: webChatRunnerRuntimeManifestResponseSchema,
+    responseLabel: "Codeq8 runner runtime manifest response",
   });
 }
 
@@ -1337,6 +1388,212 @@ async function assertWebChatRunnerRuntimeCompatibility({
     );
   }
   return manifest;
+}
+
+function resolveWorkspaceRuntimeFilePath({ workspacePath, relativePath }) {
+  const normalizedWorkspacePath = path.resolve(String(workspacePath || ""));
+  const normalizedRelativePath = normalizeText(relativePath).replace(/^\/+/, "");
+  if (!normalizedWorkspacePath || !normalizedRelativePath) {
+    throw new Error("Workspace path and runtime file path are required.");
+  }
+  const resolvedPath = path.resolve(normalizedWorkspacePath, normalizedRelativePath);
+  const relativeToWorkspace = path.relative(normalizedWorkspacePath, resolvedPath);
+  if (
+    relativeToWorkspace === ".." ||
+    relativeToWorkspace.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(normalizedRelativePath)
+  ) {
+    throw new Error(`Runner runtime file path is outside the workspace: ${normalizedRelativePath}`);
+  }
+  return {
+    absolutePath: resolvedPath,
+    relativePath: relativeToWorkspace || path.basename(resolvedPath),
+  };
+}
+
+async function ensureWorkspaceIgnoredRuntimeFile({ workspacePath, relativePath }) {
+  const normalizedWorkspacePath = path.resolve(String(workspacePath || ""));
+  const normalizedRelativePath = normalizeText(relativePath)
+    .replace(/^\/+/, "")
+    .replace(/\\/g, "/");
+  if (!normalizedWorkspacePath || !normalizedRelativePath) {
+    return;
+  }
+
+  const excludePath = path.join(normalizedWorkspacePath, ".git", "info", "exclude");
+  await ensureDirectory(path.dirname(excludePath));
+  let existing = "";
+  try {
+    existing = await fs.readFile(excludePath, "utf8");
+  } catch {
+    existing = "";
+  }
+  const pattern = `/${normalizedRelativePath}`;
+  const existingLines = existing
+    .split(/\r?\n/g)
+    .map((line) => normalizeText(line))
+    .filter(Boolean);
+  if (existingLines.includes(pattern) || existingLines.includes(normalizedRelativePath)) {
+    return;
+  }
+  const nextContents = existing
+    ? `${existing.replace(/\s*$/u, "\n")}${pattern}\n`
+    : `${pattern}\n`;
+  await fs.writeFile(excludePath, nextContents, "utf8");
+}
+
+async function requestServerOwnedCodeq8File({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+}) {
+  return requestWebChatRunnerRuntimeJson({
+    publicBaseUrl,
+    webChatRunToken,
+    path: WEB_CHAT_RUNNER_CODEQ8_FILE_PATH,
+    body: {
+      workspace_repository: normalizeText(workspaceRepository),
+      thread_id: normalizeText(threadId),
+      run_id: normalizeText(runId),
+    },
+    schema: webChatRunnerCodeq8FileResponseSchema,
+    responseLabel: "Codeq8 runner codeq8.md response",
+  });
+}
+
+async function saveServerOwnedCodeq8File({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  markdown,
+  expectedRevisionId = "",
+  changeSummary = "",
+}) {
+  return requestWebChatRunnerRuntimeJson({
+    publicBaseUrl,
+    webChatRunToken,
+    path: WEB_CHAT_RUNNER_CODEQ8_FILE_SAVE_PATH,
+    body: {
+      workspace_repository: normalizeText(workspaceRepository),
+      thread_id: normalizeText(threadId),
+      run_id: normalizeText(runId),
+      repo_workflow_prompt_markdown: String(markdown || ""),
+      expected_revision_id: normalizeText(expectedRevisionId),
+      change_summary: normalizeText(changeSummary),
+    },
+    schema: webChatRunnerCodeq8FileSaveResponseSchema,
+    responseLabel: "Codeq8 runner codeq8.md save response",
+  });
+}
+
+async function hydrateServerOwnedCodeq8File({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  workspacePath,
+}) {
+  const payload = await requestServerOwnedCodeq8File({
+    publicBaseUrl,
+    webChatRunToken,
+    workspaceRepository,
+    threadId,
+    runId,
+  });
+  const resolvedFilePath = resolveWorkspaceRuntimeFilePath({
+    workspacePath,
+    relativePath: payload.prompt_file_path,
+  });
+  await ensureWorkspaceIgnoredRuntimeFile({
+    workspacePath,
+    relativePath: resolvedFilePath.relativePath,
+  });
+  await ensureDirectory(path.dirname(resolvedFilePath.absolutePath));
+  await fs.writeFile(
+    resolvedFilePath.absolutePath,
+    String(payload.repo_workflow_prompt_markdown || ""),
+    "utf8",
+  );
+  return {
+    filePath: resolvedFilePath.absolutePath,
+    relativePath: resolvedFilePath.relativePath.replace(/\\/g, "/"),
+    promptMarkdown: String(payload.repo_workflow_prompt_markdown || ""),
+    latestRevisionId: normalizeText(payload.latest_revision_id),
+    latestRevisionNumber: Number(payload.latest_revision_number || 0) || 0,
+  };
+}
+
+async function flushServerOwnedCodeq8File({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  hydratedFile,
+  assistantMessage,
+}) {
+  if (!hydratedFile) {
+    return {
+      assistantMessage: normalizeText(assistantMessage),
+      promptSaved: false,
+      latestRevisionId: "",
+      latestRevisionNumber: 0,
+    };
+  }
+
+  const extractedDirective = extractRepoPromptSyncDirective(assistantMessage);
+  let currentMarkdown = "";
+  try {
+    currentMarkdown = await fs.readFile(hydratedFile.filePath, "utf8");
+  } catch (error) {
+    throw new Error(
+      `Runner-owned ${hydratedFile.relativePath} file could not be read after the run: ${extractErrorMessage(error)}`,
+    );
+  }
+
+  let nextMarkdown = currentMarkdown;
+  let expectedRevisionId = hydratedFile.latestRevisionId;
+  let changeSummary = "";
+  const fileChanged = currentMarkdown !== hydratedFile.promptMarkdown;
+
+  if (!fileChanged && extractedDirective.directive) {
+    nextMarkdown = extractedDirective.directive.markdown;
+    expectedRevisionId =
+      extractedDirective.directive.expectedRevisionId || hydratedFile.latestRevisionId;
+    changeSummary = extractedDirective.directive.changeSummary;
+    await fs.writeFile(hydratedFile.filePath, nextMarkdown, "utf8");
+  }
+
+  if (nextMarkdown === hydratedFile.promptMarkdown) {
+    return {
+      assistantMessage: extractedDirective.contentWithoutDirective,
+      promptSaved: false,
+      latestRevisionId: hydratedFile.latestRevisionId,
+      latestRevisionNumber: hydratedFile.latestRevisionNumber,
+    };
+  }
+
+  const saved = await saveServerOwnedCodeq8File({
+    publicBaseUrl,
+    webChatRunToken,
+    workspaceRepository,
+    threadId,
+    runId,
+    markdown: nextMarkdown,
+    expectedRevisionId,
+    changeSummary,
+  });
+  return {
+    assistantMessage: extractedDirective.contentWithoutDirective,
+    promptSaved: !saved.unchanged,
+    latestRevisionId: saved.latest_revision_id,
+    latestRevisionNumber: saved.latest_revision_number,
+  };
 }
 
 async function applyWorkspaceGitToken({
@@ -4252,6 +4509,25 @@ async function finalizeChatGptAccountAuth({
   };
 }
 
+function applyServerOwnedCodeq8FileGuidance({
+  prompt,
+  promptFilePath = "",
+}) {
+  const normalizedPrompt = normalizeText(prompt);
+  const normalizedPromptFilePath = normalizeText(promptFilePath);
+  if (!normalizedPrompt || !normalizedPromptFilePath) {
+    return normalizedPrompt;
+  }
+  return [
+    "Runner-owned prompt file:",
+    `- The current per-user repo workflow prompt is hydrated into \`${normalizedPromptFilePath}\` in the workspace root for this run.`,
+    `- Read and update \`${normalizedPromptFilePath}\` directly when the durable repo workflow memory should change.`,
+    `- If you update the prompt, edit \`${normalizedPromptFilePath}\` in place instead of emitting a hidden prompt-sync block in your assistant reply.`,
+    "",
+    normalizedPrompt,
+  ].join("\n");
+}
+
 async function buildCodexPrompt({
   publicBaseUrl,
   webChatRunToken,
@@ -4269,6 +4545,7 @@ async function buildCodexPrompt({
   codeq8Cli,
   attachments = [],
   referencedThreads = [],
+  serverOwnedCodeq8FilePath = "",
 }) {
   const payload = await requestWebChatRunnerRuntimeJson({
     publicBaseUrl,
@@ -4293,12 +4570,17 @@ async function buildCodexPrompt({
       codeq8_cli_available: Boolean(codeq8Cli?.available),
       target_shift: false,
     },
+    schema: webChatRunnerPromptResponseSchema,
+    responseLabel: "Codeq8 runner prompt response",
   });
   const prompt = normalizeText(payload.prompt);
   if (!prompt) {
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
-  return prompt;
+  return applyServerOwnedCodeq8FileGuidance({
+    prompt,
+    promptFilePath: serverOwnedCodeq8FilePath,
+  });
 }
 
 async function buildResumePrompt({
@@ -4318,6 +4600,7 @@ async function buildResumePrompt({
   attachments = [],
   referencedThreads = [],
   targetShift = null,
+  serverOwnedCodeq8FilePath = "",
 }) {
   const payload = await requestWebChatRunnerRuntimeJson({
     publicBaseUrl,
@@ -4342,12 +4625,17 @@ async function buildResumePrompt({
       codeq8_cli_available: false,
       target_shift: Boolean(targetShift),
     },
+    schema: webChatRunnerPromptResponseSchema,
+    responseLabel: "Codeq8 runner prompt response",
   });
   const prompt = normalizeText(payload.prompt);
   if (!prompt) {
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
-  return prompt;
+  return applyServerOwnedCodeq8FileGuidance({
+    prompt,
+    promptFilePath: serverOwnedCodeq8FilePath,
+  });
 }
 
 async function resolveCodexPath(commandEnv) {
@@ -5139,6 +5427,8 @@ async function buildPullRequestPresentation({
       head_commit: headCommitPresentation,
       first_commit: firstCommitPresentation,
     },
+    schema: webChatRunnerPullRequestPresentationResponseSchema,
+    responseLabel: "Codeq8 runner pull request presentation response",
   });
   return {
     title: normalizeText(payload.title),
@@ -5673,6 +5963,11 @@ async function main() {
     "Validated Codeq8 runner runtime manifest",
     `contract=${normalizeText(runtimeManifest.contract_version)} capabilities=${Array.isArray(runtimeManifest.capabilities) ? runtimeManifest.capabilities.length : 0} authorized_paths=${Array.isArray(runtimeManifest.authorized_paths) ? runtimeManifest.authorized_paths.length : 0}`,
   );
+  const serverOwnedCodeq8FileSyncEnabled = supportsServerOwnedCodeq8FileSync(runtimeManifest);
+  log(
+    "Resolved runner-owned codeq8.md workspace sync capability",
+    serverOwnedCodeq8FileSyncEnabled ? "enabled" : "disabled",
+  );
 
   const codexPath = await resolveCodexPath(commandEnv);
   let preparedWorkspace = null;
@@ -5792,6 +6087,22 @@ async function main() {
         commandEnv,
         branch: preparedWorkspace.effectiveWriteBranch,
       });
+      const hydratedCodeq8File = serverOwnedCodeq8FileSyncEnabled
+        ? await hydrateServerOwnedCodeq8File({
+            publicBaseUrl,
+            webChatRunToken,
+            workspaceRepository: activeWorkspaceRepository,
+            threadId,
+            runId,
+            workspacePath: preparedWorkspace.workspacePath,
+          })
+        : null;
+      if (hydratedCodeq8File) {
+        log(
+          "Hydrated runner-owned codeq8.md file",
+          `path=${hydratedCodeq8File.relativePath} revision=${hydratedCodeq8File.latestRevisionId}`,
+        );
+      }
 
       const attemptRunRuntime = await createWebChatRunRuntime(threadId);
       runRuntime = attemptRunRuntime;
@@ -6019,6 +6330,7 @@ async function main() {
               attachments: materializedAttachments,
               referencedThreads,
               targetShift: resumeTargetShift ? targetBeforeAttempt : null,
+              serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
             });
           } else {
             executionMode = "fresh";
@@ -6039,6 +6351,7 @@ async function main() {
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
               referencedThreads,
+              serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
             });
           }
         } catch (sessionError) {
@@ -6175,6 +6488,22 @@ async function main() {
           continue;
         }
         assistantMessage = truncate(normalizeText(execution.output), MAX_OUTPUT_CHARS);
+        const promptSyncResult = await flushServerOwnedCodeq8File({
+          publicBaseUrl,
+          webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
+          workspaceRepository: activeWorkspaceRepository,
+          threadId,
+          runId,
+          hydratedFile: hydratedCodeq8File,
+          assistantMessage,
+        });
+        assistantMessage = truncate(promptSyncResult.assistantMessage, MAX_OUTPUT_CHARS);
+        if (promptSyncResult.promptSaved) {
+          log(
+            "Persisted runner-owned codeq8.md changes",
+            `revision=${promptSyncResult.latestRevisionId || "<unknown>"}`,
+          );
+        }
 
         const finalBranch = await currentBranch({
           workspacePath: preparedWorkspace.workspacePath,
@@ -6692,6 +7021,8 @@ export {
   clearRecoverableCodexSessionErrorState,
   configureWorkspacePushPolicy,
   findBrokenRemoteTrackingRefs,
+  flushServerOwnedCodeq8File,
+  hydrateServerOwnedCodeq8File,
   applyCodeq8CliRuntimeEnv,
   isInvalidCodexSessionBundleError,
   isRecoverableWorkspaceRefRefreshFailure,
@@ -6715,6 +7046,7 @@ export {
   discardPreparedWebChatCodexSessionBundle,
   readFirstCommitPresentation,
   requestWorkspaceGitToken,
+  requestServerOwnedCodeq8File,
   requestWebChatRunnerRuntimeManifest,
   readBranchDivergenceCounts,
   resolveEffectiveWriteBranch,
@@ -6733,7 +7065,9 @@ export {
   shouldEnsurePullRequest,
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,
+  extractRepoPromptSyncDirective,
   extractUserVisibleFailureHeadline,
+  saveServerOwnedCodeq8File,
   toUserVisibleRunnerFailureMessage,
 };
 

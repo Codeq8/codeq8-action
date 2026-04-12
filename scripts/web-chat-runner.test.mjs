@@ -11,6 +11,9 @@ import {
   buildPullRequestPresentation,
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
+  extractRepoPromptSyncDirective,
+  flushServerOwnedCodeq8File,
+  hydrateServerOwnedCodeq8File,
   extractUserVisibleFailureHeadline,
   isRecoverableCodexSessionErrorState,
   persistWorkspaceProgress,
@@ -36,6 +39,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
       contract_version: CONTRACT_VERSION,
       capabilities: [
         "server_owned_prompt",
+        "server_owned_codeq8_file_sync",
         "server_owned_pull_request_presentation",
         "staged_codex_session_upload",
         "recoverable_codex_session_errors",
@@ -45,6 +49,8 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/api/chat/runs/callback",
         "/api/chat/runs/runtime-manifest",
         "/api/chat/runs/prompt",
+        "/api/chat/runs/codeq8-file",
+        "/api/chat/runs/codeq8-file/save",
         "/api/chat/runs/pull-request-presentation",
         "/chatgpt-accounts/get",
         "/chatgpt-accounts/selection/claim",
@@ -215,6 +221,51 @@ test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
   }
 });
 
+test("buildCodexPrompt prepends runner-owned codeq8.md guidance when file sync is active", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      prompt: "server-owned fresh prompt",
+    });
+
+  try {
+    const prompt = await buildCodexPrompt({
+      publicBaseUrl: "https://codeq8.example.com",
+      webChatRunToken: "header.payload.signature",
+      repository: "Codeq8/Codeq8",
+      threadTitle: "Fix the runner",
+      threadId: "wct_123",
+      runId: "wcr_123",
+      messageId: "wcm_123",
+      sourceType: "default_branch",
+      branchContext: {
+        context_branch: "main",
+        write_mode: "branch_and_pr",
+        write_branch: "",
+        base_branch: "main",
+        default_branch: "main",
+        protected_branches: ["main"],
+      },
+      workspacePersistenceState: null,
+      threadSpecText: "",
+      promptText: "fix it",
+      recentChecksPromptText: "",
+      codeq8Cli: { available: false },
+      attachments: [],
+      referencedThreads: [],
+      serverOwnedCodeq8FilePath: "codeq8.md",
+    });
+
+    assert.match(prompt, /Runner-owned prompt file:/);
+    assert.match(prompt, /edit `codeq8\.md` in place instead of emitting a hidden prompt-sync block/);
+    assert.match(prompt, /server-owned fresh prompt$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("buildResumePrompt fetches the server-owned resume prompt", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -273,6 +324,187 @@ test("buildResumePrompt fetches the server-owned resume prompt", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("extractRepoPromptSyncDirective strips the hidden prompt sync block from assistant output", () => {
+  const extracted = extractRepoPromptSyncDirective([
+    "Finished the work.",
+    "",
+    '<codeq8-prompt-sync expected_revision_id="rpr_prev" change_summary="Update the prompt">',
+    "# Codeq8",
+    "",
+    "- Updated memory",
+    "</codeq8-prompt-sync>",
+  ].join("\n"));
+
+  assert.equal(extracted.contentWithoutDirective, "Finished the work.");
+  assert.deepEqual(extracted.directive, {
+    expectedRevisionId: "rpr_prev",
+    changeSummary: "Update the prompt",
+    markdown: "# Codeq8\n\n- Updated memory",
+  });
+});
+
+test("hydrateServerOwnedCodeq8File writes the prompt file into the workspace and hides it from git", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-hydrate-"));
+  const gitPath = path.join(workspacePath, ".git", "info");
+  const originalFetch = globalThis.fetch;
+
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.mkdir(gitPath, { recursive: true });
+  globalThis.fetch = async () =>
+    Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      prompt_file_path: "codeq8.md",
+      repo_workflow_prompt_markdown: "# Codeq8\n\n- Durable prompt",
+      latest_revision_id: "rpr_123",
+      latest_revision_number: 4,
+    });
+
+  const hydrated = await hydrateServerOwnedCodeq8File({
+    publicBaseUrl: "https://codeq8.example.com",
+    webChatRunToken: "header.payload.signature",
+    workspaceRepository: "Codeq8/Codeq8",
+    threadId: "wct_123",
+    runId: "wcr_123",
+    workspacePath,
+  });
+
+  assert.equal(hydrated.relativePath, "codeq8.md");
+  assert.equal(hydrated.latestRevisionId, "rpr_123");
+  assert.equal(
+    await fs.readFile(path.join(workspacePath, "codeq8.md"), "utf8"),
+    "# Codeq8\n\n- Durable prompt",
+  );
+  assert.match(await fs.readFile(path.join(workspacePath, ".git", "info", "exclude"), "utf8"), /\/codeq8\.md/);
+});
+
+test("flushServerOwnedCodeq8File saves direct file edits and strips any hidden sync block", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-flush-"));
+  const promptFilePath = path.join(workspacePath, "codeq8.md");
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(promptFilePath, "# Codeq8\n\n- Updated on disk", "utf8");
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      method: init?.method || "GET",
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    return Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      prompt_file_path: "codeq8.md",
+      unchanged: false,
+      latest_revision_id: "rpr_next",
+      latest_revision_number: 5,
+    });
+  };
+
+  const result = await flushServerOwnedCodeq8File({
+    publicBaseUrl: "https://codeq8.example.com",
+    webChatRunToken: "header.payload.signature",
+    workspaceRepository: "Codeq8/Codeq8",
+    threadId: "wct_123",
+    runId: "wcr_123",
+    hydratedFile: {
+      filePath: promptFilePath,
+      relativePath: "codeq8.md",
+      promptMarkdown: "# Codeq8\n\n- Original",
+      latestRevisionId: "rpr_prev",
+      latestRevisionNumber: 4,
+    },
+    assistantMessage: [
+      "Finished the work.",
+      "",
+      '<codeq8-prompt-sync expected_revision_id="rpr_prev" change_summary="Should be ignored because the file changed">',
+      "# Codeq8",
+      "",
+      "- Hidden fallback",
+      "</codeq8-prompt-sync>",
+    ].join("\n"),
+  });
+
+  assert.equal(result.assistantMessage, "Finished the work.");
+  assert.equal(result.promptSaved, true);
+  assert.equal(result.latestRevisionId, "rpr_next");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.url, "https://codeq8.example.com/api/chat/runs/codeq8-file/save");
+  assert.equal(calls[0]?.method, "POST");
+  assert.equal(calls[0]?.body?.repo_workflow_prompt_markdown, "# Codeq8\n\n- Updated on disk");
+  assert.equal(calls[0]?.body?.expected_revision_id, "rpr_prev");
+});
+
+test("flushServerOwnedCodeq8File falls back to the hidden sync block when the file is unchanged", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-hidden-sync-"));
+  const promptFilePath = path.join(workspacePath, "codeq8.md");
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(promptFilePath, "# Codeq8\n\n- Original", "utf8");
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    return Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      prompt_file_path: "codeq8.md",
+      unchanged: false,
+      latest_revision_id: "rpr_next",
+      latest_revision_number: 5,
+    });
+  };
+
+  const result = await flushServerOwnedCodeq8File({
+    publicBaseUrl: "https://codeq8.example.com",
+    webChatRunToken: "header.payload.signature",
+    workspaceRepository: "Codeq8/Codeq8",
+    threadId: "wct_123",
+    runId: "wcr_123",
+    hydratedFile: {
+      filePath: promptFilePath,
+      relativePath: "codeq8.md",
+      promptMarkdown: "# Codeq8\n\n- Original",
+      latestRevisionId: "rpr_prev",
+      latestRevisionNumber: 4,
+    },
+    assistantMessage: [
+      "Finished the work.",
+      "",
+      '<codeq8-prompt-sync expected_revision_id="rpr_prev" change_summary="Update the prompt">',
+      "# Codeq8",
+      "",
+      "- Hidden fallback",
+      "</codeq8-prompt-sync>",
+    ].join("\n"),
+  });
+
+  assert.equal(result.assistantMessage, "Finished the work.");
+  assert.equal(result.promptSaved, true);
+  assert.equal(calls[0]?.body?.repo_workflow_prompt_markdown, "# Codeq8\n\n- Hidden fallback");
+  assert.equal(calls[0]?.body?.change_summary, "Update the prompt");
+  assert.equal(
+    await fs.readFile(promptFilePath, "utf8"),
+    "# Codeq8\n\n- Hidden fallback",
+  );
 });
 
 test("buildPullRequestPresentation sends local git commit facts to the server-owned PR presentation route", async () => {
