@@ -16,6 +16,7 @@ import {
   extractUserVisibleFailureHeadline,
   isRecoverableCodexSessionErrorState,
   persistWorkspaceProgress,
+  prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
@@ -265,6 +266,52 @@ test("buildCodexPrompt prepends runner-owned codeq8.md guidance when file sync i
   }
 });
 
+test("buildCodexPrompt prepends runner-owned Discord DM guidance when available", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      prompt: "server-owned fresh prompt",
+    });
+
+  try {
+    const prompt = await buildCodexPrompt({
+      publicBaseUrl: "https://codeq8.example.com",
+      webChatRunToken: "header.payload.signature",
+      repository: "Codeq8/Codeq8",
+      threadTitle: "Fix the runner",
+      threadId: "wct_123",
+      runId: "wcr_123",
+      messageId: "wcm_123",
+      sourceType: "default_branch",
+      branchContext: {
+        context_branch: "main",
+        write_mode: "branch_and_pr",
+        write_branch: "",
+        base_branch: "main",
+        default_branch: "main",
+        protected_branches: ["main"],
+      },
+      workspacePersistenceState: null,
+      threadSpecText: "",
+      promptText: "fix it",
+      recentChecksPromptText: "",
+      codeq8Cli: { available: false },
+      attachments: [],
+      referencedThreads: [],
+      runnerDiscordDmCommand: "codeq8-discord-dm",
+    });
+
+    assert.match(prompt, /Runner-owned Discord DM helper:/);
+    assert.match(prompt, /codeq8-discord-dm list --json/);
+    assert.match(prompt, /codeq8-discord-dm send --content/);
+    assert.match(prompt, /server-owned fresh prompt$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("buildResumePrompt fetches the server-owned resume prompt", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -323,6 +370,71 @@ test("buildResumePrompt fetches the server-owned resume prompt", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("buildResumePrompt prepends runner-owned Discord DM guidance when available", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      prompt: "server-owned resume prompt",
+    });
+
+  try {
+    const prompt = await buildResumePrompt({
+      publicBaseUrl: "https://codeq8.example.com",
+      webChatRunToken: "header.payload.signature",
+      repository: "Codeq8/Codeq8",
+      threadId: "wct_123",
+      runId: "wcr_123",
+      messageId: "wcm_123",
+      sourceType: "default_branch",
+      branchContext: {
+        context_branch: "main",
+        write_mode: "branch_and_pr",
+        write_branch: "",
+        base_branch: "main",
+        default_branch: "main",
+        protected_branches: ["main"],
+      },
+      workspacePersistenceState: null,
+      threadSpecText: "",
+      promptText: "keep going",
+      recentUserMessagesPromptText: "",
+      recentChecksPromptText: "",
+      attachments: [],
+      referencedThreads: [],
+      serverOwnedCodeq8FilePath: "",
+      runnerDiscordDmCommand: "codeq8-discord-dm",
+    });
+
+    assert.match(prompt, /Runner-owned Discord DM helper:/);
+    assert.match(prompt, /codeq8-discord-dm list --json/);
+    assert.match(prompt, /server-owned resume prompt$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("prepareRunnerDiscordDmCli writes the helper wrapper into the runtime bin", async (t) => {
+  const runtimeHomePath = await fs.mkdtemp(path.join(os.tmpdir(), "runner-discord-dm-"));
+  t.after(async () => {
+    await fs.rm(runtimeHomePath, { recursive: true, force: true });
+  });
+
+  const commandEnv = { PATH: "/usr/bin" };
+  const prepared = await prepareRunnerDiscordDmCli({
+    commandEnv,
+    runtimeHomePath,
+  });
+
+  assert.equal(prepared.available, true);
+  assert.equal(prepared.commandName, "codeq8-discord-dm");
+  assert.match(prepared.wrapperPath, /codeq8-discord-dm$/);
+  const wrapperContents = await fs.readFile(prepared.wrapperPath, "utf8");
+  assert.match(wrapperContents, /web-chat-runner-discord-dm\.mjs/);
+  assert.match(commandEnv.PATH, new RegExp(runtimeHomePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("hydrateServerOwnedCodeq8File writes the prompt file into the workspace and hides it from git", async (t) => {
