@@ -305,7 +305,10 @@ test("buildCodexPrompt prepends runner-owned Discord DM guidance when available"
 
     assert.match(prompt, /Runner-owned Discord DM helper:/);
     assert.match(prompt, /codeq8-discord-dm list --json/);
-    assert.match(prompt, /codeq8-discord-dm send --content/);
+    assert.match(prompt, /codeq8-discord-dm send --content .* --json/);
+    assert.match(prompt, /wrapper prints no visible stdout/i);
+    assert.match(prompt, /node --input-type=module -e/);
+    assert.match(prompt, /Do not claim that a Discord DM was sent unless the helper proves `sent: true`\./);
     assert.match(prompt, /server-owned fresh prompt$/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -411,6 +414,7 @@ test("buildResumePrompt prepends runner-owned Discord DM guidance when available
 
     assert.match(prompt, /Runner-owned Discord DM helper:/);
     assert.match(prompt, /codeq8-discord-dm list --json/);
+    assert.match(prompt, /codeq8-discord-dm send --content .* --json/);
     assert.match(prompt, /server-owned resume prompt$/);
   } finally {
     globalThis.fetch = originalFetch;
