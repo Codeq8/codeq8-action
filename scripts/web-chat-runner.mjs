@@ -4069,10 +4069,19 @@ async function prepareChatGptAccountAuth({
 }) {
   const normalizedOwnerGithubLogin = normalizeText(ownerGithubLogin);
   const normalizedAccountId = normalizeChatGptAccountId(accountId);
-  if (!normalizedOwnerGithubLogin || !normalizedAccountId) {
+  if (!normalizedOwnerGithubLogin) {
     return {
       available: false,
-      reason: "An assigned ChatGPT account is required for web chat runner auth.",
+      reason: "A GitHub login is required for web chat runner auth.",
+    };
+  }
+  if (!normalizedAccountId) {
+    return {
+      available: true,
+      accountId: "",
+      displayName: "",
+      email: "",
+      usesRunnerAuthentication: true,
     };
   }
 
@@ -4121,6 +4130,7 @@ async function prepareChatGptAccountAuth({
     accountId: normalizedAccountId,
     displayName: normalizeText(account.display_name || account.displayName || ""),
     email: normalizeText(account.email || ""),
+    usesRunnerAuthentication: false,
   };
 }
 
@@ -6204,66 +6214,73 @@ async function main() {
               "The assigned ChatGPT account could not be loaded for this run.",
           );
         }
-        log(
-          "Prepared ChatGPT account for web chat run",
-          `account_id=${preparedChatGptAccount.accountId} owner=${githubLogin}`,
-        );
-        activeChatGptAccount = {
-          ownerGithubLogin: githubLogin,
-          accountId: preparedChatGptAccount.accountId,
-        };
-        const validatedChatGptAccount = await validateChatGptAccountAuth({
-          codexPath,
-          codexHome: attemptRunRuntime.codexHome,
-          workspacePath: preparedWorkspace.workspacePath,
-          commandEnv: codexCommandEnv,
-        });
-        if (!validatedChatGptAccount.ok) {
-          runBodyError = new Error(
-            validatedChatGptAccount.reason ||
-              "The assigned ChatGPT account could not be validated for this run.",
+        if (preparedChatGptAccount.usesRunnerAuthentication) {
+          log(
+            "Using runner-authenticated Codex for web chat run",
+            `owner=${githubLogin}`,
           );
-          if (validatedChatGptAccount.reauthRequired && activeChatGptAccount) {
-            const recovery = await recoverFromChatGptAccountReauthFailure({
-              workerUrl: chatGptAccountWorkerUrl,
-              adminToken,
-              ownerGithubLogin: activeChatGptAccount.ownerGithubLogin,
-              accountId: activeChatGptAccount.accountId,
-              error: validatedChatGptAccount.reason,
-              recoveryCount: chatGptAccountRecoveryCount,
-            });
-            skipChatGptAccountFinalization = true;
-            activeChatGptAccount = null;
-            if (!recovery.ok) {
-              throw new Error(
-                recovery.error ||
-                  validatedChatGptAccount.reason ||
-                  "The assigned ChatGPT account needs to be reconnected.",
-              );
-            }
-            chatGptAccountRecoveryCount = recovery.recoveryCount;
-            selectedChatGptAccountId = recovery.nextAccountId;
-            log(
-              "Retrying web chat run with the next ChatGPT account",
-              `owner=${githubLogin} account_id=${selectedChatGptAccountId} retry_count=${chatGptAccountRecoveryCount}`,
+        } else {
+          log(
+            "Prepared ChatGPT account for web chat run",
+            `account_id=${preparedChatGptAccount.accountId} owner=${githubLogin}`,
+          );
+          activeChatGptAccount = {
+            ownerGithubLogin: githubLogin,
+            accountId: preparedChatGptAccount.accountId,
+          };
+          const validatedChatGptAccount = await validateChatGptAccountAuth({
+            codexPath,
+            codexHome: attemptRunRuntime.codexHome,
+            workspacePath: preparedWorkspace.workspacePath,
+            commandEnv: codexCommandEnv,
+          });
+          if (!validatedChatGptAccount.ok) {
+            runBodyError = new Error(
+              validatedChatGptAccount.reason ||
+                "The assigned ChatGPT account could not be validated for this run.",
             );
-            continue;
+            if (validatedChatGptAccount.reauthRequired && activeChatGptAccount) {
+              const recovery = await recoverFromChatGptAccountReauthFailure({
+                workerUrl: chatGptAccountWorkerUrl,
+                adminToken,
+                ownerGithubLogin: activeChatGptAccount.ownerGithubLogin,
+                accountId: activeChatGptAccount.accountId,
+                error: validatedChatGptAccount.reason,
+                recoveryCount: chatGptAccountRecoveryCount,
+              });
+              skipChatGptAccountFinalization = true;
+              activeChatGptAccount = null;
+              if (!recovery.ok) {
+                throw new Error(
+                  recovery.error ||
+                    validatedChatGptAccount.reason ||
+                    "The assigned ChatGPT account needs to be reconnected.",
+                );
+              }
+              chatGptAccountRecoveryCount = recovery.recoveryCount;
+              selectedChatGptAccountId = recovery.nextAccountId;
+              log(
+                "Retrying web chat run with the next ChatGPT account",
+                `owner=${githubLogin} account_id=${selectedChatGptAccountId} retry_count=${chatGptAccountRecoveryCount}`,
+              );
+              continue;
+            }
+            throw runBodyError;
           }
-          throw runBodyError;
+          const syncedChatGptAccount = await syncChatGptAccountAuth({
+            workerUrl: chatGptAccountWorkerUrl,
+            adminToken,
+            codexHome: attemptRunRuntime.codexHome,
+            ownerGithubLogin: githubLogin,
+            persistedAccountId: preparedChatGptAccount.accountId,
+            threadId,
+            runId,
+          });
+          selectedChatGptAccountId =
+            normalizeChatGptAccountId(syncedChatGptAccount.accountId) ||
+            preparedChatGptAccount.accountId;
+          activeChatGptAccount.accountId = selectedChatGptAccountId;
         }
-        const syncedChatGptAccount = await syncChatGptAccountAuth({
-          workerUrl: chatGptAccountWorkerUrl,
-          adminToken,
-          codexHome: attemptRunRuntime.codexHome,
-          ownerGithubLogin: githubLogin,
-          persistedAccountId: preparedChatGptAccount.accountId,
-          threadId,
-          runId,
-        });
-        selectedChatGptAccountId =
-          normalizeChatGptAccountId(syncedChatGptAccount.accountId) ||
-          preparedChatGptAccount.accountId;
-        activeChatGptAccount.accountId = selectedChatGptAccountId;
 
         preparedCodeq8Cli = await prepareCodeq8Cli({
           commandEnv: codexCommandEnv,

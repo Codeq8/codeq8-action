@@ -16,6 +16,7 @@ import {
   extractUserVisibleFailureHeadline,
   isRecoverableCodexSessionErrorState,
   persistWorkspaceProgress,
+  prepareChatGptAccountAuth,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
   toUserVisibleRunnerFailureMessage,
@@ -133,6 +134,32 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
         }),
       /missing authorized paths: \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload, \/web-chat\/codex-session\/upload-discard/,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("prepareChatGptAccountAuth falls back to runner-authenticated Codex when no account is assigned", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not run for the no-account fallback path");
+  };
+
+  try {
+    const prepared = await prepareChatGptAccountAuth({
+      workerUrl: "https://worker.codeq8.example.com",
+      adminToken: "token",
+      codexHome: path.join(os.tmpdir(), "codeq8-runner-no-account"),
+      ownerGithubLogin: "aalzanki",
+      accountId: "",
+    });
+
+    assert.equal(prepared.available, true);
+    assert.equal(prepared.usesRunnerAuthentication, true);
+    assert.equal(prepared.accountId, "");
+    assert.equal(fetchCalled, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
