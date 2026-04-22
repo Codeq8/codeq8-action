@@ -11,6 +11,7 @@ import {
   buildPullRequestPresentation,
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
+  configureWorkspaceGitCredentialHelper,
   flushServerOwnedCodeq8File,
   hydrateServerOwnedCodeq8File,
   extractUserVisibleFailureHeadline,
@@ -743,6 +744,51 @@ test("persistWorkspaceProgress explicitly pushes remembered branches that are ah
     assert.equal(readAheadCount(workspacePath, "feature/test"), 0);
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("configureWorkspaceGitCredentialHelper clears inherited helpers before adding the Codeq8 helper", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-credential-helper-"));
+
+  try {
+    git(workspacePath, ["init"]);
+
+    const helperPath = await configureWorkspaceGitCredentialHelper({
+      workspacePath,
+      commandEnv: process.env,
+      publicBaseUrl: "https://codeq8.example.com",
+      workspaceRepository: "Codeq8/codeq8-action",
+    });
+
+    const helperConfig = execFileSync(
+      "git",
+      ["config", "--local", "--get-all", "credential.helper"],
+      {
+        cwd: workspacePath,
+        env: process.env,
+        encoding: "utf8",
+      },
+    );
+    const helperValues = String(helperConfig || "")
+      .split(/\r?\n/)
+      .slice(0, -1);
+    assert.deepEqual(helperValues, ["", helperPath]);
+
+    const useHttpPath = execFileSync(
+      "git",
+      ["config", "--local", "--get", "credential.useHttpPath"],
+      {
+        cwd: workspacePath,
+        env: process.env,
+        encoding: "utf8",
+      },
+    );
+    assert.equal(String(useHttpPath || "").trim(), "true");
+
+    const helperScript = await fs.readFile(helperPath, "utf8");
+    assert.match(helperScript, /workspace-git-token/);
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
   }
 });
 

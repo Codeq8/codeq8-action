@@ -1704,9 +1704,21 @@ async function configureWorkspaceGitCredentialHelper({
   );
   await fs.chmod(helperPath, 0o755);
 
+  const clearedInheritedHelpers = await runProcessCapture(
+    "git",
+    ["config", "--local", "--replace-all", "credential.helper", ""],
+    {
+      cwd: workspacePath,
+      env: commandEnv,
+    },
+  );
+  if (!clearedInheritedHelpers.ok) {
+    throw new Error("Unable to clear inherited workspace git credential helpers.");
+  }
+
   const configuredHelper = await runProcessCapture(
     "git",
-    ["config", "--local", "credential.helper", helperPath],
+    ["config", "--local", "--add", "credential.helper", helperPath],
     {
       cwd: workspacePath,
       env: commandEnv,
@@ -7087,6 +7099,7 @@ export {
   clearGitOperationState,
   loadCodexSessionStateForExecution,
   clearRecoverableCodexSessionErrorState,
+  configureWorkspaceGitCredentialHelper,
   configureWorkspacePushPolicy,
   findBrokenRemoteTrackingRefs,
   flushServerOwnedCodeq8File,
