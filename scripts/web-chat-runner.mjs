@@ -43,7 +43,7 @@ import {
   webChatRunnerRuntimeManifestResponseSchema,
 } from "../lib/web-chat-runner-runtime-contract.mjs";
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
-const DEFAULT_CODEX_MODEL = "gpt-5.4";
+const DEFAULT_CODEX_MODEL = "gpt-5.5";
 const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
 const DEFAULT_TIMEOUT_SECONDS = 6 * 60 * 60;
 const DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT = "1";
