@@ -8,10 +8,10 @@ import test from "node:test";
 import {
   assertWebChatRunnerRuntimeCompatibility,
   buildCodexPrompt,
-  buildPullRequestPresentation,
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
   configureWorkspaceGitCredentialHelper,
+  findPullRequestForBranch,
   flushServerOwnedCodeq8File,
   hydrateServerOwnedCodeq8File,
   extractUserVisibleFailureHeadline,
@@ -42,7 +42,6 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
       capabilities: [
         "server_owned_prompt",
         "server_owned_codeq8_file_sync",
-        "server_owned_pull_request_presentation",
         "staged_codex_session_upload",
         "recoverable_codex_session_errors",
       ],
@@ -53,7 +52,6 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/api/chat/runs/prompt",
         "/api/chat/runs/codeq8-file",
         "/api/chat/runs/codeq8-file/save",
-        "/api/chat/runs/pull-request-presentation",
         "/chatgpt-accounts/get",
         "/chatgpt-accounts/selection/claim",
         "/chatgpt-accounts/upsert",
@@ -101,7 +99,6 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
       contract_version: CONTRACT_VERSION,
       capabilities: [
         "server_owned_prompt",
-        "server_owned_pull_request_presentation",
         "staged_codex_session_upload",
         "recoverable_codex_session_errors",
       ],
@@ -110,7 +107,6 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
         "/api/chat/runs/callback",
         "/api/chat/runs/runtime-manifest",
         "/api/chat/runs/prompt",
-        "/api/chat/runs/pull-request-presentation",
         "/chatgpt-accounts/get",
         "/chatgpt-accounts/selection/claim",
         "/chatgpt-accounts/upsert",
@@ -614,72 +610,52 @@ test("flushServerOwnedCodeq8File skips saves when the prompt file is unchanged",
   );
 });
 
-test("buildPullRequestPresentation sends local git commit facts to the server-owned PR presentation route", async () => {
-  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-pr-presentation-"));
+test("findPullRequestForBranch only reads existing pull requests", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
 
   globalThis.fetch = async (url, init) => {
     calls.push({
       url: String(url),
+      method: init?.method || "GET",
       body: init?.body ? JSON.parse(String(init.body)) : null,
     });
-    return Response.json({
-      ok: true,
-      contract_version: CONTRACT_VERSION,
-      title: "Preserve loop state in thread registry",
-      body: "Implemented the thread-registry persistence fix.\n\nAdded tests too.",
-    });
+    return Response.json([
+      {
+        number: 42,
+        title: "Preserve loop state in thread registry",
+        html_url: "https://github.com/Codeq8/codeq8-action/pull/42",
+      },
+    ]);
   };
 
   try {
-    await fs.writeFile(path.join(workspacePath, "README.md"), "test\n");
-    git(workspacePath, ["init", "-b", "main"]);
-    git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
-    git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
-    git(workspacePath, ["add", "README.md"]);
-    git(workspacePath, ["commit", "-m", "Initial real subject", "-m", "Useful body"]);
-    git(workspacePath, ["remote", "add", "origin", workspacePath]);
-    git(workspacePath, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
-    git(workspacePath, ["checkout", "-b", "feature/thread-title"]);
-    git(workspacePath, ["update-ref", "refs/remotes/origin/feature/thread-title", "HEAD"]);
-    await fs.writeFile(path.join(workspacePath, "README.md"), "updated\n");
-    git(workspacePath, ["add", "README.md"]);
-    git(workspacePath, ["commit", "-m", "Second real subject", "-m", "Second body"]);
-
-    const presentation = await buildPullRequestPresentation({
-      publicBaseUrl: "https://codeq8.example.com",
-      webChatRunToken: "header.payload.signature",
-      workspaceRepository: "Codeq8/Codeq8",
-      threadId: "wct_123",
-      runId: "wcr_123",
-      workspacePath,
-      commandEnv: process.env,
-      branch: "feature/thread-title",
+    const result = await findPullRequestForBranch({
+      repository: "Codeq8/codeq8-action",
+      headRepository: "Codeq8/codeq8-action",
+      headBranch: "feature/thread-title",
       baseBranch: "main",
-      threadTitle: "Preserve loop state in thread registry",
-      assistantMessage: "Implemented the thread-registry persistence fix.\n\nAdded tests too.",
+      token: "github-token",
     });
 
-    assert.deepEqual(presentation, {
-      title: "Preserve loop state in thread registry",
-      body: "Implemented the thread-registry persistence fix.\n\nAdded tests too.",
+    assert.deepEqual(result, {
+      ok: true,
+      pullRequest: {
+        number: 42,
+        title: "Preserve loop state in thread registry",
+        url: "https://github.com/Codeq8/codeq8-action/pull/42",
+      },
+      existing: true,
     });
     assert.equal(calls.length, 1);
-    assert.equal(
-      calls[0]?.url,
-      "https://codeq8.example.com/api/chat/runs/pull-request-presentation",
-    );
-    assert.equal(calls[0]?.body?.workspace_repository, "Codeq8/Codeq8");
-    assert.equal(calls[0]?.body?.thread_id, "wct_123");
-    assert.equal(calls[0]?.body?.run_id, "wcr_123");
-    assert.equal(calls[0]?.body?.head_commit?.subject, "Second real subject");
-    assert.equal(calls[0]?.body?.head_commit?.body, "Second body");
-    assert.equal(calls[0]?.body?.first_commit?.subject, "Second real subject");
-    assert.equal(calls[0]?.body?.first_commit?.body, "Second body");
+    assert.equal(calls[0]?.method, "GET");
+    assert.equal(calls[0]?.body, null);
+    assert.match(calls[0]?.url, /^https:\/\/api\.github\.com\/repos\/Codeq8\/codeq8-action\/pulls\?/);
+    assert.match(calls[0]?.url, /state=open/);
+    assert.match(calls[0]?.url, /head=Codeq8%3Afeature%2Fthread-title/);
+    assert.match(calls[0]?.url, /base=main/);
   } finally {
     globalThis.fetch = originalFetch;
-    await fs.rm(workspacePath, { recursive: true, force: true });
   }
 });
 
