@@ -39,7 +39,6 @@ import {
   webChatRunnerCodeq8FileResponseSchema,
   webChatRunnerCodeq8FileSaveResponseSchema,
   webChatRunnerPromptResponseSchema,
-  webChatRunnerPullRequestPresentationResponseSchema,
   webChatRunnerRuntimeManifestResponseSchema,
 } from "../lib/web-chat-runner-runtime-contract.mjs";
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
@@ -2478,7 +2477,7 @@ function resolveReviewBaseBranch({ sourceType, branchContext }) {
   return normalizedContextBranch || normalizedDefaultBranch;
 }
 
-function shouldEnsurePullRequest({
+function shouldLookUpPullRequest({
   sourceType = "",
   writeMode = "",
   hasBranchChangesForReview = false,
@@ -5387,126 +5386,18 @@ async function branchHasCommitsAgainstBase({
   return parsePositiveInteger(result.stdout, 0) > 0;
 }
 
-async function readHeadCommitPresentation({ workspacePath, commandEnv }) {
-  const subjectResult = await runProcessCapture("git", ["log", "-1", "--pretty=%s"], {
-    cwd: workspacePath,
-    env: commandEnv,
-  });
-  const bodyResult = await runProcessCapture("git", ["log", "-1", "--pretty=%b"], {
-    cwd: workspacePath,
-    env: commandEnv,
-  });
-  return {
-    subject: normalizeText(subjectResult.stdout),
-    body: normalizeText(bodyResult.stdout),
-  };
-}
-
-async function readFirstCommitPresentation({
-  workspacePath,
-  commandEnv,
-  branch,
-  baseBranch,
-}) {
-  const normalizedBranch = normalizeBranchName(branch);
-  const normalizedBaseBranch = normalizeBranchName(baseBranch);
-  if (!normalizedBranch || !normalizedBaseBranch) {
-    return readHeadCommitPresentation({ workspacePath, commandEnv });
-  }
-
-  const commitListResult = await runProcessCapture(
-    "git",
-    ["rev-list", "--reverse", `origin/${normalizedBaseBranch}..refs/heads/${normalizedBranch}`],
-    {
-      cwd: workspacePath,
-      env: commandEnv,
-    },
-  );
-  const firstCommitSha = normalizeText(commitListResult.stdout)
-    .split(/\s+/)
-    .filter(Boolean)[0];
-  if (!commitListResult.ok || !firstCommitSha) {
-    return readHeadCommitPresentation({ workspacePath, commandEnv });
-  }
-
-  const subjectResult = await runProcessCapture("git", ["log", "-1", "--pretty=%s", firstCommitSha], {
-    cwd: workspacePath,
-    env: commandEnv,
-  });
-  const bodyResult = await runProcessCapture("git", ["log", "-1", "--pretty=%b", firstCommitSha], {
-    cwd: workspacePath,
-    env: commandEnv,
-  });
-  return {
-    subject: normalizeText(subjectResult.stdout),
-    body: normalizeText(bodyResult.stdout),
-  };
-}
-
-async function buildPullRequestPresentation({
-  publicBaseUrl,
-  webChatRunToken,
-  workspaceRepository,
-  threadId,
-  runId,
-  workspacePath,
-  commandEnv,
-  branch,
-  baseBranch,
-  threadTitle = "",
-  assistantMessage = "",
-}) {
-  const headCommitPresentation = await readHeadCommitPresentation({
-    workspacePath,
-    commandEnv,
-  });
-  const firstCommitPresentation = await readFirstCommitPresentation({
-    workspacePath,
-    commandEnv,
-    branch,
-    baseBranch,
-  });
-  const normalizedThreadTitle = normalizeText(threadTitle);
-  const payload = await requestWebChatRunnerRuntimeJson({
-    publicBaseUrl,
-    webChatRunToken,
-    path: "/api/chat/runs/pull-request-presentation",
-    body: {
-      workspace_repository: normalizeText(workspaceRepository),
-      thread_id: normalizeText(threadId),
-      run_id: normalizeText(runId),
-      thread_title: normalizedThreadTitle,
-      assistant_message: normalizeText(assistantMessage),
-      head_commit: headCommitPresentation,
-      first_commit: firstCommitPresentation,
-    },
-    schema: webChatRunnerPullRequestPresentationResponseSchema,
-    responseLabel: "Codeq8 runner pull request presentation response",
-  });
-  return {
-    title: normalizeText(payload.title),
-    body: normalizeText(payload.body),
-  };
-}
-
 async function persistWorkspaceProgress({
-  publicBaseUrl,
-  webChatRunToken,
   workspacePath,
   commandEnv,
   sourceType = "",
   branch,
   writeMode = "",
   repository = "",
-  threadId = "",
-  runId = "",
   headRepository = "",
   baseBranch = "",
   gitToken = "",
   protectedBranches = [],
   baselineState = null,
-  threadTitle = "",
-  assistantMessage = "",
 }) {
   const normalizedBranch = normalizeBranchName(branch);
   const result = {
@@ -5585,7 +5476,7 @@ async function persistWorkspaceProgress({
     if (requiresManualPush) {
       result.pendingRemoteSync = currentState.hasRemoteBranch
         ? `Branch ${normalizedBranch} still has ${currentState.aheadCount} local commit(s) ahead of origin/${normalizedBranch}. Codex must push them explicitly.`
-        : `Branch ${normalizedBranch} only exists in the local runner workspace. Codex must push it explicitly before Codeq8 can open or update a pull request.`;
+        : `Branch ${normalizedBranch} only exists in the local runner workspace. Codex must push it explicitly before Codeq8 can link existing pull request metadata.`;
       result.error = result.pendingRemoteSync;
       return result;
     }
@@ -5599,41 +5490,26 @@ async function persistWorkspaceProgress({
             baseBranch,
           })
         : false;
-    const shouldCreateOrAttachPullRequest =
+    const shouldAttachPullRequest =
       !requiresManualPush &&
       currentState.hasRemoteBranch &&
-      shouldEnsurePullRequest({
+      shouldLookUpPullRequest({
         sourceType,
         writeMode,
         hasBranchChangesForReview,
-      meaningfulRepoWork,
+        meaningfulRepoWork,
       });
 
-    if (shouldCreateOrAttachPullRequest) {
-      const pullRequestPresentation = await buildPullRequestPresentation({
-        publicBaseUrl,
-        webChatRunToken,
-        workspaceRepository: repository,
-        threadId,
-        runId,
-        workspacePath,
-        commandEnv,
-        branch: normalizedBranch,
-        baseBranch,
-        threadTitle,
-        assistantMessage,
-      });
-      const pullRequest = await ensurePullRequest({
+    if (shouldAttachPullRequest) {
+      const pullRequest = await findPullRequestForBranch({
         repository,
         headRepository: headRepository || repository,
         headBranch: normalizedBranch,
         baseBranch,
-        title: pullRequestPresentation.title,
-        body: pullRequestPresentation.body,
         token: gitToken,
       });
       if (!pullRequest.ok) {
-        result.error = pullRequest.error || "Unable to ensure pull request.";
+        result.error = pullRequest.error || "Unable to load pull request.";
         return result;
       }
       if (pullRequest.pullRequest) {
@@ -5677,13 +5553,11 @@ async function githubApiJson({ url, token, method = "GET", body = null }) {
   };
 }
 
-async function ensurePullRequest({
+async function findPullRequestForBranch({
   repository,
   headRepository,
   headBranch,
   baseBranch,
-  title,
-  body,
   token,
 }) {
   const normalizedRepository = normalizeText(repository);
@@ -5707,86 +5581,33 @@ async function ensurePullRequest({
     url: listUrl.toString(),
     token: normalizedToken,
   });
+  if (!listed.ok) {
+    return {
+      ok: false,
+      error:
+        normalizeText(listed.payload?.message || listed.payload?.error) ||
+        `Unable to load pull requests (${listed.status}).`,
+    };
+  }
   const existingPulls = Array.isArray(listed.payload) ? listed.payload : [];
-  const desiredPullRequestBody = normalizeText(body);
-  if (listed.ok && existingPulls.length > 0) {
+  if (existingPulls.length > 0) {
     const first = normalizeObject(existingPulls[0]);
     const existingPullRequestNumber = parsePositiveInteger(first.number, 0);
-    let existingPullRequestTitle = normalizeText(first.title);
-    let existingPullRequestUrl = normalizeText(first.html_url || first.url);
-    const existingPullRequestBody = normalizeText(first.body);
-    if (
-      existingPullRequestNumber > 0 &&
-      desiredPullRequestBody &&
-      existingPullRequestBody !== desiredPullRequestBody
-    ) {
-      const updated = await githubApiJson({
-        url: `https://api.github.com/repos/${encodeRepositoryPath(normalizedRepository)}/pulls/${existingPullRequestNumber}`,
-        token: normalizedToken,
-        method: "PATCH",
-        body: {
-          body: desiredPullRequestBody,
-        },
-      });
-      if (updated.ok) {
-        existingPullRequestTitle = normalizeText(updated.payload?.title || existingPullRequestTitle);
-        existingPullRequestUrl = normalizeText(
-          updated.payload?.html_url || updated.payload?.url || existingPullRequestUrl,
-        );
-      } else {
-        log(
-          "Unable to update existing pull request body",
-          `repository=${normalizedRepository} number=${existingPullRequestNumber} status=${updated.status}`,
-        );
-      }
-    }
     return {
       ok: true,
       pullRequest: {
         number: existingPullRequestNumber,
-        title: existingPullRequestTitle,
-        url: existingPullRequestUrl,
+        title: normalizeText(first.title),
+        url: normalizeText(first.html_url || first.url),
       },
       existing: true,
     };
   }
 
-  const created = await githubApiJson({
-    url: `https://api.github.com/repos/${encodeRepositoryPath(normalizedRepository)}/pulls`,
-    token: normalizedToken,
-    method: "POST",
-    body: {
-      title: truncate(normalizeText(title) || `Codeq8: ${normalizedHeadBranch}`, 120),
-      head: headRef,
-      base: normalizedBaseBranch,
-      body: desiredPullRequestBody,
-      maintainer_can_modify: true,
-    },
-  });
-  if (created.ok) {
-    return {
-      ok: true,
-      pullRequest: {
-        number: parsePositiveInteger(created.payload.number, 0),
-        title: normalizeText(created.payload.title),
-        url: normalizeText(created.payload.html_url || created.payload.url),
-      },
-      existing: false,
-    };
-  }
-  if (created.status === 422) {
-    return {
-      ok: true,
-      pullRequest: null,
-      existing: false,
-    };
-  }
-
   return {
-    ok: false,
-    error:
-      normalizeText(created.payload?.message || created.payload?.error) ||
-      `Unable to create pull request (${created.status}).`,
+    ok: true,
+    pullRequest: null,
+    existing: false,
   };
 }
 
@@ -7090,7 +6911,6 @@ export {
   buildCodexPrompt,
   buildCodexRunMetadata,
   buildGitHubActionsControlPlaneUrl,
-  buildPullRequestPresentation,
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
   captureCodexSessionBundle,
@@ -7121,12 +6941,12 @@ export {
   prepareRunnerDiscordDmCli,
   prepareGitHubCliAuth,
   pushRememberedThreadBranch,
+  findPullRequestForBranch,
   refreshWorkspaceRemoteRefs,
   syncChatGptAccountAuth,
   validateChatGptAccountAuth,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
-  readFirstCommitPresentation,
   requestWorkspaceGitToken,
   requestServerOwnedCodeq8File,
   requestWebChatRunnerRuntimeManifest,
@@ -7144,7 +6964,7 @@ export {
   requireWebChatGitHubUserToken,
   runCodex,
   assertWebChatRunnerRuntimeCompatibility,
-  shouldEnsurePullRequest,
+  shouldLookUpPullRequest,
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,
   extractUserVisibleFailureHeadline,

@@ -2,7 +2,6 @@
   "contract_version": "web_chat_runner_runtime_v1",
   "required_capabilities": [
     "server_owned_prompt",
-    "server_owned_pull_request_presentation",
     "staged_codex_session_upload",
     "recoverable_codex_session_errors"
   ],
@@ -11,7 +10,6 @@
     "/api/chat/runs/callback",
     "/api/chat/runs/runtime-manifest",
     "/api/chat/runs/prompt",
-    "/api/chat/runs/pull-request-presentation",
     "/chatgpt-accounts/get",
     "/chatgpt-accounts/selection/claim",
     "/chatgpt-accounts/upsert",
