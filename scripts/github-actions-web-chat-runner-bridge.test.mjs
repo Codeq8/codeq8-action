@@ -34,6 +34,7 @@ test("normalizeGitHubActionsChatRunPayload preserves referenced threads", () => 
     workspace_repository: "Codeq8/Codeq8",
     worker_url: "main-codeq8.bojamal7.workers.dev/",
     prompt_text: "Fix it",
+    suppress_discord_notifications: true,
     branch_context: {
       default_branch: "main",
       context_branch: "main",
@@ -45,6 +46,7 @@ test("normalizeGitHubActionsChatRunPayload preserves referenced threads", () => 
 
   assert.equal(payload.worker_url, "https://main-codeq8.bojamal7.workers.dev");
   assert.equal(payload.referenced_threads_json, '[{"thread_id":"wct_other"}]');
+  assert.equal(payload.suppress_discord_notifications, true);
 });
 
 test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => {
@@ -67,6 +69,7 @@ test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => 
       worker_url: "https://main-codeq8.bojamal7.workers.dev",
       thread_spec: "Keep diffs narrow.",
       prompt_text: "Fix the failing run",
+      suppress_discord_notifications: true,
       branch_context: {
         default_branch: "main",
         protected_branches: ["main", "production"],
@@ -88,4 +91,5 @@ test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => 
   );
   assert.equal(env.CODE_CHAT_REFERENCED_THREADS_JSON, '[{"thread_id":"wct_other"}]');
   assert.equal(env.CODE_CHAT_THREAD_SPEC_TEXT, "Keep diffs narrow.");
+  assert.equal(env.CODE_CHAT_SUPPRESS_DISCORD_NOTIFICATIONS, "1");
 });

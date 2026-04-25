@@ -67,6 +67,9 @@ const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CODEX_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const CODEX_SESSION_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/;
 const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
+const DISCORD_RUN_COMPLETE_DELIVERY_PREFIX = "discord_run_complete";
+const SUPPRESS_DISCORD_NOTIFICATIONS_METADATA_KEY = "suppress_discord_notifications";
+const TRUE_FLAG_VALUES = new Set(["1", "true", "yes", "on"]);
 const WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE = "web_chat_codex_session_bundle";
 
 function normalizeText(value) {
@@ -171,6 +174,11 @@ function normalizeObject(value) {
     return {};
   }
   return value;
+}
+
+function normalizeBooleanFlag(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  return normalized ? TRUE_FLAG_VALUES.has(normalized) : false;
 }
 
 function normalizeBaseUrl(value) {
@@ -1874,6 +1882,288 @@ async function postRunCallback({ publicBaseUrl, workerUrl, adminToken, body }) {
     );
   }
   return response.payload;
+}
+
+function readDiscordNotificationSuppressionMetadata(metadata) {
+  return normalizeBooleanFlag(
+    normalizeObject(metadata)[SUPPRESS_DISCORD_NOTIFICATIONS_METADATA_KEY],
+  );
+}
+
+function buildDiscordRunCompleteDeliveryId(ownerGithubLogin, runId) {
+  const normalizedOwner = normalizeText(ownerGithubLogin).replace(/^@/, "").toLowerCase();
+  const normalizedRunId = normalizeRunId(runId);
+  return normalizedOwner && normalizedRunId
+    ? `${DISCORD_RUN_COMPLETE_DELIVERY_PREFIX}:${normalizedOwner}:${normalizedRunId}`
+    : "";
+}
+
+function buildDiscordRunCompleteThreadUrl({ publicBaseUrl, repository, threadId }) {
+  const normalizedRepository = normalizeRepository(repository);
+  const normalizedThreadId = normalizeThreadId(threadId);
+  if (!normalizedRepository || !normalizedThreadId) {
+    return "";
+  }
+  return `${normalizeCodePublicBaseUrl(publicBaseUrl)}/${encodeRepositoryPath(normalizedRepository)}/thread/${encodeURIComponent(normalizedThreadId)}`;
+}
+
+function shouldSkipDiscordRunCompleteNotification({ ownerGithubLogin, body }) {
+  const callbackBody = normalizeObject(body);
+  const status = normalizeText(callbackBody.status).toLowerCase();
+  if (!normalizeText(ownerGithubLogin).replace(/^@/, "")) {
+    return "missing_owner";
+  }
+  if (status !== "completed") {
+    return "run_not_completed";
+  }
+  if (normalizeText(callbackBody.error)) {
+    return "run_has_error";
+  }
+  if (
+    normalizeBooleanFlag(callbackBody.suppress_discord_notifications) ||
+    normalizeBooleanFlag(callbackBody.suppressDiscordNotifications) ||
+    readDiscordNotificationSuppressionMetadata(callbackBody.metadata)
+  ) {
+    return "suppressed";
+  }
+  if (
+    !normalizeText(callbackBody.assistant_message) &&
+    !normalizeText(callbackBody.assistantMessage) &&
+    !normalizeText(callbackBody.summary)
+  ) {
+    return "no_visible_reply";
+  }
+  return "";
+}
+
+function describeWorkerError(response, fallback) {
+  return (
+    extractErrorMessage(response?.payload) ||
+    normalizeText(response?.textBody) ||
+    fallback ||
+    `Worker request failed (${response?.status || 0}).`
+  );
+}
+
+async function postWorkerJson({ workerUrl, adminToken, path, body }) {
+  return workerJsonRequest({
+    workerUrl,
+    adminToken,
+    path,
+    method: "POST",
+    body,
+  });
+}
+
+async function failDiscordRunCompleteDelivery({ workerUrl, adminToken, deliveryBody }) {
+  try {
+    await postWorkerJson({
+      workerUrl,
+      adminToken,
+      path: "/delivery/fail",
+      body: deliveryBody,
+    });
+  } catch (error) {
+    log(
+      "WARN",
+      `Unable to clear Discord notification delivery claim: ${extractErrorMessage(error)}`,
+    );
+  }
+}
+
+async function sendDiscordRunCompleteNotificationForCallback({
+  publicBaseUrl,
+  workerUrl,
+  adminToken,
+  ownerGithubLogin,
+  body,
+}) {
+  const callbackBody = normalizeObject(body);
+  const normalizedOwnerGithubLogin =
+    normalizeText(ownerGithubLogin || callbackBody.github_login || callbackBody.githubLogin)
+      .replace(/^@/, "");
+  const skipReason = shouldSkipDiscordRunCompleteNotification({
+    ownerGithubLogin: normalizedOwnerGithubLogin,
+    body: callbackBody,
+  });
+  if (skipReason) {
+    return {
+      ok: true,
+      sent: false,
+      skipped: true,
+      reason: skipReason,
+    };
+  }
+
+  const runId = normalizeRunId(callbackBody.run_id || callbackBody.runId);
+  const threadId = normalizeThreadId(callbackBody.thread_id || callbackBody.threadId);
+  const workspaceRepository = normalizeRepository(
+    callbackBody.workspace_repository ||
+      callbackBody.workspaceRepository ||
+      callbackBody.repository,
+  );
+  const deliveryId = buildDiscordRunCompleteDeliveryId(
+    normalizedOwnerGithubLogin,
+    runId,
+  );
+  if (!runId || !threadId || !workspaceRepository || !deliveryId) {
+    return {
+      ok: true,
+      sent: false,
+      skipped: true,
+      reason: "missing_notification_context",
+    };
+  }
+  const deliveryBody = {
+    delivery_id: deliveryId,
+    owner_github_login: normalizedOwnerGithubLogin,
+    run_id: runId,
+    thread_id: threadId,
+    workspace_repository: workspaceRepository,
+  };
+
+  const claim = await postWorkerJson({
+    workerUrl,
+    adminToken,
+    path: "/delivery/claim",
+    body: deliveryBody,
+  });
+  if (!claim.ok || claim.payload.ok === false) {
+    return {
+      ok: false,
+      sent: false,
+      skipped: false,
+      reason: "claim_failed",
+      error: describeWorkerError(claim, "Unable to claim Discord notification delivery."),
+    };
+  }
+  if (!claim.payload.acquired) {
+    return {
+      ok: true,
+      sent: false,
+      skipped: true,
+      reason: `delivery_${normalizeText(claim.payload.duplicate) || "processing"}`,
+      delivery_id: deliveryId,
+    };
+  }
+
+  const notification = await postWorkerJson({
+    workerUrl,
+    adminToken,
+    path: "/discord/notifications/run-complete/send",
+    body: {
+      owner_github_login: normalizedOwnerGithubLogin,
+      run_id: runId,
+      thread_id: threadId,
+      thread_title: normalizeText(
+        callbackBody.thread_title ||
+          callbackBody.threadTitle ||
+          callbackBody.title,
+      ),
+      thread_url: buildDiscordRunCompleteThreadUrl({
+        publicBaseUrl,
+        repository: workspaceRepository,
+        threadId,
+      }),
+      workspace_repository: workspaceRepository,
+      summary: normalizeText(callbackBody.summary),
+      status: normalizeText(callbackBody.status),
+    },
+  });
+  if (!notification.ok || notification.payload.ok === false) {
+    await failDiscordRunCompleteDelivery({ workerUrl, adminToken, deliveryBody });
+    return {
+      ok: false,
+      sent: false,
+      skipped: false,
+      reason: "send_failed",
+      delivery_id: deliveryId,
+      error: describeWorkerError(
+        notification,
+        "Unable to send Discord run completion notification.",
+      ),
+    };
+  }
+
+  const completed = await postWorkerJson({
+    workerUrl,
+    adminToken,
+    path: "/delivery/complete",
+    body: {
+      ...deliveryBody,
+      result: {
+        owner_github_login: normalizedOwnerGithubLogin,
+        run_id: runId,
+        thread_id: threadId,
+        sent: notification.payload.sent === true,
+        skipped: notification.payload.skipped === true,
+        reason: normalizeText(notification.payload.reason),
+      },
+    },
+  });
+  if (!completed.ok || completed.payload.ok === false) {
+    return {
+      ok: false,
+      sent: notification.payload.sent === true,
+      skipped: notification.payload.skipped === true,
+      reason: "complete_failed",
+      delivery_id: deliveryId,
+      error: describeWorkerError(
+        completed,
+        "Unable to complete Discord notification delivery.",
+      ),
+    };
+  }
+
+  return {
+    ok: true,
+    delivery_id: deliveryId,
+    sent: notification.payload.sent === true,
+    skipped: notification.payload.skipped === true,
+    reason: normalizeText(notification.payload.reason),
+  };
+}
+
+async function postCompletedRunCallbackAndNotify({
+  publicBaseUrl,
+  workerUrl,
+  adminToken,
+  ownerGithubLogin,
+  body,
+}) {
+  await postRunCallback({
+    publicBaseUrl,
+    workerUrl,
+    adminToken,
+    body,
+  });
+  try {
+    const notification = await sendDiscordRunCompleteNotificationForCallback({
+      publicBaseUrl,
+      workerUrl,
+      adminToken,
+      ownerGithubLogin,
+      body,
+    });
+    if (!notification.ok) {
+      log(
+        "WARN",
+        `Discord run completion notification failed: ${
+          notification.error || notification.reason || "unknown error"
+        }`,
+      );
+    } else if (!notification.skipped) {
+      log(
+        "Discord run completion notification delivered",
+        `sent=${notification.sent} reason=${notification.reason || "sent"}`,
+      );
+    }
+  } catch (error) {
+    log(
+      "WARN",
+      `Discord run completion notification threw: ${extractErrorMessage(error)}`,
+    );
+  }
 }
 
 function resolveWorkspacePath({ repository, overridePath }) {
@@ -5938,6 +6228,9 @@ async function main() {
   const runId = normalizeText(process.env.CODE_CHAT_RUN_ID);
   const sourceType = normalizeText(process.env.CODE_CHAT_SOURCE_TYPE) || "default_branch";
   const githubLogin = normalizeText(process.env.CODE_CHAT_GITHUB_LOGIN);
+  const suppressDiscordNotifications = normalizeBooleanFlag(
+    process.env.CODE_CHAT_SUPPRESS_DISCORD_NOTIFICATIONS,
+  );
   const initialChatGptAccountId = normalizeChatGptAccountId(
     process.env.CODE_CHAT_CHATGPT_ACCOUNT_ID,
   );
@@ -6629,18 +6922,25 @@ async function main() {
                 `Updated this conversation to ${nextTargetDescription}. Send the request again from the new context.`,
               MAX_OUTPUT_CHARS,
             );
-            await postRunCallback({
+            await postCompletedRunCallbackAndNotify({
               publicBaseUrl,
               workerUrl,
               adminToken,
+              ownerGithubLogin: githubLogin,
               body: {
                 thread_id: threadId,
                 run_id: runId,
                 message_id: messageId,
                 workspace_repository: latestThread.workspace_repository || activeWorkspaceRepository,
+                github_login: githubLogin,
+                thread_title: normalizeText(latestThread.title) || activeThreadTitle,
+                public_base_url: publicBaseUrl,
                 status: "completed",
                 summary: `Updated the conversation to ${nextTargetDescription}.`,
                 assistant_message: assistantMessage,
+                ...(suppressDiscordNotifications
+                  ? { suppress_discord_notifications: true }
+                  : {}),
                 started_at: startedAt,
                 completed_at: Date.now(),
                 metadata: buildCodexRunMetadata({
@@ -6879,19 +7179,26 @@ async function main() {
           MAX_OUTPUT_CHARS,
         );
         const completedAt = Date.now();
-        await postRunCallback({
+        await postCompletedRunCallbackAndNotify({
           publicBaseUrl,
           workerUrl,
           adminToken,
+          ownerGithubLogin: githubLogin,
           body: {
             thread_id: threadId,
             run_id: runId,
             message_id: messageId,
             workspace_repository: activeWorkspaceRepository,
-              status: "completed",
+            github_login: githubLogin,
+            thread_title: activeThreadTitle,
+            public_base_url: publicBaseUrl,
+            status: "completed",
             summary: recoveredTransportFailure
               ? `Completed web chat runner job with a recovered Codex transport warning in ${execution.durationMs}ms.`
               : `Completed web chat runner job in ${execution.durationMs}ms.`,
+            ...(suppressDiscordNotifications
+              ? { suppress_discord_notifications: true }
+              : {}),
             resolved_write_branch:
               persistenceResult.resolvedWriteBranch ||
               preparedWorkspace.durableWriteBranch ||
@@ -7116,6 +7423,7 @@ export {
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
   postRunCallback,
+  sendDiscordRunCompleteNotificationForCallback,
   prepareCodeq8Cli,
   prepareChatGptAccountAuth,
   prepareRunnerDiscordDmCli,

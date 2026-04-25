@@ -20,6 +20,7 @@ import {
   prepareChatGptAccountAuth,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
+  sendDiscordRunCompleteNotificationForCallback,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
@@ -54,6 +55,10 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/api/chat/runs/codeq8-file",
         "/api/chat/runs/codeq8-file/save",
         "/api/chat/runs/pull-request-presentation",
+        "/delivery/claim",
+        "/delivery/complete",
+        "/delivery/fail",
+        "/discord/notifications/run-complete/send",
         "/chatgpt-accounts/get",
         "/chatgpt-accounts/selection/claim",
         "/chatgpt-accounts/upsert",
@@ -93,6 +98,191 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
   }
 });
 
+test("sendDiscordRunCompleteNotificationForCallback sends runner-owned replied notifications", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const parsedUrl = new URL(String(url));
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({
+      path: parsedUrl.pathname,
+      method: init?.method || "GET",
+      body,
+    });
+    if (parsedUrl.pathname === "/delivery/claim") {
+      return Response.json({ ok: true, acquired: true });
+    }
+    if (parsedUrl.pathname === "/discord/notifications/run-complete/send") {
+      return Response.json({ ok: true, sent: true, skipped: false, reason: "sent" });
+    }
+    if (parsedUrl.pathname === "/delivery/complete") {
+      return Response.json({ ok: true, stored: true });
+    }
+    throw new Error(`Unexpected path ${parsedUrl.pathname}`);
+  };
+
+  try {
+    const result = await sendDiscordRunCompleteNotificationForCallback({
+      publicBaseUrl: "https://preview.example.com",
+      workerUrl: "https://worker.example.com",
+      adminToken: "shared-secret",
+      ownerGithubLogin: "aalzanki",
+      body: {
+        run_id: "wcr_123",
+        thread_id: "wct_123",
+        workspace_repository: "Codeq8/Codeq8",
+        thread_title: "Discord issue",
+        status: "completed",
+        summary: "Completed web chat runner job in 1000ms.",
+        assistant_message: "Done.",
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.sent, true);
+    assert.equal(result.delivery_id, "discord_run_complete:aalzanki:wcr_123");
+    assert.deepEqual(
+      calls.map((call) => call.path),
+      [
+        "/delivery/claim",
+        "/discord/notifications/run-complete/send",
+        "/delivery/complete",
+      ],
+    );
+    assert.deepEqual(calls[0]?.body, {
+      delivery_id: "discord_run_complete:aalzanki:wcr_123",
+      owner_github_login: "aalzanki",
+      run_id: "wcr_123",
+      thread_id: "wct_123",
+      workspace_repository: "Codeq8/Codeq8",
+    });
+    assert.deepEqual(calls[1]?.body, {
+      owner_github_login: "aalzanki",
+      run_id: "wcr_123",
+      thread_id: "wct_123",
+      thread_title: "Discord issue",
+      thread_url: "https://preview.example.com/Codeq8/Codeq8/thread/wct_123",
+      workspace_repository: "Codeq8/Codeq8",
+      summary: "Completed web chat runner job in 1000ms.",
+      status: "completed",
+    });
+    assert.deepEqual(calls[2]?.body, {
+      delivery_id: "discord_run_complete:aalzanki:wcr_123",
+      owner_github_login: "aalzanki",
+      run_id: "wcr_123",
+      thread_id: "wct_123",
+      workspace_repository: "Codeq8/Codeq8",
+      result: {
+        owner_github_login: "aalzanki",
+        run_id: "wcr_123",
+        thread_id: "wct_123",
+        sent: true,
+        skipped: false,
+        reason: "sent",
+      },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("sendDiscordRunCompleteNotificationForCallback clears the claim when send fails", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const parsedUrl = new URL(String(url));
+    calls.push({
+      path: parsedUrl.pathname,
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    if (parsedUrl.pathname === "/delivery/claim") {
+      return Response.json({ ok: true, acquired: true });
+    }
+    if (parsedUrl.pathname === "/discord/notifications/run-complete/send") {
+      return Response.json(
+        { ok: false, error: "Discord gateway unavailable." },
+        { status: 502 },
+      );
+    }
+    if (parsedUrl.pathname === "/delivery/fail") {
+      return Response.json({ ok: true, cleared: true });
+    }
+    throw new Error(`Unexpected path ${parsedUrl.pathname}`);
+  };
+
+  try {
+    const result = await sendDiscordRunCompleteNotificationForCallback({
+      publicBaseUrl: "https://preview.example.com",
+      workerUrl: "https://worker.example.com",
+      adminToken: "shared-secret",
+      ownerGithubLogin: "aalzanki",
+      body: {
+        run_id: "wcr_123",
+        thread_id: "wct_123",
+        workspace_repository: "Codeq8/Codeq8",
+        status: "completed",
+        summary: "Completed web chat runner job in 1000ms.",
+        assistant_message: "Done.",
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "send_failed");
+    assert.match(result.error, /Discord gateway unavailable/);
+    assert.deepEqual(
+      calls.map((call) => call.path),
+      [
+        "/delivery/claim",
+        "/discord/notifications/run-complete/send",
+        "/delivery/fail",
+      ],
+    );
+    assert.deepEqual(calls[2]?.body, {
+      delivery_id: "discord_run_complete:aalzanki:wcr_123",
+      owner_github_login: "aalzanki",
+      run_id: "wcr_123",
+      thread_id: "wct_123",
+      workspace_repository: "Codeq8/Codeq8",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("sendDiscordRunCompleteNotificationForCallback suppresses delivery before claiming", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error("fetch should not run when notifications are suppressed");
+  };
+
+  try {
+    const result = await sendDiscordRunCompleteNotificationForCallback({
+      publicBaseUrl: "https://preview.example.com",
+      workerUrl: "https://worker.example.com",
+      adminToken: "shared-secret",
+      ownerGithubLogin: "aalzanki",
+      body: {
+        run_id: "wcr_123",
+        thread_id: "wct_123",
+        workspace_repository: "Codeq8/Codeq8",
+        status: "completed",
+        summary: "Completed web chat runner job in 1000ms.",
+        assistant_message: "Done.",
+        suppress_discord_notifications: true,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.skipped, true);
+    assert.equal(result.reason, "suppressed");
+    assert.equal(fetchCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload routes are missing", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
@@ -111,6 +301,10 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
         "/api/chat/runs/runtime-manifest",
         "/api/chat/runs/prompt",
         "/api/chat/runs/pull-request-presentation",
+        "/delivery/claim",
+        "/delivery/complete",
+        "/delivery/fail",
+        "/discord/notifications/run-complete/send",
         "/chatgpt-accounts/get",
         "/chatgpt-accounts/selection/claim",
         "/chatgpt-accounts/upsert",

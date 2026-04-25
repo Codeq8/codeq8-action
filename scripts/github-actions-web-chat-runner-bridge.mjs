@@ -10,6 +10,7 @@ import { normalizeBaseUrl } from "../lib/code-worker-url.mjs";
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const SOURCE_TYPE_VALUES = new Set(["default_branch", "pull_request", "branch"]);
+const TRUE_FLAG_VALUES = new Set(["1", "true", "yes", "on"]);
 const RUNNER_SCRIPT_PATH = fileURLToPath(new URL("./web-chat-runner.mjs", import.meta.url));
 
 function normalizeText(value) {
@@ -18,6 +19,11 @@ function normalizeText(value) {
 
 function normalizeObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function normalizeBooleanFlag(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  return normalized ? TRUE_FLAG_VALUES.has(normalized) : false;
 }
 
 function parsePositiveInteger(value, fallback = 0) {
@@ -147,6 +153,10 @@ export function normalizeGitHubActionsChatRunPayload(value) {
     ),
     source_type: normalizeSourceType(normalized.source_type || normalized.sourceType),
     github_login: normalizeText(normalized.github_login || normalized.githubLogin),
+    suppress_discord_notifications: normalizeBooleanFlag(
+      normalized.suppress_discord_notifications ||
+        normalized.suppressDiscordNotifications,
+    ),
     chatgpt_account_id: normalizeText(
       normalized.chatgpt_account_id || normalized.chatgptAccountId,
     ),
@@ -283,6 +293,8 @@ export function buildWebChatRunnerEnv({
     CODE_CHAT_SOURCE_TYPE: normalizedPayload.source_type,
     CODE_CHAT_THREAD_SPEC_TEXT: normalizedPayload.thread_spec,
     CODE_CHAT_GITHUB_LOGIN: normalizedPayload.github_login,
+    CODE_CHAT_SUPPRESS_DISCORD_NOTIFICATIONS:
+      normalizedPayload.suppress_discord_notifications ? "1" : "",
     CODE_CHAT_CHATGPT_ACCOUNT_ID: normalizedPayload.chatgpt_account_id,
     CODE_CHAT_PROMPT_TEXT: normalizedPayload.prompt_text,
     CODE_CHAT_RECENT_USER_MESSAGES_PROMPT_TEXT:
