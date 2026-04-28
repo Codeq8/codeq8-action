@@ -17,7 +17,6 @@ import {
   extractUserVisibleFailureHeadline,
   isRecoverableCodexSessionErrorState,
   persistWorkspaceProgress,
-  prepareChatGptAccountAuth,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
   runCodex,
@@ -53,10 +52,6 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/api/chat/runs/prompt",
         "/api/chat/runs/codeq8-file",
         "/api/chat/runs/codeq8-file/save",
-        "/chatgpt-accounts/get",
-        "/chatgpt-accounts/selection/claim",
-        "/chatgpt-accounts/upsert",
-        "/chatgpt-accounts/reauth-required",
         "/web-chat/attachments/get",
         "/web-chat/codex-session/get",
         "/web-chat/codex-session/upload-prepare",
@@ -108,10 +103,6 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
         "/api/chat/runs/callback",
         "/api/chat/runs/runtime-manifest",
         "/api/chat/runs/prompt",
-        "/chatgpt-accounts/get",
-        "/chatgpt-accounts/selection/claim",
-        "/chatgpt-accounts/upsert",
-        "/chatgpt-accounts/reauth-required",
         "/web-chat/attachments/get",
         "/web-chat/codex-session/get",
         "/web-chat/codex-session/upsert",
@@ -137,33 +128,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
   }
 });
 
-test("prepareChatGptAccountAuth falls back to runner-authenticated Codex when no account is assigned", async () => {
-  const originalFetch = globalThis.fetch;
-  let fetchCalled = false;
-  globalThis.fetch = async () => {
-    fetchCalled = true;
-    throw new Error("fetch should not run for the no-account fallback path");
-  };
-
-  try {
-    const prepared = await prepareChatGptAccountAuth({
-      workerUrl: "https://worker.codeq8.example.com",
-      adminToken: "token",
-      codexHome: path.join(os.tmpdir(), "codeq8-runner-no-account"),
-      ownerGithubLogin: "aalzanki",
-      accountId: "",
-    });
-
-    assert.equal(prepared.available, true);
-    assert.equal(prepared.usesRunnerAuthentication, true);
-    assert.equal(prepared.accountId, "");
-    assert.equal(fetchCalled, false);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("runCodex does not mark ChatGPT reauth from repository text on stdout", async (t) => {
+test("runCodex treats auth-like repository stdout as normal output", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-stdout-auth-text-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   t.after(async () => {
@@ -192,10 +157,9 @@ test("runCodex does not mark ChatGPT reauth from repository text on stdout", asy
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.chatGptAccountReauthRequired, false);
 });
 
-test("runCodex marks ChatGPT reauth from Codex diagnostics on stderr", async (t) => {
+test("runCodex returns normal diagnostics for auth-like stderr", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-stderr-auth-text-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   t.after(async () => {
@@ -224,8 +188,8 @@ test("runCodex marks ChatGPT reauth from Codex diagnostics on stderr", async (t)
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.chatGptAccountReauthRequired, true);
-  assert.match(result.reason, /assigned ChatGPT account needs to be reconnected/i);
+  assert.match(result.reason, /Codex exited with code=1 signal=none/i);
+  assert.match(result.diagnosticOutput, /refresh_token_reused/i);
 });
 
 function git(workspacePath, args) {

@@ -10,7 +10,6 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
-import { readCodexAuthBundle } from "./codex-auth-bundle.mjs";
 import {
   buildControlPlaneRequestAuthorizationHeader,
   resolveControlPlaneRequestAuthSecret,
@@ -22,7 +21,6 @@ import {
 } from "../lib/workspace-bootstrap.mjs";
 import {
   DEFAULT_CODE_WORKER_BASE_URL,
-  resolveChatGptAccountWorkerBaseUrl,
   resolveWorkerBaseUrl,
 } from "../lib/code-worker-url.mjs";
 import {
@@ -51,9 +49,8 @@ const MAX_MESSAGE_CHARS = 2000;
 const MAX_OUTPUT_CHARS = 120000;
 const MAX_REFERENCED_THREAD_MESSAGES = 8;
 const MAX_THREAD_TARGET_RESTARTS = 2;
-const MAX_CHATGPT_ACCOUNT_RECOVERY_ATTEMPTS = 8;
 const MAX_CODEX_RESUME_RECOVERY_ATTEMPTS = 1;
-const CHATGPT_ACCOUNT_AUTH_PRECHECK_TIMEOUT_SECONDS = 45;
+const CODEX_AUTH_PRECHECK_TIMEOUT_SECONDS = 45;
 const CODEX_SESSION_COMPACTION_TYPES = new Set([
   "compaction",
   "context_compacted",
@@ -192,14 +189,6 @@ function normalizeCodePublicBaseUrl(value) {
     return normalized;
   }
   return `https://${normalized}`;
-}
-
-function normalizeChatGptAccountId(value) {
-  const normalized = normalizeText(value);
-  if (!normalized || !/^[A-Za-z0-9][A-Za-z0-9._:@=-]{0,254}$/.test(normalized)) {
-    return "";
-  }
-  return normalized;
 }
 
 function normalizeThreadId(value) {
@@ -378,16 +367,13 @@ function toUserVisibleRunnerFailureMessage(value) {
   if (!message) {
     return "I couldn't complete that run.";
   }
-  if (/chatgpt account/i.test(message)) {
-    return "I couldn't load the assigned ChatGPT account for this run. Reconnect that account or add another one, then retry.";
-  }
   if (
     /failed to refresh token/i.test(message) ||
     /refresh_token_reused/i.test(message) ||
     /access token could not be refreshed/i.test(message) ||
     /please try signing in again/i.test(message)
   ) {
-    return "The assigned ChatGPT account needs to be reconnected. Reconnect that account or add another one, then retry.";
+    return "Codex is not logged in on this self-hosted runner. Sign in on the runner, then retry.";
   }
   if (/protected branch/i.test(message)) {
     return "I stopped before persisting changes because the work was still on a protected branch.";
@@ -405,14 +391,6 @@ function toUserVisibleRunnerFailureMessage(value) {
     return "I couldn't complete that run.";
   }
   return message;
-}
-
-function extractChatGptAccountReauthFailureReason(value) {
-  const message = extractErrorMessage(value);
-  if (!isChatGptAccountReauthFailure(message)) {
-    return "";
-  }
-  return "The assigned ChatGPT account needs to be reconnected. Reconnect that account or add another one, then retry.";
 }
 
 function normalizeBranchName(value) {
@@ -4071,192 +4049,12 @@ async function prepareCodeq8Cli({
   };
 }
 
-async function prepareChatGptAccountAuth({
-  workerUrl,
-  adminToken,
-  codexHome,
-  ownerGithubLogin,
-  accountId,
-}) {
-  const normalizedOwnerGithubLogin = normalizeText(ownerGithubLogin);
-  const normalizedAccountId = normalizeChatGptAccountId(accountId);
-  if (!normalizedOwnerGithubLogin) {
-    return {
-      available: false,
-      reason: "A GitHub login is required for web chat runner auth.",
-    };
-  }
-  if (!normalizedAccountId) {
-    return {
-      available: true,
-      accountId: "",
-      displayName: "",
-      email: "",
-      usesRunnerAuthentication: true,
-    };
-  }
-
-  await ensureDirectory(codexHome);
-  const response = await workerJsonRequest({
-    workerUrl,
-    adminToken,
-    path: "/chatgpt-accounts/get",
-    method: "GET",
-    query: new URLSearchParams({
-      owner_github_login: normalizedOwnerGithubLogin,
-      account_id: normalizedAccountId,
-      include_bundle: "1",
-    }),
-  });
-  const payload = normalizeObject(response.payload);
-  const account = normalizeObject(payload.account);
-  const bundle = normalizeObject(payload.bundle);
-  const files = normalizeObject(bundle.files);
-  if (
-    !response.ok ||
-    payload.ok === false ||
-    !normalizeText(account.account_id) ||
-    !normalizeText(files["auth.json"])
-  ) {
-    return {
-      available: false,
-      reason:
-        normalizeText(payload.error || "") ||
-        "The assigned ChatGPT account could not be loaded for this run.",
-    };
-  }
-
-  for (const [relativePath, rawContents] of Object.entries(files)) {
-    const normalizedRelativePath = normalizeCodexSessionRelativePath(relativePath);
-    if (!normalizedRelativePath) {
-      continue;
-    }
-    const targetPath = path.join(codexHome, normalizedRelativePath);
-    await ensureDirectory(path.dirname(targetPath));
-    await fs.writeFile(targetPath, String(rawContents ?? ""), "utf8");
-  }
-
-  return {
-    available: true,
-    accountId: normalizedAccountId,
-    displayName: normalizeText(account.display_name || account.displayName || ""),
-    email: normalizeText(account.email || ""),
-    usesRunnerAuthentication: false,
-  };
-}
-
-async function claimNextChatGptAccountForRunner({
-  workerUrl,
-  adminToken,
-  ownerGithubLogin,
-}) {
-  const normalizedOwnerGithubLogin = normalizeText(ownerGithubLogin);
-  if (!normalizedOwnerGithubLogin) {
-    return {
-      ok: false,
-      status: 400,
-      error: "A GitHub login is required to select a ChatGPT account.",
-    };
-  }
-
-  const response = await workerJsonRequest({
-    workerUrl,
-    adminToken,
-    path: "/chatgpt-accounts/selection/claim",
-    method: "POST",
-    body: {
-      owner_github_login: normalizedOwnerGithubLogin,
-    },
-  });
-  const payload = normalizeObject(response.payload);
-  const account = normalizeObject(payload.account);
-  const accountId = normalizeChatGptAccountId(
-    account.account_id || account.accountId || "",
-  );
-  if (!response.ok || payload.ok === false) {
-    return {
-      ok: false,
-      status: response.status,
-      error:
-        normalizeText(payload.error || "") ||
-        `Unable to claim the next ChatGPT account (${response.status}).`,
-    };
-  }
-  if (!accountId) {
-    return {
-      ok: false,
-      status: 404,
-      error: "Reconnect a ChatGPT account before starting a Codex run.",
-    };
-  }
-  return {
-    ok: true,
-    status: response.status,
-    accountId,
-    displayName: normalizeText(account.display_name || account.displayName || ""),
-    email: normalizeText(account.email || ""),
-  };
-}
-
-async function syncChatGptAccountAuth({
-  workerUrl,
-  adminToken,
-  codexHome,
-  ownerGithubLogin,
-  persistedAccountId = "",
-  threadId = "",
-  runId = "",
-}) {
-  const bundle = await readCodexAuthBundle(codexHome);
-  const normalizedPersistedAccountId = normalizeChatGptAccountId(persistedAccountId);
-  const response = await workerJsonRequest({
-    workerUrl,
-    adminToken,
-    path: "/chatgpt-accounts/upsert",
-    method: "POST",
-    body: {
-      thread_id: normalizeThreadId(threadId),
-      run_id: normalizeRunId(runId),
-      owner_github_login: normalizeText(ownerGithubLogin),
-      account_id: normalizedPersistedAccountId || bundle.accountId,
-      auth_mode: bundle.authMode,
-      display_name: bundle.displayName,
-      email: bundle.email,
-      subject: bundle.subject,
-      bundle: {
-        account_id: bundle.accountId,
-        auth_mode: bundle.authMode,
-        display_name: bundle.displayName,
-        email: bundle.email,
-        subject: bundle.subject,
-        files: bundle.files,
-      },
-    },
-  });
-  const payload = normalizeObject(response.payload);
-  if (!response.ok || payload.ok === false) {
-    throw new Error(
-      normalizeText(payload.error || "") ||
-        `Unable to persist ChatGPT account auth (${response.status}).`,
-    );
-  }
-  return {
-    bundle,
-    accountId: normalizeChatGptAccountId(
-      payload.account?.account_id ||
-        payload.account?.accountId ||
-        normalizedPersistedAccountId ||
-        bundle.accountId,
-    ),
-  };
-}
-
-async function validateChatGptAccountAuth({
+async function validateRunnerCodexAuth({
   codexPath,
   codexHome,
   workspacePath,
   commandEnv,
-  timeoutSeconds = CHATGPT_ACCOUNT_AUTH_PRECHECK_TIMEOUT_SECONDS,
+  timeoutSeconds = CODEX_AUTH_PRECHECK_TIMEOUT_SECONDS,
 }) {
   const normalizedCodexPath = normalizeText(codexPath);
   const normalizedCodexHome = normalizeText(codexHome);
@@ -4267,16 +4065,14 @@ async function validateChatGptAccountAuth({
       reason: "codex executable was not found.",
       output: "",
       timedOut: false,
-      reauthRequired: false,
     };
   }
   if (!normalizedCodexHome) {
     return {
       ok: false,
-      reason: "CODEX_HOME is required to validate ChatGPT account auth.",
+      reason: "Codex home is required to validate runner-local Codex auth.",
       output: "",
       timedOut: false,
-      reauthRequired: false,
     };
   }
 
@@ -4349,10 +4145,9 @@ async function validateChatGptAccountAuth({
       clearTimeout(timeoutHandle);
       resolve({
         ok: false,
-        reason: extractErrorMessage(error, "Unable to validate the assigned ChatGPT account."),
+        reason: extractErrorMessage(error, "Unable to validate runner-local Codex auth."),
         output: truncate(`${stdout}\n${stderr}`.trim(), MAX_OUTPUT_CHARS),
         timedOut,
-        reauthRequired: false,
       });
     });
 
@@ -4364,171 +4159,25 @@ async function validateChatGptAccountAuth({
           ok: true,
           output: combinedOutput,
           timedOut: false,
-          reauthRequired: false,
         });
         return;
       }
       const normalizedSignal = normalizeText(signal);
-      const reauthRequired =
-        isChatGptAccountReauthFailure(combinedOutput) ||
-        /not logged in/i.test(combinedOutput);
       const reason = timedOut
-        ? "Timed out validating the assigned ChatGPT account."
-        : extractChatGptAccountReauthFailureReason(combinedOutput) ||
-          truncate(
-            combinedOutput ||
-              `Codex login status exited with code ${Number.isFinite(Number(code)) ? Number(code) : "unknown"}${normalizedSignal ? ` (${normalizedSignal})` : ""}.`,
-            1000,
-          );
+        ? "Timed out validating runner-local Codex auth."
+        : truncate(
+          combinedOutput ||
+            `Codex login status exited with code ${Number.isFinite(Number(code)) ? Number(code) : "unknown"}${normalizedSignal ? ` (${normalizedSignal})` : ""}.`,
+          1000,
+        );
       resolve({
         ok: false,
         reason,
         output: combinedOutput,
         timedOut,
-        reauthRequired,
       });
     });
   });
-}
-
-function isChatGptAccountReauthFailure(value) {
-  const message = extractErrorMessage(value);
-  if (!message) {
-    return false;
-  }
-  return (
-    /failed to refresh token/i.test(message) ||
-    /refresh_token_reused/i.test(message) ||
-    /access token could not be refreshed/i.test(message) ||
-    /please try signing in again/i.test(message)
-  );
-}
-
-async function markChatGptAccountReauthRequired({
-  workerUrl,
-  adminToken,
-  ownerGithubLogin,
-  accountId,
-  error,
-}) {
-  const response = await workerJsonRequest({
-    workerUrl,
-    adminToken,
-    path: "/chatgpt-accounts/reauth-required",
-    method: "POST",
-    body: {
-      owner_github_login: normalizeText(ownerGithubLogin),
-      account_id: normalizeChatGptAccountId(accountId),
-      error: extractErrorMessage(error),
-    },
-  });
-  const payload = normalizeObject(response.payload);
-  if (!response.ok || payload.ok === false) {
-    throw new Error(
-      normalizeText(payload.error || "") ||
-        `Unable to mark the ChatGPT account for reauthentication (${response.status}).`,
-    );
-  }
-}
-
-async function recoverFromChatGptAccountReauthFailure({
-  workerUrl,
-  adminToken,
-  ownerGithubLogin,
-  accountId,
-  error,
-  recoveryCount,
-}) {
-  const normalizedOwnerGithubLogin = normalizeText(ownerGithubLogin);
-  const normalizedAccountId = normalizeChatGptAccountId(accountId);
-  await markChatGptAccountReauthRequired({
-    workerUrl,
-    adminToken,
-    ownerGithubLogin: normalizedOwnerGithubLogin,
-    accountId: normalizedAccountId,
-    error,
-  });
-  log(
-    "Marked ChatGPT account for reauthentication during web chat run",
-    `account_id=${normalizedAccountId} owner=${normalizedOwnerGithubLogin}`,
-  );
-
-  const nextRecoveryCount = Number(recoveryCount) + 1;
-  if (nextRecoveryCount > MAX_CHATGPT_ACCOUNT_RECOVERY_ATTEMPTS) {
-    return {
-      ok: false,
-      error:
-        "Too many ChatGPT account reauthentication failures happened in one run. Reconnect the failing accounts, then retry.",
-    };
-  }
-
-  const nextAccountClaim = await claimNextChatGptAccountForRunner({
-    workerUrl,
-    adminToken,
-    ownerGithubLogin: normalizedOwnerGithubLogin,
-  });
-  if (
-    !nextAccountClaim.ok ||
-    !normalizeChatGptAccountId(nextAccountClaim.accountId) ||
-    normalizeChatGptAccountId(nextAccountClaim.accountId) === normalizedAccountId
-  ) {
-    return {
-      ok: false,
-      error:
-        nextAccountClaim.ok
-          ? extractErrorMessage(error) ||
-            "The assigned ChatGPT account needs to be reconnected."
-          : nextAccountClaim.error ||
-            extractErrorMessage(error) ||
-            "The assigned ChatGPT account needs to be reconnected.",
-    };
-  }
-
-  return {
-    ok: true,
-    nextAccountId: nextAccountClaim.accountId,
-    recoveryCount: nextRecoveryCount,
-  };
-}
-
-async function finalizeChatGptAccountAuth({
-  workerUrl,
-  adminToken,
-  codexHome,
-  ownerGithubLogin,
-  accountId,
-  threadId = "",
-  runId = "",
-  runError = null,
-}) {
-  const normalizedAccountId = normalizeChatGptAccountId(accountId);
-  if (isChatGptAccountReauthFailure(runError)) {
-    await markChatGptAccountReauthRequired({
-      workerUrl,
-      adminToken,
-      ownerGithubLogin,
-      accountId: normalizedAccountId,
-      error: runError,
-    });
-    return {
-      accountId: normalizedAccountId,
-      status: "reauth_required",
-    };
-  }
-
-  const synced = await syncChatGptAccountAuth({
-    workerUrl,
-    adminToken,
-    codexHome,
-    ownerGithubLogin,
-    persistedAccountId: normalizedAccountId,
-    threadId,
-    runId,
-  });
-  return {
-    accountId: synced.accountId || normalizedAccountId,
-    status: "synced",
-  };
 }
 
 function applyServerOwnedCodeq8FileGuidance({
@@ -4777,11 +4426,23 @@ async function snapshotCodexSessionFiles(codexHome) {
   return snapshot;
 }
 
-async function createWebChatRunRuntime(threadId) {
+function resolveRunnerCodexHome(env = process.env) {
+  const explicitCodexHome = normalizeText(env.CODEX_HOME);
+  if (explicitCodexHome) {
+    return path.resolve(explicitCodexHome);
+  }
+  const homePath = normalizeText(env.HOME) || os.homedir();
+  return homePath ? path.join(homePath, ".codex") : "";
+}
+
+async function createWebChatRunRuntime(threadId, env = process.env) {
   const prefix =
     normalizeText(threadId).toLowerCase().replace(/[^a-z0-9._-]/g, "-") || "chat-thread";
   const homePath = await fs.mkdtemp(path.join(os.tmpdir(), `codeq8-web-chat-${prefix}-`));
-  const codexHome = path.join(homePath, ".codex");
+  const codexHome = resolveRunnerCodexHome(env);
+  if (!codexHome) {
+    throw new Error("Unable to resolve runner Codex home.");
+  }
   await ensureDirectory(codexHome);
   const sessionFileSnapshot = await snapshotCodexSessionFiles(codexHome);
   return {
@@ -5033,8 +4694,6 @@ async function runCodex({
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    let chatGptAccountReauthRequired = false;
-    let chatGptAccountFailureReason = "";
     const args = [
       "exec",
       "--model",
@@ -5074,32 +4733,11 @@ async function runCodex({
       return truncate(`${target}${nextChunk}`, MAX_OUTPUT_CHARS * 2);
     };
 
-    const abortForChatGptAccountFailure = () => {
-      if (chatGptAccountReauthRequired) {
-        return;
-      }
-      // stdout includes the model/tool transcript and can contain arbitrary
-      // repository text, including auth-error fixtures. Only Codex diagnostics
-      // should be allowed to invalidate a saved ChatGPT account mid-run.
-      if (!isChatGptAccountReauthFailure(stderr)) {
-        return;
-      }
-      chatGptAccountReauthRequired = true;
-      chatGptAccountFailureReason =
-        extractChatGptAccountReauthFailureReason(stderr) ||
-        "The assigned ChatGPT account needs to be reconnected. Reconnect that account or add another one, then retry.";
-      killChild("SIGTERM");
-      setTimeout(() => {
-        killChild("SIGKILL");
-      }, 2000).unref();
-    };
-
     child.stdout?.on("data", (chunk) => {
       const text = String(chunk || "");
       if (text) {
         process.stdout.write(text);
         stdout = appendOutput(stdout, text);
-        abortForChatGptAccountFailure();
       }
     });
 
@@ -5108,7 +4746,6 @@ async function runCodex({
       if (text) {
         process.stderr.write(text);
         stderr = appendOutput(stderr, text);
-        abortForChatGptAccountFailure();
       }
     });
 
@@ -5169,20 +4806,6 @@ async function runCodex({
       const trimmedCombined = normalizeText(`${stdout}\n${stderr}`);
       const output = truncate(lastMessageOutput, MAX_OUTPUT_CHARS);
       const diagnosticOutput = truncate(trimmedCombined, MAX_OUTPUT_CHARS);
-      if (chatGptAccountReauthRequired) {
-        resolve({
-          ok: false,
-          output,
-          diagnosticOutput,
-          reason: chatGptAccountFailureReason,
-          exitCode: Number.isFinite(code) ? Number(code) : -1,
-          signal: signal || "",
-          timedOut: false,
-          durationMs,
-          chatGptAccountReauthRequired: true,
-        });
-        return;
-      }
       if (code === 0 && !timedOut) {
         resolve({
           ok: true,
@@ -5193,7 +4816,6 @@ async function runCodex({
           signal: signal || "",
           timedOut: false,
           durationMs,
-          chatGptAccountReauthRequired: false,
         });
         return;
       }
@@ -5210,7 +4832,6 @@ async function runCodex({
         signal: signal || "",
         timedOut,
         durationMs,
-        chatGptAccountReauthRequired: false,
       });
     });
   });
@@ -5743,15 +5364,6 @@ async function prepareWorkspace({
 
 async function main() {
   const workerUrl = resolveWorkerBaseUrl(process.env, DEFAULT_CODE_WORKER_BASE_URL);
-  const chatGptAccountWorkerUrl = resolveChatGptAccountWorkerBaseUrl(
-    {
-      ...process.env,
-      CODE_WORKER_URL: workerUrl,
-      CODE_WORKER_CANONICAL_URL:
-        normalizeText(process.env.CODE_WORKER_CANONICAL_URL) || workerUrl,
-    },
-    DEFAULT_CODE_WORKER_BASE_URL,
-  );
   const publicBaseUrl =
     normalizeText(process.env.CODE_PUBLIC_BASE_URL) || DEFAULT_CODE_PUBLIC_URL;
   const adminToken = resolveWebChatRunnerAdminToken(process.env);
@@ -5761,9 +5373,6 @@ async function main() {
   const runId = normalizeText(process.env.CODE_CHAT_RUN_ID);
   const sourceType = normalizeText(process.env.CODE_CHAT_SOURCE_TYPE) || "default_branch";
   const githubLogin = normalizeText(process.env.CODE_CHAT_GITHUB_LOGIN);
-  const initialChatGptAccountId = normalizeChatGptAccountId(
-    process.env.CODE_CHAT_CHATGPT_ACCOUNT_ID,
-  );
   const threadTitle = normalizeText(process.env.CODE_CHAT_THREAD_TITLE);
   const threadSpecText = normalizeText(process.env.CODE_CHAT_THREAD_SPEC_TEXT);
   const promptText = normalizeText(process.env.CODE_CHAT_PROMPT_TEXT);
@@ -5861,9 +5470,7 @@ async function main() {
   let nonFatalCodexSessionLoadWarning = "";
   let executionMode = "fresh";
   let threadTargetRestartCount = 0;
-  let chatGptAccountRecoveryCount = 0;
   let codexResumeRecoveryCount = 0;
-  let selectedChatGptAccountId = initialChatGptAccountId;
   let lastPersistenceSummary = "";
   try {
     while (true) {
@@ -5988,10 +5595,7 @@ async function main() {
 
       const attemptRunRuntime = await createWebChatRunRuntime(threadId);
       runRuntime = attemptRunRuntime;
-      const codexCommandEnv = {
-        ...commandEnv,
-        CODEX_HOME: attemptRunRuntime.codexHome,
-      };
+      const codexCommandEnv = { ...commandEnv };
       applyCodeq8CliRuntimeEnv({
         commandEnv: codexCommandEnv,
         publicBaseUrl,
@@ -6032,89 +5636,22 @@ async function main() {
         threadId,
       });
 
-      let activeChatGptAccount = null;
-      let skipChatGptAccountFinalization = false;
-      let runBodyError = null;
       try {
-        const preparedChatGptAccount = await prepareChatGptAccountAuth({
-          workerUrl: chatGptAccountWorkerUrl,
-          adminToken,
+        log(
+          "Using runner-local Codex authentication for web chat run",
+          `owner=${githubLogin} codex_home=${attemptRunRuntime.codexHome}`,
+        );
+        const validatedCodexAuth = await validateRunnerCodexAuth({
+          codexPath,
           codexHome: attemptRunRuntime.codexHome,
-          ownerGithubLogin: githubLogin,
-          accountId: selectedChatGptAccountId,
+          workspacePath: preparedWorkspace.workspacePath,
+          commandEnv: codexCommandEnv,
         });
-        if (!preparedChatGptAccount.available) {
+        if (!validatedCodexAuth.ok) {
           throw new Error(
-            preparedChatGptAccount.reason ||
-              "The assigned ChatGPT account could not be loaded for this run.",
+            validatedCodexAuth.reason ||
+              "Codex is not logged in on this self-hosted runner.",
           );
-        }
-        if (preparedChatGptAccount.usesRunnerAuthentication) {
-          log(
-            "Using runner-authenticated Codex for web chat run",
-            `owner=${githubLogin}`,
-          );
-        } else {
-          log(
-            "Prepared ChatGPT account for web chat run",
-            `account_id=${preparedChatGptAccount.accountId} owner=${githubLogin}`,
-          );
-          activeChatGptAccount = {
-            ownerGithubLogin: githubLogin,
-            accountId: preparedChatGptAccount.accountId,
-          };
-          const validatedChatGptAccount = await validateChatGptAccountAuth({
-            codexPath,
-            codexHome: attemptRunRuntime.codexHome,
-            workspacePath: preparedWorkspace.workspacePath,
-            commandEnv: codexCommandEnv,
-          });
-          if (!validatedChatGptAccount.ok) {
-            runBodyError = new Error(
-              validatedChatGptAccount.reason ||
-                "The assigned ChatGPT account could not be validated for this run.",
-            );
-            if (validatedChatGptAccount.reauthRequired && activeChatGptAccount) {
-              const recovery = await recoverFromChatGptAccountReauthFailure({
-                workerUrl: chatGptAccountWorkerUrl,
-                adminToken,
-                ownerGithubLogin: activeChatGptAccount.ownerGithubLogin,
-                accountId: activeChatGptAccount.accountId,
-                error: validatedChatGptAccount.reason,
-                recoveryCount: chatGptAccountRecoveryCount,
-              });
-              skipChatGptAccountFinalization = true;
-              activeChatGptAccount = null;
-              if (!recovery.ok) {
-                throw new Error(
-                  recovery.error ||
-                    validatedChatGptAccount.reason ||
-                    "The assigned ChatGPT account needs to be reconnected.",
-                );
-              }
-              chatGptAccountRecoveryCount = recovery.recoveryCount;
-              selectedChatGptAccountId = recovery.nextAccountId;
-              log(
-                "Retrying web chat run with the next ChatGPT account",
-                `owner=${githubLogin} account_id=${selectedChatGptAccountId} retry_count=${chatGptAccountRecoveryCount}`,
-              );
-              continue;
-            }
-            throw runBodyError;
-          }
-          const syncedChatGptAccount = await syncChatGptAccountAuth({
-            workerUrl: chatGptAccountWorkerUrl,
-            adminToken,
-            codexHome: attemptRunRuntime.codexHome,
-            ownerGithubLogin: githubLogin,
-            persistedAccountId: preparedChatGptAccount.accountId,
-            threadId,
-            runId,
-          });
-          selectedChatGptAccountId =
-            normalizeChatGptAccountId(syncedChatGptAccount.accountId) ||
-            preparedChatGptAccount.accountId;
-          activeChatGptAccount.accountId = selectedChatGptAccountId;
         }
 
         preparedCodeq8Cli = await prepareCodeq8Cli({
@@ -6286,10 +5823,8 @@ async function main() {
               workspace_repository: activeWorkspaceRepository,
               status: "running",
               summary:
-              threadTargetRestartCount > 0
+                threadTargetRestartCount > 0
                   ? "Restarting on the updated thread context."
-                  : chatGptAccountRecoveryCount > 0
-                    ? "Retrying with the next ChatGPT account."
                   : "Codex is working.",
               resolved_write_branch: preparedWorkspace.durableWriteBranch || undefined,
               started_at: startedAt,
@@ -6299,7 +5834,6 @@ async function main() {
                 extra: {
                   bundle_revision: persistedCodexSessionState.bundle_revision || 0,
                   thread_target_restart_count: threadTargetRestartCount,
-                  chatgpt_account_retry_count: chatGptAccountRecoveryCount,
                 },
               }),
             },
@@ -6327,36 +5861,6 @@ async function main() {
           sessionId: codexSessionState.session_id,
           outputFilePath: path.join(attemptRunRuntime.homePath, "last-message.txt"),
         });
-        if (execution.chatGptAccountReauthRequired && activeChatGptAccount) {
-          runBodyError = new Error(
-            execution.reason ||
-              "The assigned ChatGPT account needs to be reconnected.",
-          );
-          const recovery = await recoverFromChatGptAccountReauthFailure({
-            workerUrl: chatGptAccountWorkerUrl,
-            adminToken,
-            ownerGithubLogin: activeChatGptAccount.ownerGithubLogin,
-            accountId: activeChatGptAccount.accountId,
-            error: execution.reason,
-            recoveryCount: chatGptAccountRecoveryCount,
-          });
-          skipChatGptAccountFinalization = true;
-          activeChatGptAccount = null;
-          if (!recovery.ok) {
-            throw new Error(
-              recovery.error ||
-                execution.reason ||
-                "The assigned ChatGPT account needs to be reconnected.",
-            );
-          }
-          chatGptAccountRecoveryCount = recovery.recoveryCount;
-          selectedChatGptAccountId = recovery.nextAccountId;
-          log(
-            "Retrying web chat run with the next ChatGPT account",
-            `owner=${githubLogin} account_id=${selectedChatGptAccountId} retry_count=${chatGptAccountRecoveryCount}`,
-          );
-          continue;
-        }
         if (
           executionMode === "resume" &&
           isRecoverableCodexResumeFailure({
@@ -6798,43 +6302,8 @@ async function main() {
         );
         return;
       } catch (error) {
-        runBodyError = error;
         throw error;
       } finally {
-        if (activeChatGptAccount && !skipChatGptAccountFinalization) {
-          try {
-            const finalizationResult = await finalizeChatGptAccountAuth({
-              workerUrl: chatGptAccountWorkerUrl,
-              adminToken,
-              codexHome: attemptRunRuntime.codexHome,
-              ownerGithubLogin: activeChatGptAccount.ownerGithubLogin,
-              accountId: activeChatGptAccount.accountId,
-              threadId,
-              runId,
-              runError: runBodyError,
-            });
-            if (finalizationResult.status === "reauth_required") {
-              log(
-                "Marked ChatGPT account for reauthentication after web chat run",
-                `account_id=${finalizationResult.accountId} owner=${activeChatGptAccount.ownerGithubLogin}`,
-              );
-            } else {
-              log(
-                "Persisted ChatGPT account auth for web chat run",
-                `account_id=${finalizationResult.accountId} owner=${activeChatGptAccount.ownerGithubLogin}`,
-              );
-            }
-          } catch (error) {
-            const finalizationMessage = extractErrorMessage(
-              error,
-              "Unable to finalize ChatGPT account auth.",
-            );
-            log("ERROR", finalizationMessage);
-            if (!runBodyError) {
-              throw new Error(finalizationMessage);
-            }
-          }
-        }
         if (runRuntime === attemptRunRuntime) {
           runRuntime = null;
         }
@@ -6939,14 +6408,12 @@ export {
   persistWorkspaceProgress,
   postRunCallback,
   prepareCodeq8Cli,
-  prepareChatGptAccountAuth,
   prepareRunnerDiscordDmCli,
   prepareGitHubCliAuth,
   pushRememberedThreadBranch,
   findPullRequestForBranch,
   refreshWorkspaceRemoteRefs,
-  syncChatGptAccountAuth,
-  validateChatGptAccountAuth,
+  validateRunnerCodexAuth,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
   requestWorkspaceGitToken,

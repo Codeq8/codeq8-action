@@ -147,9 +147,6 @@ export function normalizeGitHubActionsChatRunPayload(value) {
     ),
     source_type: normalizeSourceType(normalized.source_type || normalized.sourceType),
     github_login: normalizeText(normalized.github_login || normalized.githubLogin),
-    chatgpt_account_id: normalizeText(
-      normalized.chatgpt_account_id || normalized.chatgptAccountId,
-    ),
     web_chat_run_token: normalizeText(
       normalized.web_chat_run_token || normalized.webChatRunToken,
     ),
@@ -283,7 +280,6 @@ export function buildWebChatRunnerEnv({
     CODE_CHAT_SOURCE_TYPE: normalizedPayload.source_type,
     CODE_CHAT_THREAD_SPEC_TEXT: normalizedPayload.thread_spec,
     CODE_CHAT_GITHUB_LOGIN: normalizedPayload.github_login,
-    CODE_CHAT_CHATGPT_ACCOUNT_ID: normalizedPayload.chatgpt_account_id,
     CODE_CHAT_PROMPT_TEXT: normalizedPayload.prompt_text,
     CODE_CHAT_RECENT_USER_MESSAGES_PROMPT_TEXT:
       normalizedPayload.recent_user_messages_prompt_text,
