@@ -5078,13 +5078,15 @@ async function runCodex({
       if (chatGptAccountReauthRequired) {
         return;
       }
-      const combinedOutput = `${stdout}\n${stderr}`;
-      if (!isChatGptAccountReauthFailure(combinedOutput)) {
+      // stdout includes the model/tool transcript and can contain arbitrary
+      // repository text, including auth-error fixtures. Only Codex diagnostics
+      // should be allowed to invalidate a saved ChatGPT account mid-run.
+      if (!isChatGptAccountReauthFailure(stderr)) {
         return;
       }
       chatGptAccountReauthRequired = true;
       chatGptAccountFailureReason =
-        extractChatGptAccountReauthFailureReason(combinedOutput) ||
+        extractChatGptAccountReauthFailureReason(stderr) ||
         "The assigned ChatGPT account needs to be reconnected. Reconnect that account or add another one, then retry.";
       killChild("SIGTERM");
       setTimeout(() => {

@@ -20,6 +20,7 @@ import {
   prepareChatGptAccountAuth,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
+  runCodex,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
@@ -160,6 +161,71 @@ test("prepareChatGptAccountAuth falls back to runner-authenticated Codex when no
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("runCodex does not mark ChatGPT reauth from repository text on stdout", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-stdout-auth-text-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "console.log('cloudflare/control-plane/tests/control-plane-routing.test.mjs: error: \"refresh_token_reused\",');",
+      "await new Promise((resolve) => setTimeout(resolve, 100));",
+      "process.exit(0);",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "inspect auth fixtures",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.chatGptAccountReauthRequired, false);
+});
+
+test("runCodex marks ChatGPT reauth from Codex diagnostics on stderr", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-stderr-auth-text-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "console.error('ERROR: failed to refresh token: refresh_token_reused');",
+      "await new Promise((resolve) => setTimeout(resolve, 100));",
+      "process.exit(1);",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "run with stale auth",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.chatGptAccountReauthRequired, true);
+  assert.match(result.reason, /assigned ChatGPT account needs to be reconnected/i);
 });
 
 function git(workspacePath, args) {
