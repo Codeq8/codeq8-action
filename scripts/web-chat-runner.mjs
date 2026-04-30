@@ -469,7 +469,8 @@ function isRecoverableCodexSessionErrorState(value) {
       normalized,
     ) ||
     /stored codex session bundle is not a valid codex session file/i.test(normalized) ||
-    /failed to parse thread ID from rollout file/i.test(normalized)
+    /failed to parse thread ID from rollout file/i.test(normalized) ||
+    /worker request failed:\s*fetch failed/i.test(normalized)
   );
 }
 

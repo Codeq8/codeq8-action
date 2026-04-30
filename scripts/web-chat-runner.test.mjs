@@ -872,6 +872,19 @@ test("isRecoverableCodexSessionErrorState treats token path mismatches as recove
   );
 });
 
+test("isRecoverableCodexSessionErrorState treats worker fetch failures as recoverable stale session state", () => {
+  assert.equal(
+    isRecoverableCodexSessionErrorState("Worker request failed: fetch failed"),
+    true,
+  );
+  assert.equal(
+    isRecoverableCodexSessionErrorState(
+      "Codex session state is in error status: Worker request failed: fetch failed",
+    ),
+    true,
+  );
+});
+
 test("extractUserVisibleFailureHeadline drops terminal log tails from failure blobs", () => {
   const headline = extractUserVisibleFailureHeadline(`
     Codex exited with code=1 signal=none.
