@@ -940,6 +940,36 @@ async function workerJsonRequest({ workerUrl, adminToken, path, method, query, b
   });
 }
 
+async function workerTextRequest({ workerUrl, adminToken, path, method, query, body }) {
+  const normalizedWorkerUrl = normalizeBaseUrl(workerUrl);
+  const normalizedToken = normalizeText(adminToken);
+  if (!normalizedToken) {
+    throw new Error(
+      "CODE_WEB_CHAT_RUN_TOKEN or CODE_GITHUB_SESSION_SECRET or GH_OAUTH_STATE_SECRET is required.",
+    );
+  }
+  const url = new URL(path, normalizedWorkerUrl);
+  if (query) {
+    url.search = query.toString();
+  }
+  const authorizationHeader =
+    normalizedToken.split(".").length === 3
+      ? `Bearer ${normalizedToken}`
+      : await buildControlPlaneRequestAuthorizationHeader(
+          { method, path },
+          { CODE_GITHUB_SESSION_SECRET: normalizedToken },
+        );
+
+  return fetchJson(url.toString(), {
+    method,
+    headers: {
+      Authorization: authorizationHeader,
+      ...(method === "POST" ? { "Content-Type": "text/plain; charset=utf-8" } : {}),
+    },
+    ...(method === "POST" ? { body: String(body || "") } : {}),
+  });
+}
+
 async function prepareWebChatCodexSessionUpload({
   workerUrl,
   adminToken,
@@ -1008,18 +1038,19 @@ async function uploadPreparedWebChatCodexSessionBundle({
   storageBackend,
   storedValue,
 }) {
-  const response = await workerJsonRequest({
+  const query = new URLSearchParams({
+    thread_id: normalizeText(threadId),
+    storage_key: normalizeText(storageKey),
+    storage_bucket: normalizeText(storageBucket),
+    storage_backend: normalizeText(storageBackend),
+  });
+  const response = await workerTextRequest({
     workerUrl,
     adminToken,
-    path: "/web-chat/codex-session/upload",
+    path: "/web-chat/codex-session/upload-direct",
     method: "POST",
-    body: {
-      thread_id: normalizeText(threadId),
-      storage_key: normalizeText(storageKey),
-      storage_bucket: normalizeText(storageBucket),
-      storage_backend: normalizeText(storageBackend),
-      stored_value: String(storedValue || ""),
-    },
+    query,
+    body: String(storedValue || ""),
   });
   if (!response.ok || response.payload.ok === false) {
     throw new Error(
@@ -1320,9 +1351,17 @@ async function assertWebChatRunnerRuntimeCompatibility({
     REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
     manifest.capabilities,
   );
+  const authorizedPaths = Array.from(
+    new Set([
+      ...(Array.isArray(manifest.authorized_paths) ? manifest.authorized_paths : []),
+      ...(Array.isArray(manifest.scoped_authorized_paths)
+        ? manifest.scoped_authorized_paths
+        : []),
+    ]),
+  );
   const missingPaths = listMissingRuntimeEntries(
     REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
-    manifest.authorized_paths,
+    authorizedPaths,
   );
   if (missingCapabilities.length > 0 || missingPaths.length > 0) {
     const problems = [];

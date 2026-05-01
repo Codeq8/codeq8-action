@@ -61,6 +61,9 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/web-chat/codex-session/invalidate",
         "/web-chat/threads/get",
       ],
+      scoped_authorized_paths: [
+        "/web-chat/codex-session/upload-direct",
+      ],
     });
   };
 
@@ -121,7 +124,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
           threadId: "wct_123",
           runId: "wcr_123",
         }),
-      /missing authorized paths: \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload, \/web-chat\/codex-session\/upload-discard/,
+      /missing authorized paths: \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload, \/web-chat\/codex-session\/upload-direct, \/web-chat\/codex-session\/upload-discard/,
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -802,10 +805,16 @@ test("prepare/upload/discard codex session bundle calls the staged worker routes
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, init) => {
+    const bodyText = init?.body ? String(init.body) : "";
+    const contentType = String(init?.headers?.["Content-Type"] || "");
     calls.push({
       url: String(url),
       method: init?.method || "GET",
-      body: init?.body ? JSON.parse(String(init.body)) : null,
+      contentType,
+      body:
+        bodyText && contentType.includes("application/json")
+          ? JSON.parse(bodyText)
+          : bodyText || null,
     });
     if (String(url).endsWith("/upload-prepare")) {
       return Response.json({
@@ -854,7 +863,20 @@ test("prepare/upload/discard codex session bundle calls the staged worker routes
 
     assert.equal(calls.length, 3);
     assert.equal(calls[0]?.url, "https://worker.example.com/web-chat/codex-session/upload-prepare");
-    assert.equal(calls[1]?.url, "https://worker.example.com/web-chat/codex-session/upload");
+    assert.match(
+      calls[1]?.url,
+      /^https:\/\/worker\.example\.com\/web-chat\/codex-session\/upload-direct\?/,
+    );
+    const uploadUrl = new URL(calls[1]?.url || "");
+    assert.equal(uploadUrl.searchParams.get("thread_id"), "wct_123");
+    assert.equal(
+      uploadUrl.searchParams.get("storage_key"),
+      "web_chat_codex_session_blob:wct_123:1:nonce",
+    );
+    assert.equal(uploadUrl.searchParams.get("storage_bucket"), "bucket");
+    assert.equal(uploadUrl.searchParams.get("storage_backend"), "firebase_storage");
+    assert.equal(calls[1]?.contentType, "text/plain; charset=utf-8");
+    assert.equal(calls[1]?.body, "{\"version\":3}");
     assert.equal(calls[2]?.url, "https://worker.example.com/web-chat/codex-session/upload-discard");
   } finally {
     globalThis.fetch = originalFetch;
