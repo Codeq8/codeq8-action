@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { webcrypto } from "node:crypto";
+import { createSign, webcrypto } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -73,6 +73,10 @@ const RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES = new Set([
   503,
   504,
 ]);
+const FIREBASE_STORAGE_READ_ONLY_SCOPE =
+  "https://www.googleapis.com/auth/devstorage.read_only";
+const FIREBASE_SERVICE_ACCOUNT_TOKEN_URI = "https://oauth2.googleapis.com/token";
+const firebaseStorageAccessTokenCache = new Map();
 
 function normalizeText(value) {
   return String(value || "").trim();
@@ -589,6 +593,13 @@ function normalizeAttachmentRecord(value) {
   if (!attachmentId || !name) {
     return null;
   }
+  const storageBackend = normalizeText(
+    normalized.storage_backend || normalized.storageBackend,
+  ).toLowerCase();
+  const storageBucket = normalizeText(
+    normalized.storage_bucket || normalized.storageBucket,
+  );
+  const storageKey = normalizeText(normalized.storage_key || normalized.storageKey);
   return {
     attachment_id: attachmentId,
     name,
@@ -599,6 +610,9 @@ function normalizeAttachmentRecord(value) {
       normalized.size_bytes || normalized.sizeBytes || 0,
       0,
     ),
+    ...(storageBackend ? { storage_backend: storageBackend } : {}),
+    ...(storageBucket ? { storage_bucket: storageBucket } : {}),
+    ...(storageKey ? { storage_key: storageKey } : {}),
   };
 }
 
@@ -3098,6 +3112,235 @@ async function readWebChatAttachment({
   );
 }
 
+function parseFirebaseServiceAccountJson(value) {
+  const raw = normalizeText(value);
+  if (!raw) {
+    return null;
+  }
+  const candidates = [raw];
+  for (const encoding of ["base64", "base64url"]) {
+    try {
+      const decoded = Buffer.from(raw, encoding).toString("utf8");
+      if (decoded && decoded !== raw) {
+        candidates.push(decoded);
+      }
+    } catch {
+      // Ignore non-base64 Firebase secret variants.
+    }
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      const normalized = normalizeObject(parsed);
+      const clientEmail = normalizeText(
+        normalized.client_email || normalized.clientEmail,
+      );
+      const privateKey = normalizeText(
+        normalized.private_key || normalized.privateKey,
+      ).replace(/\\n/g, "\n");
+      if (!clientEmail || !privateKey) {
+        continue;
+      }
+      return {
+        clientEmail,
+        privateKey,
+        tokenUri:
+          normalizeText(normalized.token_uri || normalized.tokenUri) ||
+          FIREBASE_SERVICE_ACCOUNT_TOKEN_URI,
+      };
+    } catch {
+      // Try the next supported representation.
+    }
+  }
+
+  return null;
+}
+
+function buildFirebaseServiceAccountJwt({
+  serviceAccount,
+  nowSeconds = Math.floor(Date.now() / 1000),
+}) {
+  const clientEmail = normalizeText(serviceAccount?.clientEmail);
+  const privateKey = normalizeText(serviceAccount?.privateKey);
+  const tokenUri =
+    normalizeText(serviceAccount?.tokenUri) || FIREBASE_SERVICE_ACCOUNT_TOKEN_URI;
+  if (!clientEmail || !privateKey) {
+    throw new Error("Firebase service account client_email and private_key are required.");
+  }
+  const header = {
+    alg: "RS256",
+    typ: "JWT",
+  };
+  const claim = {
+    iss: clientEmail,
+    scope: FIREBASE_STORAGE_READ_ONLY_SCOPE,
+    aud: tokenUri,
+    iat: nowSeconds,
+    exp: nowSeconds + 3600,
+  };
+  const unsigned = [
+    toBase64Url(Buffer.from(JSON.stringify(header), "utf8")),
+    toBase64Url(Buffer.from(JSON.stringify(claim), "utf8")),
+  ].join(".");
+  const signer = createSign("RSA-SHA256");
+  signer.update(unsigned);
+  signer.end();
+  return `${unsigned}.${toBase64Url(signer.sign(privateKey))}`;
+}
+
+async function requestFirebaseStorageAccessToken({
+  serviceAccount,
+  fetchImpl = fetch,
+  nowMs = Date.now(),
+}) {
+  const tokenUri =
+    normalizeText(serviceAccount?.tokenUri) || FIREBASE_SERVICE_ACCOUNT_TOKEN_URI;
+  const cacheKey = `${normalizeText(serviceAccount?.clientEmail)}\n${tokenUri}`;
+  const cached = firebaseStorageAccessTokenCache.get(cacheKey);
+  if (cached && cached.expiresAtMs > nowMs + 60_000) {
+    return cached.accessToken;
+  }
+
+  const assertion = buildFirebaseServiceAccountJwt({
+    serviceAccount,
+    nowSeconds: Math.floor(nowMs / 1000),
+  });
+  const response = await fetchImpl(tokenUri, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  });
+  let payload = {};
+  try {
+    payload = normalizeObject(await response.json());
+  } catch {
+    payload = {};
+  }
+  const accessToken = normalizeText(payload.access_token || payload.accessToken);
+  if (!response.ok || !accessToken) {
+    throw new Error(
+      normalizeText(payload.error_description || payload.error) ||
+        `Firebase access token request failed (${response.status}).`,
+    );
+  }
+  const expiresInSeconds = parsePositiveInteger(payload.expires_in, 3600) || 3600;
+  firebaseStorageAccessTokenCache.set(cacheKey, {
+    accessToken,
+    expiresAtMs: nowMs + expiresInSeconds * 1000,
+  });
+  return accessToken;
+}
+
+function buildFirebaseStorageDownloadUrl({ bucket, storageKey }) {
+  const normalizedBucket = normalizeText(bucket);
+  const normalizedStorageKey = normalizeText(storageKey);
+  if (!normalizedBucket || !normalizedStorageKey) {
+    return "";
+  }
+  const url = new URL(
+    `https://storage.googleapis.com/download/storage/v1/b/${encodeURIComponent(
+      normalizedBucket,
+    )}/o/${encodeURIComponent(normalizedStorageKey)}`,
+  );
+  url.searchParams.set("alt", "media");
+  return url.toString();
+}
+
+function resolveFirebaseStorageAttachmentPointer(attachment) {
+  const normalized = normalizeObject(attachment);
+  const storageBackend = normalizeText(
+    normalized.storage_backend || normalized.storageBackend,
+  ).toLowerCase();
+  if (storageBackend !== "firebase_storage") {
+    return null;
+  }
+  const bucket = normalizeText(normalized.storage_bucket || normalized.storageBucket);
+  const storageKey = normalizeText(normalized.storage_key || normalized.storageKey);
+  if (!bucket || !storageKey) {
+    return null;
+  }
+  return { bucket, storageKey };
+}
+
+async function readFirebaseStorageAttachment({
+  attachment,
+  firebaseJsonKey,
+  fetchImpl = fetch,
+  retries = 3,
+  retryDelayMs = 750,
+}) {
+  const normalizedAttachment = normalizeAttachmentRecord(attachment);
+  const pointer = resolveFirebaseStorageAttachmentPointer(normalizedAttachment);
+  if (!normalizedAttachment || !pointer) {
+    throw new Error("Firebase Storage attachment metadata is incomplete.");
+  }
+  const serviceAccount = parseFirebaseServiceAccountJson(firebaseJsonKey);
+  if (!serviceAccount) {
+    throw new Error("FIREBASE_JSON_KEY is required to read Firebase Storage attachments.");
+  }
+  const accessToken = await requestFirebaseStorageAccessToken({
+    serviceAccount,
+    fetchImpl,
+  });
+  const url = buildFirebaseStorageDownloadUrl(pointer);
+  const attempts = Math.max(1, parsePositiveInteger(retries, 3) || 3);
+  let lastStatus = 0;
+  let lastErrorText = "";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let response = null;
+    try {
+      response = await fetchImpl(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+        cache: "no-store",
+      });
+    } catch (error) {
+      lastErrorText = extractErrorMessage(error, "Firebase Storage request failed.");
+    }
+
+    if (response?.ok) {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return {
+        attachment: normalizedAttachment,
+        fileContentsBase64Url: bytes.toString("base64url"),
+      };
+    }
+
+    if (response) {
+      lastStatus = response.status;
+      try {
+        lastErrorText = normalizeText(await response.text());
+      } catch {
+        lastErrorText = "";
+      }
+    }
+    const retryable =
+      (!response || RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES.has(response.status)) &&
+      attempt < attempts;
+    if (!retryable) {
+      break;
+    }
+    log(
+      "Firebase Storage attachment read failed; retrying",
+      `attachment_id=${normalizedAttachment.attachment_id} status=${lastStatus || "fetch_failed"} attempt=${attempt}/${attempts} bucket=${pointer.bucket}`,
+    );
+    await sleep(retryDelayMs);
+  }
+
+  throw new Error(
+    normalizeText(lastErrorText) ||
+      `Failed to read Firebase Storage attachment (${lastStatus || 0}).`,
+  );
+}
+
 async function readWebChatThread({ workerUrl, adminToken, threadId }) {
   const response = await workerJsonRequest({
     workerUrl,
@@ -3746,6 +3989,9 @@ async function materializeWebChatAttachments({
   workerUrl,
   adminToken,
   threadId,
+  commandEnv = process.env,
+  readFirebaseStorageAttachmentImpl = readFirebaseStorageAttachment,
+  readWebChatAttachmentImpl = readWebChatAttachment,
 }) {
   const normalizedAttachments = parseAttachmentList(attachments);
   if (normalizedAttachments.length === 0) {
@@ -3754,13 +4000,30 @@ async function materializeWebChatAttachments({
 
   await ensureDirectory(attachmentRootPath);
   const materialized = [];
+  const firebaseJsonKey = normalizeText(commandEnv.FIREBASE_JSON_KEY);
   for (const attachment of normalizedAttachments) {
-    const loaded = await readWebChatAttachment({
-      workerUrl,
-      adminToken,
-      threadId,
-      attachmentId: attachment.attachment_id,
-    });
+    let loaded = null;
+    if (firebaseJsonKey && resolveFirebaseStorageAttachmentPointer(attachment)) {
+      try {
+        loaded = await readFirebaseStorageAttachmentImpl({
+          attachment,
+          firebaseJsonKey,
+        });
+      } catch (error) {
+        log(
+          "Firebase Storage attachment direct read failed; falling back to worker",
+          `thread_id=${normalizeText(threadId)} attachment_id=${attachment.attachment_id} error=${extractErrorMessage(error)}`,
+        );
+      }
+    }
+    if (!loaded) {
+      loaded = await readWebChatAttachmentImpl({
+        workerUrl,
+        adminToken,
+        threadId,
+        attachmentId: attachment.attachment_id,
+      });
+    }
     if (!loaded.attachment || !loaded.fileContentsBase64Url) {
       throw new Error(`Attachment ${attachment.name} could not be loaded.`);
     }
@@ -5747,6 +6010,7 @@ async function main() {
         workerUrl,
         adminToken,
         threadId,
+        commandEnv: codexCommandEnv,
       });
 
       try {
@@ -6526,6 +6790,10 @@ export {
   pushRememberedThreadBranch,
   findPullRequestForBranch,
   refreshWorkspaceRemoteRefs,
+  buildFirebaseStorageDownloadUrl,
+  materializeWebChatAttachments,
+  normalizeAttachmentRecord,
+  readFirebaseStorageAttachment,
   readWebChatAttachment,
   validateRunnerCodexAuth,
   uploadPreparedWebChatCodexSessionBundle,

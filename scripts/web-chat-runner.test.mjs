@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import test from "node:test";
 
 import {
   assertWebChatRunnerRuntimeCompatibility,
+  buildFirebaseStorageDownloadUrl,
   buildCodexPrompt,
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
@@ -16,10 +18,13 @@ import {
   hydrateServerOwnedCodeq8File,
   extractUserVisibleFailureHeadline,
   isRecoverableCodexSessionErrorState,
+  materializeWebChatAttachments,
+  normalizeAttachmentRecord,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
+  readFirebaseStorageAttachment,
   readWebChatAttachment,
   runCodex,
   toUserVisibleRunnerFailureMessage,
@@ -28,6 +33,158 @@ import {
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
+
+test("normalizeAttachmentRecord preserves Firebase Storage metadata for direct reads", () => {
+  assert.deepEqual(
+    normalizeAttachmentRecord({
+      attachment_id: "wca_screenshot",
+      name: "Screenshot.png",
+      content_type: "image/png",
+      size_bytes: 123,
+      storage_backend: "firebase_storage",
+      storage_bucket: "codeq8.appspot.com",
+      storage_key:
+        "chat_attachments/github:abdul/wct_123/wcm_123/wca_screenshot/Screenshot.png",
+    }),
+    {
+      attachment_id: "wca_screenshot",
+      name: "Screenshot.png",
+      content_type: "image/png",
+      size_bytes: 123,
+      storage_backend: "firebase_storage",
+      storage_bucket: "codeq8.appspot.com",
+      storage_key:
+        "chat_attachments/github:abdul/wct_123/wcm_123/wca_screenshot/Screenshot.png",
+    },
+  );
+});
+
+test("buildFirebaseStorageDownloadUrl encodes storage object names for GCS media reads", () => {
+  assert.equal(
+    buildFirebaseStorageDownloadUrl({
+      bucket: "codeq8-cf11c.firebasestorage.app",
+      storageKey:
+        "chat_attachments/github:abdul/wct_123/wcm_123/wca_123/test file.png",
+    }),
+    "https://storage.googleapis.com/download/storage/v1/b/codeq8-cf11c.firebasestorage.app/o/chat_attachments%2Fgithub%3Aabdul%2Fwct_123%2Fwcm_123%2Fwca_123%2Ftest%20file.png?alt=media",
+  );
+});
+
+test("readFirebaseStorageAttachment exchanges the service account key and downloads the object", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+  });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+  const calls = [];
+
+  const loaded = await readFirebaseStorageAttachment({
+    attachment: {
+      attachment_id: "wca_screenshot",
+      name: "Screenshot.png",
+      content_type: "image/png",
+      size_bytes: 12,
+      storage_backend: "firebase_storage",
+      storage_bucket: "codeq8.appspot.com",
+      storage_key:
+        "chat_attachments/github:abdul/wct_123/wcm_123/wca_screenshot/Screenshot.png",
+    },
+    firebaseJsonKey: JSON.stringify({
+      client_email: "runner-direct-read@example.com",
+      private_key: privateKeyPem,
+      token_uri: "https://oauth2.example/token",
+    }),
+    retries: 1,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      if (String(url) === "https://oauth2.example/token") {
+        assert.match(String(init.body || ""), /grant_type=urn%3Aietf%3Aparams/);
+        assert.match(String(init.body || ""), /assertion=/);
+        return new Response(
+          JSON.stringify({
+            access_token: "ya29.test",
+            expires_in: 3600,
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+            },
+          },
+        );
+      }
+
+      assert.equal(init.headers?.Authorization, "Bearer ya29.test");
+      return new Response(Buffer.from("image-bytes", "utf8"), { status: 200 });
+    },
+  });
+
+  assert.equal(calls.length, 2);
+  assert.equal(
+    calls[1]?.url,
+    "https://storage.googleapis.com/download/storage/v1/b/codeq8.appspot.com/o/chat_attachments%2Fgithub%3Aabdul%2Fwct_123%2Fwcm_123%2Fwca_screenshot%2FScreenshot.png?alt=media",
+  );
+  assert.equal(
+    Buffer.from(loaded.fileContentsBase64Url, "base64url").toString("utf8"),
+    "image-bytes",
+  );
+});
+
+test("materializeWebChatAttachments reads Firebase Storage attachments directly when credentials are available", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-attachment-test-"));
+  const calls = {
+    firebaseReads: [],
+    workerReads: 0,
+  };
+
+  try {
+    const materialized = await materializeWebChatAttachments({
+      attachments: [
+        {
+          attachment_id: "wca_screenshot",
+          name: "Screenshot.png",
+          content_type: "image/png",
+          size_bytes: 12,
+          storage_backend: "firebase_storage",
+          storage_bucket: "codeq8.appspot.com",
+          storage_key:
+            "chat_attachments/github:abdul/wct_123/wcm_123/wca_screenshot/Screenshot.png",
+        },
+      ],
+      attachmentRootPath: tempRoot,
+      workerUrl: "https://worker.example",
+      adminToken: "runner_token",
+      threadId: "wct_123",
+      commandEnv: {
+        FIREBASE_JSON_KEY: '{"client_email":"runner@example.com","private_key":"unused"}',
+      },
+      readFirebaseStorageAttachmentImpl: async ({ attachment, firebaseJsonKey }) => {
+        calls.firebaseReads.push({ attachment, firebaseJsonKey });
+        return {
+          attachment,
+          fileContentsBase64Url: Buffer.from("image-bytes", "utf8").toString(
+            "base64url",
+          ),
+        };
+      },
+      readWebChatAttachmentImpl: async () => {
+        calls.workerReads += 1;
+        throw new Error("worker fallback should not run");
+      },
+    });
+
+    assert.equal(calls.workerReads, 0);
+    assert.equal(calls.firebaseReads.length, 1);
+    assert.equal(calls.firebaseReads[0]?.attachment?.storage_bucket, "codeq8.appspot.com");
+    assert.equal(materialized.length, 1);
+    assert.equal(
+      path.basename(materialized[0]?.local_path || ""),
+      "wca_screenshot-Screenshot.png",
+    );
+    assert.equal(await fs.readFile(materialized[0].local_path, "utf8"), "image-bytes");
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
 
 test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime manifest", async () => {
   const originalFetch = globalThis.fetch;

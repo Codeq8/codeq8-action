@@ -47,6 +47,40 @@ test("normalizeGitHubActionsChatRunPayload preserves referenced threads", () => 
   assert.equal(payload.referenced_threads_json, '[{"thread_id":"wct_other"}]');
 });
 
+test("normalizeGitHubActionsChatRunPayload preserves attachment storage metadata", () => {
+  const payload = normalizeGitHubActionsChatRunPayload({
+    run_id: "wcr_123",
+    thread_id: "wct_123",
+    message_id: "wcm_123",
+    workspace_repository: "Codeq8/Codeq8",
+    worker_url: "main-codeq8.bojamal7.workers.dev/",
+    prompt_text: "Fix it",
+    branch_context: {
+      default_branch: "main",
+      context_branch: "main",
+      write_mode: "branch_and_pr",
+      base_branch: "main",
+    },
+    attachments: [
+      {
+        attachment_id: "wca_screenshot",
+        name: "screenshot.png",
+        content_type: "image/png",
+        size_bytes: 1234,
+        storage_backend: "firebase_storage",
+        storage_bucket: "codeq8.appspot.com",
+        storage_key:
+          "chat_attachments/github:abdul/wct_123/wcm_123/wca_screenshot/screenshot.png",
+      },
+    ],
+  });
+
+  assert.equal(
+    payload.attachments_json,
+    '[{"attachment_id":"wca_screenshot","name":"screenshot.png","content_type":"image/png","size_bytes":1234,"storage_backend":"firebase_storage","storage_bucket":"codeq8.appspot.com","storage_key":"chat_attachments/github:abdul/wct_123/wcm_123/wca_screenshot/screenshot.png"}]',
+  );
+});
+
 test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => {
   const env = buildWebChatRunnerEnv({
     env: {
