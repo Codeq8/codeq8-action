@@ -64,6 +64,15 @@ const CODEX_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const CODEX_SESSION_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/;
 const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
 const WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE = "web_chat_codex_session_bundle";
+const RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES = new Set([
+  408,
+  425,
+  429,
+  500,
+  502,
+  503,
+  504,
+]);
 
 function normalizeText(value) {
   return String(value || "").trim();
@@ -3043,30 +3052,50 @@ async function readWebChatAttachment({
   adminToken,
   threadId,
   attachmentId,
+  retries = 3,
+  retryDelayMs = 750,
 }) {
-  const response = await workerJsonRequest({
-    workerUrl,
-    adminToken,
-    path: "/web-chat/attachments/get",
-    method: "GET",
-    query: new URLSearchParams({
-      thread_id: normalizeText(threadId),
-      attachment_id: normalizeText(attachmentId),
-      include_contents: "1",
-    }),
-  });
-  if (!response.ok || response.payload.ok === false) {
-    throw new Error(
-      extractErrorMessage(response.payload.error) ||
-        `Failed to read web chat attachment (${response.status}).`,
+  const attempts = Math.max(1, parsePositiveInteger(retries, 3) || 3);
+  let lastResponse = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const response = await workerJsonRequest({
+      workerUrl,
+      adminToken,
+      path: "/web-chat/attachments/get",
+      method: "GET",
+      query: new URLSearchParams({
+        thread_id: normalizeText(threadId),
+        attachment_id: normalizeText(attachmentId),
+        include_contents: "1",
+      }),
+    });
+    lastResponse = response;
+    if (response.ok && response.payload.ok !== false) {
+      return {
+        attachment: normalizeAttachmentRecord(response.payload.attachment),
+        fileContentsBase64Url: normalizeText(
+          response.payload.file_contents_base64url || response.payload.fileContentsBase64Url,
+        ),
+      };
+    }
+    if (
+      !RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES.has(response.status) ||
+      attempt >= attempts
+    ) {
+      break;
+    }
+    log(
+      "Web chat attachment read failed; retrying",
+      `thread_id=${normalizeText(threadId)} attachment_id=${normalizeText(attachmentId)} status=${response.status} attempt=${attempt}/${attempts} worker=${normalizeBaseUrl(workerUrl)}`,
     );
+    await sleep(retryDelayMs);
   }
-  return {
-    attachment: normalizeAttachmentRecord(response.payload.attachment),
-    fileContentsBase64Url: normalizeText(
-      response.payload.file_contents_base64url || response.payload.fileContentsBase64Url,
-    ),
-  };
+
+  const response = lastResponse || { status: 0, payload: {} };
+  throw new Error(
+    extractErrorMessage(response.payload.error) ||
+      `Failed to read web chat attachment (${response.status}).`,
+  );
 }
 
 async function readWebChatThread({ workerUrl, adminToken, threadId }) {
@@ -6497,6 +6526,7 @@ export {
   pushRememberedThreadBranch,
   findPullRequestForBranch,
   refreshWorkspaceRemoteRefs,
+  readWebChatAttachment,
   validateRunnerCodexAuth,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,

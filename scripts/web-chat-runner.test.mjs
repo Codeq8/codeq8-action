@@ -20,6 +20,7 @@ import {
   persistWorkspaceProgress,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
+  readWebChatAttachment,
   runCodex,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
@@ -126,6 +127,55 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
         }),
       /missing authorized paths: \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload-direct, \/web-chat\/codex-session\/upload-discard/,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("readWebChatAttachment retries transient worker failures", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      method: init?.method || "GET",
+      headers: new Headers(init?.headers || {}),
+    });
+    if (calls.length < 3) {
+      return Response.json(
+        { ok: false, error: "temporary Firebase Storage outage" },
+        { status: 503 },
+      );
+    }
+    return Response.json({
+      ok: true,
+      attachment: {
+        attachment_id: "wca_123",
+        name: "screenshot.png",
+        content_type: "image/png",
+        size_bytes: 5,
+      },
+      file_contents_base64url: Buffer.from("hello").toString("base64url"),
+    });
+  };
+
+  try {
+    const loaded = await readWebChatAttachment({
+      workerUrl: "https://worker.example",
+      adminToken: "header.payload.signature",
+      threadId: "wct_123",
+      attachmentId: "wca_123",
+      retryDelayMs: 1,
+    });
+
+    assert.equal(calls.length, 3);
+    assert.equal(
+      calls[0]?.url,
+      "https://worker.example/web-chat/attachments/get?thread_id=wct_123&attachment_id=wca_123&include_contents=1",
+    );
+    assert.equal(calls[0]?.headers.get("authorization"), "Bearer header.payload.signature");
+    assert.equal(loaded.attachment.attachment_id, "wca_123");
+    assert.equal(Buffer.from(loaded.fileContentsBase64Url, "base64url").toString(), "hello");
   } finally {
     globalThis.fetch = originalFetch;
   }
