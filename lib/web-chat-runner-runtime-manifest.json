@@ -13,6 +13,7 @@
     "/web-chat/attachments/get",
     "/web-chat/codex-session/get",
     "/web-chat/codex-session/upload-prepare",
+    "/web-chat/codex-session/upload",
     "/web-chat/codex-session/upload-direct",
     "/web-chat/codex-session/upload-discard",
     "/web-chat/codex-session/upsert",

@@ -56,6 +56,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/web-chat/attachments/get",
         "/web-chat/codex-session/get",
         "/web-chat/codex-session/upload-prepare",
+        "/web-chat/codex-session/upload",
         "/web-chat/codex-session/upload-discard",
         "/web-chat/codex-session/upsert",
         "/web-chat/codex-session/invalidate",
@@ -124,7 +125,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
           threadId: "wct_123",
           runId: "wcr_123",
         }),
-      /missing authorized paths: \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload-direct, \/web-chat\/codex-session\/upload-discard/,
+      /missing authorized paths: \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload, \/web-chat\/codex-session\/upload-direct, \/web-chat\/codex-session\/upload-discard/,
     );
   } finally {
     globalThis.fetch = originalFetch;
