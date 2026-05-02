@@ -518,6 +518,20 @@ function isRetryableCodexSessionPersistenceError(value) {
   );
 }
 
+function isCodexSessionRevisionConflictError(value) {
+  return /web chat codex session revision conflict/i.test(normalizeText(value));
+}
+
+function isReadyCodexSessionStateForRun(codexSessionState, runId) {
+  const normalizedState = normalizeCodexSessionState(codexSessionState);
+  return (
+    normalizedState.status === "ready" &&
+    normalizeText(normalizedState.last_run_id) === normalizeText(runId) &&
+    normalizedState.bundle_revision > 0 &&
+    Boolean(normalizedState.bundle_storage_key)
+  );
+}
+
 function buildFreshStartCodexSessionState(existingState) {
   const normalized = normalizeCodexSessionState(existingState);
   return normalizeCodexSessionState({
@@ -3576,6 +3590,36 @@ async function persistCapturedCodexSessionBundleWithRetries({
     } catch (error) {
       lastError = error;
       const message = extractErrorMessage(error);
+      if (isCodexSessionRevisionConflictError(message)) {
+        try {
+          const latestCodexSession = await readWebChatCodexSessionState({
+            workerUrl,
+            adminToken,
+            threadId,
+            includeContents: false,
+          });
+          const latestCodexSessionState = normalizeCodexSessionState(
+            latestCodexSession.codexSessionState,
+          );
+          if (isReadyCodexSessionStateForRun(latestCodexSessionState, runId)) {
+            log(
+              "WARN",
+              "Using already-persisted Codex session state after duplicate run revision conflict",
+              `thread_id=${normalizeText(threadId)} run_id=${normalizeText(runId)} revision=${latestCodexSessionState.bundle_revision}`,
+            );
+            return latestCodexSessionState;
+          }
+        } catch (readError) {
+          log(
+            "WARN",
+            `Unable to inspect Codex session state after revision conflict: ${
+              readError instanceof Error ? readError.message : String(readError)
+            }`,
+            `thread_id=${normalizeText(threadId)} run_id=${normalizeText(runId)}`,
+          );
+        }
+        break;
+      }
       if (attempt >= normalizedAttempts || !isRetryableCodexSessionPersistenceError(message)) {
         break;
       }

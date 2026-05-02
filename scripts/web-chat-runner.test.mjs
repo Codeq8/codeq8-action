@@ -16,6 +16,7 @@ import {
   hydrateServerOwnedCodeq8File,
   extractUserVisibleFailureHeadline,
   isRecoverableCodexSessionErrorState,
+  persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
@@ -879,6 +880,96 @@ test("prepare/upload/discard codex session bundle calls the staged worker routes
     assert.equal(calls[2]?.url, "https://worker.example.com/web-chat/codex-session/upload-discard");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("persistCapturedCodexSessionBundleWithRetries accepts duplicate same-run revision conflicts", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-home-"));
+  const sessionFileRelativePath =
+    "sessions/2026/05/02/rollout-2026-05-02T01-06-49-019dd643-e3ec-76e1-952c-3dc25053e8c3.jsonl";
+  const sessionFilePath = path.join(codexHome, sessionFileRelativePath);
+  const sessionFileContents = [
+    JSON.stringify({
+      timestamp: "2026-05-02T01:06:49.000Z",
+      type: "session_meta",
+      payload: {
+        id: "019dd643-e3ec-76e1-952c-3dc25053e8c3",
+        cli_version: "0.128.0",
+        model: "gpt-5.5",
+      },
+    }),
+    "",
+  ].join("\n");
+  await fs.mkdir(path.dirname(sessionFilePath), { recursive: true });
+  await fs.writeFile(sessionFilePath, sessionFileContents, "utf8");
+
+  globalThis.fetch = async (url, init) => {
+    const parsedUrl = new URL(String(url));
+    calls.push({
+      url: String(url),
+      path: parsedUrl.pathname,
+      method: init?.method || "GET",
+      body: init?.body ? String(init.body) : "",
+    });
+    if (parsedUrl.pathname === "/web-chat/codex-session/upload-prepare") {
+      return Response.json(
+        {
+          ok: false,
+          error: "web chat codex session revision conflict (expected 161, found 162).",
+        },
+        { status: 409 },
+      );
+    }
+    if (parsedUrl.pathname === "/web-chat/codex-session/get") {
+      return Response.json({
+        ok: true,
+        codex_session_state: {
+          status: "ready",
+          session_id: "019dd643-e3ec-76e1-952c-3dc25053e8c3",
+          session_file_relative_path: sessionFileRelativePath,
+          bundle_storage_key: "web_chat_codex_session_blob:wct_123:162:nonce",
+          storage_bucket: "bucket",
+          storage_backend: "firebase_storage",
+          bundle_size_bytes: 123,
+          bundle_compressed_size_bytes: 45,
+          bundle_revision: 162,
+          last_run_id: "wcr_duplicate",
+        },
+      });
+    }
+    throw new Error(`Unexpected request ${parsedUrl.pathname}`);
+  };
+
+  try {
+    const state = await persistCapturedCodexSessionBundleWithRetries({
+      workerUrl: "https://worker.example.com",
+      adminToken: "secret",
+      threadId: "wct_123",
+      runId: "wcr_duplicate",
+      codexHome,
+      existingSessionState: {
+        status: "ready",
+        session_id: "019dd643-e3ec-76e1-952c-3dc25053e8c3",
+        session_file_relative_path: sessionFileRelativePath,
+        bundle_revision: 161,
+      },
+      model: "gpt-5.5",
+      targetSignature: "target",
+      expectedBundleRevision: 161,
+    });
+
+    assert.equal(state.status, "ready");
+    assert.equal(state.bundle_revision, 162);
+    assert.equal(state.last_run_id, "wcr_duplicate");
+    assert.deepEqual(
+      calls.map((call) => call.path),
+      ["/web-chat/codex-session/upload-prepare", "/web-chat/codex-session/get"],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(codexHome, { recursive: true, force: true });
   }
 });
 
