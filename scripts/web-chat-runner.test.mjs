@@ -13,6 +13,7 @@ import {
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
   configureWorkspaceGitCredentialHelper,
+  configureWorkspacePushPolicy,
   findPullRequestForBranch,
   flushServerOwnedCodeq8File,
   hydrateServerOwnedCodeq8File,
@@ -1003,6 +1004,59 @@ test("configureWorkspaceGitCredentialHelper clears inherited helpers before addi
 
     const helperScript = await fs.readFile(helperPath, "utf8");
     assert.match(helperScript, /workspace-git-token/);
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("configureWorkspacePushPolicy rejects credential-bearing HTTPS push remotes", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-push-policy-"));
+
+  try {
+    git(workspacePath, ["init"]);
+    git(workspacePath, ["remote", "add", "origin", "https://github.com/Codeq8/codeq8-action.git"]);
+
+    await assert.rejects(
+      configureWorkspacePushPolicy({
+        workspacePath,
+        commandEnv: process.env,
+        remoteUrl: "https://x-access-token:secret@github.com/Codeq8/codeq8-action.git",
+        blockedBranches: [],
+      }),
+      /must not embed credentials/i,
+    );
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("configureWorkspacePushPolicy keeps HTTPS push remotes tokenless", async () => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-push-policy-"));
+
+  try {
+    git(workspacePath, ["init"]);
+    git(workspacePath, ["remote", "add", "origin", "https://github.com/Codeq8/codeq8-action.git"]);
+
+    await configureWorkspacePushPolicy({
+      workspacePath,
+      commandEnv: process.env,
+      remoteUrl: "https://github.com/Codeq8/codeq8-action.git",
+      blockedBranches: [],
+    });
+
+    const pushUrl = execFileSync(
+      "git",
+      ["config", "--local", "--get", "remote.origin.pushurl"],
+      {
+        cwd: workspacePath,
+        env: process.env,
+        encoding: "utf8",
+      },
+    );
+    assert.equal(
+      String(pushUrl || "").trim(),
+      "https://github.com/Codeq8/codeq8-action.git",
+    );
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
