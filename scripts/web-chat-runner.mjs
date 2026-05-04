@@ -2087,6 +2087,30 @@ function buildGithubCloneUrl(repository, token) {
   return `https://x-access-token:${encodedToken}@github.com/${normalizedRepository}.git`;
 }
 
+function assertTokenlessWorkspacePushRemoteUrl(remoteUrl) {
+  const normalizedRemoteUrl = normalizeText(remoteUrl);
+  if (!normalizedRemoteUrl) {
+    return;
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(normalizedRemoteUrl);
+  } catch {
+    return;
+  }
+
+  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+    return;
+  }
+
+  if (parsedUrl.username || parsedUrl.password) {
+    throw new Error(
+      "Workspace push remote URLs must not embed credentials; use the workspace credential helper instead.",
+    );
+  }
+}
+
 async function resolveOriginDefaultBranch({ workspacePath, commandEnv }) {
   const symbolicRef = await runProcessCapture(
     "git",
@@ -2434,6 +2458,7 @@ async function configureWorkspacePushPolicy({
   blockedBranches = [],
 }) {
   const normalizedRemoteUrl = normalizeText(remoteUrl);
+  assertTokenlessWorkspacePushRemoteUrl(normalizedRemoteUrl);
   const configured = normalizedRemoteUrl
     ? await runProcessCapture(
         "git",
@@ -5698,7 +5723,7 @@ async function prepareWorkspace({
     );
   }
 
-  const writableRemoteUrl = buildGithubCloneUrl(cloneRepository, preferredGitToken);
+  const writableRemoteUrl = buildGithubCloneUrl(cloneRepository, "");
   await configureWorkspacePushPolicy({
     workspacePath: preparedWorkspacePath,
     commandEnv,
