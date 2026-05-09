@@ -28,12 +28,24 @@ import {
   readFirebaseStorageAttachment,
   readWebChatAttachment,
   runCodex,
+  CODEX_RUN_TIMEOUT_SECONDS,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
+const SECONDS_PER_HOUR = 60 * 60;
+
+test("web chat runner uses a checked-in 72 hour timeout default", async () => {
+  const runnerSource = await fs.readFile(
+    new URL("./web-chat-runner.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.equal(CODEX_RUN_TIMEOUT_SECONDS, 72 * SECONDS_PER_HOUR - 30 * 60);
+  assert.doesNotMatch(runnerSource, /CODEX_TIMEOUT_SECONDS/);
+});
 
 test("normalizeAttachmentRecord preserves Firebase Storage metadata for direct reads", () => {
   assert.deepEqual(

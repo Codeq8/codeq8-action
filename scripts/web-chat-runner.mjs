@@ -42,7 +42,7 @@ import {
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
 const DEFAULT_CODEX_MODEL = "gpt-5.5";
 const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
-const DEFAULT_TIMEOUT_SECONDS = 6 * 60 * 60;
+const CODEX_RUN_TIMEOUT_SECONDS = 71 * 60 * 60 + 30 * 60;
 const DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT = "1";
 const DEFAULT_GIT_HTTP_LOW_SPEED_TIME = "45";
 const MAX_MESSAGE_CHARS = 2000;
@@ -5793,10 +5793,7 @@ async function main() {
     process.env.CODE_CHAT_PULL_REQUEST_HEAD_REPOSITORY,
   );
   const codexModel = normalizeText(process.env.CODEX_MODEL) || DEFAULT_CODEX_MODEL;
-  const timeoutSeconds = parsePositiveInteger(
-    process.env.CODEX_TIMEOUT_SECONDS,
-    DEFAULT_TIMEOUT_SECONDS,
-  );
+  const timeoutSeconds = CODEX_RUN_TIMEOUT_SECONDS;
 
   if (!workerUrl) {
     throw new Error("CODE_WORKER_URL is required.");
@@ -6839,6 +6836,7 @@ export {
   requireWebChatGitHubWriteToken,
   requireWebChatGitHubUserToken,
   runCodex,
+  CODEX_RUN_TIMEOUT_SECONDS,
   assertWebChatRunnerRuntimeCompatibility,
   shouldLookUpPullRequest,
   shouldTreatCodexFailureAsCompleted,
