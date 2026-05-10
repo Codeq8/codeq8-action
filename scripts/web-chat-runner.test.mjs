@@ -14,6 +14,7 @@ import {
   buildUploadedCodexSessionStoredValue,
   configureWorkspaceGitCredentialHelper,
   configureWorkspacePushPolicy,
+  DEFAULT_TIMEOUT_SECONDS,
   findPullRequestForBranch,
   flushServerOwnedCodeq8File,
   hydrateServerOwnedCodeq8File,
@@ -34,6 +35,10 @@ import {
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
+
+test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
+  assert.equal(DEFAULT_TIMEOUT_SECONDS, 72 * 60 * 60);
+});
 
 test("normalizeAttachmentRecord preserves Firebase Storage metadata for direct reads", () => {
   assert.deepEqual(
