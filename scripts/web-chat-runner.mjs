@@ -42,7 +42,7 @@ import {
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
 const DEFAULT_CODEX_MODEL = "gpt-5.5";
 const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
-const DEFAULT_TIMEOUT_SECONDS = 6 * 60 * 60;
+const DEFAULT_TIMEOUT_SECONDS = 72 * 60 * 60;
 const DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT = "1";
 const DEFAULT_GIT_HTTP_LOW_SPEED_TIME = "45";
 const MAX_MESSAGE_CHARS = 2000;
@@ -6823,6 +6823,7 @@ export {
   validateRunnerCodexAuth,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
+  DEFAULT_TIMEOUT_SECONDS,
   requestWorkspaceGitToken,
   requestServerOwnedCodeq8File,
   requestWebChatRunnerRuntimeManifest,
