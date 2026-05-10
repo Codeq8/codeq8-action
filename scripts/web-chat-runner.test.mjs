@@ -24,6 +24,7 @@ import {
   normalizeAttachmentRecord,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
+  prepareGitHubCliAuth,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
   readFirebaseStorageAttachment,
@@ -903,6 +904,63 @@ test("findPullRequestForBranch only reads existing pull requests", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("prepareGitHubCliAuth rejects gh pr body arguments with escaped Markdown newlines", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-gh-wrapper-"));
+  const fakeBinPath = path.join(tempDir, "fake-bin");
+  const runtimeHomePath = path.join(tempDir, "runtime");
+  const ghCallLogPath = path.join(tempDir, "gh-call-log.txt");
+  await fs.mkdir(fakeBinPath, { recursive: true });
+  const fakeGhPath = path.join(fakeBinPath, "gh");
+  await fs.writeFile(
+    fakeGhPath,
+    [
+      "#!/bin/sh",
+      `printf '%s\\n' "$*" >> ${JSON.stringify(ghCallLogPath)}`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await fs.chmod(fakeGhPath, 0o755);
+
+  const commandEnv = {
+    ...process.env,
+    PATH: `${fakeBinPath}${path.delimiter}${process.env.PATH || ""}`,
+    CODEX_GITHUB_WRITE_TOKEN: "token",
+  };
+  const prepared = await prepareGitHubCliAuth({
+    commandEnv,
+    runtimeHomePath,
+  });
+  assert.equal(prepared.available, true);
+
+  assert.throws(
+    () =>
+      execFileSync(
+        "gh",
+        ["pr", "create", "--body", "## Summary\\n- broken"],
+        {
+          env: commandEnv,
+          encoding: "utf8",
+          stdio: "pipe",
+        },
+      ),
+    /literal escaped Markdown newlines/,
+  );
+  await assert.rejects(() => fs.readFile(ghCallLogPath, "utf8"), /ENOENT/);
+
+  execFileSync(
+    "gh",
+    ["pr", "create", "--body-file", "body.md"],
+    {
+      env: commandEnv,
+      encoding: "utf8",
+      stdio: "pipe",
+    },
+  );
+  const ghCallLog = await fs.readFile(ghCallLogPath, "utf8");
+  assert.match(ghCallLog, /pr create --body-file body\.md/);
 });
 
 test("persistWorkspaceProgress explicitly pushes remembered branches that are ahead of origin", async () => {
