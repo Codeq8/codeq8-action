@@ -5401,6 +5401,46 @@ function describeWorkspacePersistence({
   return parts.join(" ");
 }
 
+function buildRunnerCreatedPullRequestTitle({
+  threadTitle = "",
+  branch = "",
+} = {}) {
+  const title = normalizeText(threadTitle).replace(/\s+/g, " ");
+  if (title) {
+    return truncate(title, 240);
+  }
+  const normalizedBranch = normalizeBranchName(branch);
+  return normalizedBranch
+    ? truncate(`Codeq8 changes for ${normalizedBranch}`, 240)
+    : "Codeq8 changes";
+}
+
+function buildRunnerCreatedPullRequestBody({
+  assistantMessage = "",
+  threadId = "",
+  runId = "",
+} = {}) {
+  const summary =
+    truncate(normalizeText(assistantMessage), 8000) ||
+    "Codeq8 completed repository changes for this thread.";
+  const sourceLines = [
+    normalizeText(threadId) ? `- Thread: ${normalizeText(threadId)}` : "",
+    normalizeText(runId) ? `- Run: ${normalizeText(runId)}` : "",
+  ].filter(Boolean);
+
+  return [
+    "## Summary",
+    summary,
+    "",
+    "## Source",
+    ...(
+      sourceLines.length > 0
+        ? sourceLines
+        : ["- Created by the Codeq8 runner after the work branch was pushed."]
+    ),
+  ].join("\n");
+}
+
 async function branchHasCommitsAgainstBase({
   workspacePath,
   commandEnv,
@@ -5445,6 +5485,10 @@ async function persistWorkspaceProgress({
   gitToken = "",
   protectedBranches = [],
   baselineState = null,
+  threadTitle = "",
+  threadId = "",
+  runId = "",
+  assistantMessage = "",
 }) {
   const normalizedBranch = normalizeBranchName(branch);
   const result = {
@@ -5563,6 +5607,31 @@ async function persistWorkspaceProgress({
         result.pullRequestNumber = pullRequest.pullRequest.number || 0;
         result.pullRequestUrl = pullRequest.pullRequest.url || "";
         result.pullRequestTitle = pullRequest.pullRequest.title || "";
+      } else if (normalizeText(writeMode) === "branch_and_pr") {
+        const createdPullRequest = await createPullRequestForBranch({
+          repository,
+          headRepository: headRepository || repository,
+          headBranch: normalizedBranch,
+          baseBranch,
+          token: gitToken,
+          title: buildRunnerCreatedPullRequestTitle({
+            threadTitle,
+            branch: normalizedBranch,
+          }),
+          body: buildRunnerCreatedPullRequestBody({
+            assistantMessage,
+            threadId,
+            runId,
+          }),
+        });
+        if (!createdPullRequest.ok) {
+          result.error =
+            createdPullRequest.error || "Unable to create pull request for pushed branch.";
+          return result;
+        }
+        result.pullRequestNumber = createdPullRequest.pullRequest?.number || 0;
+        result.pullRequestUrl = createdPullRequest.pullRequest?.url || "";
+        result.pullRequestTitle = createdPullRequest.pullRequest?.title || "";
       }
     }
   } catch (error) {
@@ -5654,6 +5723,60 @@ async function findPullRequestForBranch({
   return {
     ok: true,
     pullRequest: null,
+    existing: false,
+  };
+}
+
+async function createPullRequestForBranch({
+  repository,
+  headRepository,
+  headBranch,
+  baseBranch,
+  token,
+  title,
+  body,
+}) {
+  const normalizedRepository = normalizeText(repository);
+  const normalizedHeadRepository = normalizeText(headRepository || repository);
+  const normalizedHeadBranch = normalizeBranchName(headBranch);
+  const normalizedBaseBranch = normalizeBranchName(baseBranch);
+  const normalizedToken = normalizeText(token);
+  if (!normalizedRepository || !normalizedHeadBranch || !normalizedBaseBranch || !normalizedToken) {
+    return { ok: false, error: "repository, head_branch, base_branch, and token are required." };
+  }
+
+  const [headOwner] = normalizedHeadRepository.split("/", 1);
+  const head = `${normalizeText(headOwner)}:${normalizedHeadBranch}`;
+  const created = await githubApiJson({
+    url: `https://api.github.com/repos/${encodeRepositoryPath(normalizedRepository)}/pulls`,
+    token: normalizedToken,
+    method: "POST",
+    body: {
+      title: normalizeText(title) || `Codeq8 changes for ${normalizedHeadBranch}`,
+      head,
+      base: normalizedBaseBranch,
+      body: String(body || ""),
+      maintainer_can_modify: true,
+    },
+  });
+  if (!created.ok) {
+    return {
+      ok: false,
+      error:
+        normalizeText(created.payload?.message || created.payload?.error) ||
+        `Unable to create pull request (${created.status}).`,
+    };
+  }
+
+  const payload = normalizeObject(created.payload);
+  const pullRequestNumber = parsePositiveInteger(payload.number, 0);
+  return {
+    ok: true,
+    pullRequest: {
+      number: pullRequestNumber,
+      title: normalizeText(payload.title),
+      url: normalizeText(payload.html_url || payload.url),
+    },
     existing: false,
   };
 }
