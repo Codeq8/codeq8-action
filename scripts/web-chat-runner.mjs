@@ -5087,6 +5087,8 @@ async function runCodex({
     let stderr = "";
     let timedOut = false;
     const args = [
+      "--ask-for-approval",
+      "never",
       "exec",
       "--model",
       normalizedModel,
@@ -5100,8 +5102,6 @@ async function runCodex({
       resolvedOutputFilePath,
       "--sandbox",
       "workspace-write",
-      "--ask-for-approval",
-      "never",
     ];
     if (normalizedMode === "resume") {
       args.push("resume", normalizedSessionId, normalizedTask);

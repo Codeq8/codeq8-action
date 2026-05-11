@@ -124,15 +124,19 @@ test("runCodex keeps Codex inside the workspace sandbox without approval prompts
 
   assert.equal(result.ok, true);
   const args = JSON.parse(await fs.readFile(argsOutputPath, "utf8"));
+  const execIndex = args.indexOf("exec");
   const sandboxIndex = args.indexOf("--sandbox");
   const approvalIndex = args.indexOf("--ask-for-approval");
 
+  assert.notEqual(execIndex, -1);
   assert.notEqual(sandboxIndex, -1);
+  assert(sandboxIndex > execIndex);
   assert.deepEqual(args.slice(sandboxIndex, sandboxIndex + 2), [
     "--sandbox",
     "workspace-write",
   ]);
   assert.notEqual(approvalIndex, -1);
+  assert(approvalIndex < execIndex);
   assert.deepEqual(args.slice(approvalIndex, approvalIndex + 2), [
     "--ask-for-approval",
     "never",
