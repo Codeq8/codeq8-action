@@ -94,6 +94,53 @@ test("runCodex applies dedicated Node options only to the Codex process env", as
   assert.equal(commandEnv.NODE_OPTIONS, "");
 });
 
+test("runCodex keeps Codex inside the workspace sandbox without approval prompts", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-sandbox-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const argsOutputPath = path.join(workspacePath, "codex-args.json");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      `await import("node:fs/promises").then((fs) => fs.writeFile(${JSON.stringify(argsOutputPath)}, JSON.stringify(process.argv.slice(2)), "utf8"));`,
+      "process.exit(0);",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "stay sandboxed",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+  });
+
+  assert.equal(result.ok, true);
+  const args = JSON.parse(await fs.readFile(argsOutputPath, "utf8"));
+  const sandboxIndex = args.indexOf("--sandbox");
+  const approvalIndex = args.indexOf("--ask-for-approval");
+
+  assert.notEqual(sandboxIndex, -1);
+  assert.deepEqual(args.slice(sandboxIndex, sandboxIndex + 2), [
+    "--sandbox",
+    "workspace-write",
+  ]);
+  assert.notEqual(approvalIndex, -1);
+  assert.deepEqual(args.slice(approvalIndex, approvalIndex + 2), [
+    "--ask-for-approval",
+    "never",
+  ]);
+  assert.equal(args.includes("--yolo"), false);
+  assert.equal(args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
+});
+
 test("normalizeAttachmentRecord preserves Firebase Storage metadata for direct reads", () => {
   assert.deepEqual(
     normalizeAttachmentRecord({
