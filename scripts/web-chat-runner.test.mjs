@@ -94,7 +94,7 @@ test("runCodex applies dedicated Node options only to the Codex process env", as
   assert.equal(commandEnv.NODE_OPTIONS, "");
 });
 
-test("runCodex keeps Codex inside the workspace sandbox without approval prompts", async (t) => {
+test("runCodex allows Git metadata writes without approval prompts", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-sandbox-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   const argsOutputPath = path.join(workspacePath, "codex-args.json");
@@ -133,7 +133,7 @@ test("runCodex keeps Codex inside the workspace sandbox without approval prompts
   assert(sandboxIndex > execIndex);
   assert.deepEqual(args.slice(sandboxIndex, sandboxIndex + 2), [
     "--sandbox",
-    "workspace-write",
+    "danger-full-access",
   ]);
   assert.notEqual(approvalIndex, -1);
   assert(approvalIndex < execIndex);

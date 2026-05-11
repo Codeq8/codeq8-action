@@ -5101,7 +5101,7 @@ async function runCodex({
       "--output-last-message",
       resolvedOutputFilePath,
       "--sandbox",
-      "workspace-write",
+      "danger-full-access",
     ];
     if (normalizedMode === "resume") {
       args.push("resume", normalizedSessionId, normalizedTask);
