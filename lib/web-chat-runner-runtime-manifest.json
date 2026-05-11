@@ -11,6 +11,7 @@
     "/api/chat/runs/runtime-manifest",
     "/api/chat/runs/prompt",
     "/web-chat/attachments/get",
+    "/web-chat/attachments/read-url",
     "/web-chat/codex-session/get",
     "/web-chat/codex-session/upload-prepare",
     "/web-chat/codex-session/upload-direct",

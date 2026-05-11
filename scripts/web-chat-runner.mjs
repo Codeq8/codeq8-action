@@ -3137,6 +3137,66 @@ async function readWebChatAttachment({
   );
 }
 
+async function readWebChatAttachmentReadUrl({
+  workerUrl,
+  adminToken,
+  threadId,
+  attachmentId,
+  expiresSeconds = 15 * 60,
+  retries = 3,
+  retryDelayMs = 750,
+}) {
+  const attempts = Math.max(1, parsePositiveInteger(retries, 3) || 3);
+  let lastResponse = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const response = await workerJsonRequest({
+      workerUrl,
+      adminToken,
+      path: "/web-chat/attachments/read-url",
+      method: "GET",
+      query: new URLSearchParams({
+        thread_id: normalizeText(threadId),
+        attachment_id: normalizeText(attachmentId),
+        expires_seconds: String(parsePositiveInteger(expiresSeconds, 15 * 60) || 15 * 60),
+      }),
+    });
+    lastResponse = response;
+    if (response.ok && response.payload.ok !== false) {
+      const downloadUrl = normalizeText(
+        response.payload.download_url || response.payload.downloadUrl,
+      );
+      if (!downloadUrl) {
+        throw new Error("Web chat attachment read URL response was missing a download URL.");
+      }
+      return {
+        attachment: normalizeAttachmentRecord(response.payload.attachment),
+        downloadUrl,
+        expiresAt: parsePositiveInteger(
+          response.payload.expires_at || response.payload.expiresAt,
+          0,
+        ),
+      };
+    }
+    if (
+      !RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES.has(response.status) ||
+      attempt >= attempts
+    ) {
+      break;
+    }
+    log(
+      "Web chat attachment read URL request failed; retrying",
+      `thread_id=${normalizeText(threadId)} attachment_id=${normalizeText(attachmentId)} status=${response.status} attempt=${attempt}/${attempts} worker=${normalizeBaseUrl(workerUrl)}`,
+    );
+    await sleep(retryDelayMs);
+  }
+
+  const response = lastResponse || { status: 0, payload: {} };
+  throw new Error(
+    extractErrorMessage(response.payload.error) ||
+      `Failed to create web chat attachment read URL (${response.status}).`,
+  );
+}
+
 function parseFirebaseServiceAccountJson(value) {
   const raw = normalizeText(value);
   if (!raw) {
@@ -3308,7 +3368,7 @@ async function readFirebaseStorageAttachment({
   }
   const serviceAccount = parseFirebaseServiceAccountJson(firebaseJsonKey);
   if (!serviceAccount) {
-    throw new Error("FIREBASE_JSON_KEY is required to read Firebase Storage attachments.");
+    throw new Error("CODEQ8_FIREBASE_JSON_KEY is required to read Firebase Storage attachments directly.");
   }
   const accessToken = await requestFirebaseStorageAccessToken({
     serviceAccount,
@@ -3363,6 +3423,67 @@ async function readFirebaseStorageAttachment({
   throw new Error(
     normalizeText(lastErrorText) ||
       `Failed to read Firebase Storage attachment (${lastStatus || 0}).`,
+  );
+}
+
+async function readFirebaseStorageSignedAttachment({
+  attachment,
+  downloadUrl,
+  fetchImpl = fetch,
+  retries = 3,
+  retryDelayMs = 750,
+}) {
+  const normalizedAttachment = normalizeAttachmentRecord(attachment);
+  const normalizedDownloadUrl = normalizeText(downloadUrl);
+  if (!normalizedAttachment?.attachment_id || !normalizedDownloadUrl) {
+    throw new Error("Firebase Storage signed attachment metadata is incomplete.");
+  }
+
+  const attempts = Math.max(1, parsePositiveInteger(retries, 3) || 3);
+  let lastStatus = 0;
+  let lastErrorText = "";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let response = null;
+    try {
+      response = await fetchImpl(normalizedDownloadUrl, {
+        cache: "no-store",
+      });
+    } catch (error) {
+      lastErrorText = extractErrorMessage(error, "Firebase Storage signed URL request failed.");
+    }
+
+    if (response?.ok) {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      return {
+        attachment: normalizedAttachment,
+        fileContentsBase64Url: bytes.toString("base64url"),
+      };
+    }
+
+    if (response) {
+      lastStatus = response.status;
+      try {
+        lastErrorText = normalizeText(await response.text());
+      } catch {
+        lastErrorText = "";
+      }
+    }
+    const retryable =
+      (!response || RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES.has(response.status)) &&
+      attempt < attempts;
+    if (!retryable) {
+      break;
+    }
+    log(
+      "Firebase Storage signed attachment read failed; retrying",
+      `attachment_id=${normalizedAttachment.attachment_id} status=${lastStatus || "fetch_failed"} attempt=${attempt}/${attempts}`,
+    );
+    await sleep(retryDelayMs);
+  }
+
+  throw new Error(
+    normalizeText(lastErrorText) ||
+      `Failed to read Firebase Storage signed attachment (${lastStatus || 0}).`,
   );
 }
 
@@ -4016,7 +4137,9 @@ async function materializeWebChatAttachments({
   threadId,
   commandEnv = process.env,
   readFirebaseStorageAttachmentImpl = readFirebaseStorageAttachment,
+  readFirebaseStorageSignedAttachmentImpl = readFirebaseStorageSignedAttachment,
   readWebChatAttachmentImpl = readWebChatAttachment,
+  readWebChatAttachmentReadUrlImpl = readWebChatAttachmentReadUrl,
 }) {
   const normalizedAttachments = parseAttachmentList(attachments);
   if (normalizedAttachments.length === 0) {
@@ -4025,10 +4148,32 @@ async function materializeWebChatAttachments({
 
   await ensureDirectory(attachmentRootPath);
   const materialized = [];
-  const firebaseJsonKey = normalizeText(commandEnv.FIREBASE_JSON_KEY);
+  const firebaseJsonKey = normalizeText(
+    commandEnv.CODEQ8_FIREBASE_JSON_KEY || commandEnv.CODEQ8_FIREBASE_STORAGE_JSON_KEY,
+  );
   for (const attachment of normalizedAttachments) {
     let loaded = null;
-    if (firebaseJsonKey && resolveFirebaseStorageAttachmentPointer(attachment)) {
+    const firebasePointer = resolveFirebaseStorageAttachmentPointer(attachment);
+    if (firebasePointer) {
+      try {
+        const signedRead = await readWebChatAttachmentReadUrlImpl({
+          workerUrl,
+          adminToken,
+          threadId,
+          attachmentId: attachment.attachment_id,
+        });
+        loaded = await readFirebaseStorageSignedAttachmentImpl({
+          attachment: signedRead.attachment?.attachment_id ? signedRead.attachment : attachment,
+          downloadUrl: signedRead.downloadUrl,
+        });
+      } catch (error) {
+        log(
+          "Firebase Storage attachment signed URL read failed; falling back",
+          `thread_id=${normalizeText(threadId)} attachment_id=${attachment.attachment_id} error=${extractErrorMessage(error)}`,
+        );
+      }
+    }
+    if (!loaded && firebaseJsonKey && firebasePointer) {
       try {
         loaded = await readFirebaseStorageAttachmentImpl({
           attachment,
@@ -4036,7 +4181,7 @@ async function materializeWebChatAttachments({
         });
       } catch (error) {
         log(
-          "Firebase Storage attachment direct read failed; falling back to worker",
+          "Firebase Storage attachment direct Codeq8 read failed; falling back to worker",
           `thread_id=${normalizeText(threadId)} attachment_id=${attachment.attachment_id} error=${extractErrorMessage(error)}`,
         );
       }
@@ -6821,7 +6966,9 @@ export {
   materializeWebChatAttachments,
   normalizeAttachmentRecord,
   readFirebaseStorageAttachment,
+  readFirebaseStorageSignedAttachment,
   readWebChatAttachment,
+  readWebChatAttachmentReadUrl,
   validateRunnerCodexAuth,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,

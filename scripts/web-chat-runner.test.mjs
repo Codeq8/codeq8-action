@@ -29,7 +29,9 @@ import {
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
   readFirebaseStorageAttachment,
+  readFirebaseStorageSignedAttachment,
   readWebChatAttachment,
+  readWebChatAttachmentReadUrl,
   runCodex,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
@@ -240,7 +242,162 @@ test("readFirebaseStorageAttachment exchanges the service account key and downlo
   );
 });
 
-test("materializeWebChatAttachments reads Firebase Storage attachments directly when credentials are available", async () => {
+test("readFirebaseStorageSignedAttachment downloads an object-scoped signed URL", async () => {
+  const calls = [];
+
+  const loaded = await readFirebaseStorageSignedAttachment({
+    attachment: {
+      attachment_id: "wca_screenshot",
+      name: "Screenshot.png",
+      content_type: "image/png",
+      size_bytes: 12,
+      storage_backend: "firebase_storage",
+      storage_bucket: "codeq8.appspot.com",
+      storage_key:
+        "chat_attachments/github:abdul/wct_123/wcm_123/wca_screenshot/Screenshot.png",
+    },
+    downloadUrl: "https://storage.googleapis.com/codeq8.appspot.com/signed.png?X-Goog-Signature=test",
+    retries: 1,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return new Response(Buffer.from("signed-image-bytes", "utf8"), { status: 200 });
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0]?.url,
+    "https://storage.googleapis.com/codeq8.appspot.com/signed.png?X-Goog-Signature=test",
+  );
+  assert.equal(calls[0]?.init?.headers, undefined);
+  assert.equal(
+    Buffer.from(loaded.fileContentsBase64Url, "base64url").toString("utf8"),
+    "signed-image-bytes",
+  );
+});
+
+test("readWebChatAttachmentReadUrl requests a signed Firebase attachment URL", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      method: init?.method || "GET",
+      headers: new Headers(init?.headers || {}),
+    });
+    return Response.json({
+      ok: true,
+      attachment: {
+        attachment_id: "wca_123",
+        name: "screenshot.png",
+        content_type: "image/png",
+        size_bytes: 5,
+        storage_backend: "firebase_storage",
+        storage_bucket: "codeq8.appspot.com",
+        storage_key: "chat_attachments/wca_123/screenshot.png",
+      },
+      download_url: "https://storage.googleapis.com/codeq8.appspot.com/signed.png",
+      expires_at: 1778530000000,
+    });
+  };
+
+  try {
+    const loaded = await readWebChatAttachmentReadUrl({
+      workerUrl: "https://worker.example",
+      adminToken: "header.payload.signature",
+      threadId: "wct_123",
+      attachmentId: "wca_123",
+      expiresSeconds: 120,
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0]?.url,
+      "https://worker.example/web-chat/attachments/read-url?thread_id=wct_123&attachment_id=wca_123&expires_seconds=120",
+    );
+    assert.equal(calls[0]?.headers.get("authorization"), "Bearer header.payload.signature");
+    assert.equal(loaded.attachment.attachment_id, "wca_123");
+    assert.equal(loaded.downloadUrl, "https://storage.googleapis.com/codeq8.appspot.com/signed.png");
+    assert.equal(loaded.expiresAt, 1778530000000);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("materializeWebChatAttachments reads Firebase Storage attachments through signed worker URLs", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-attachment-test-"));
+  const calls = {
+    signedUrlReads: [],
+    signedDownloads: [],
+    firebaseDirectReads: 0,
+    workerReads: 0,
+  };
+
+  try {
+    const materialized = await materializeWebChatAttachments({
+      attachments: [
+        {
+          attachment_id: "wca_screenshot",
+          name: "Screenshot.png",
+          content_type: "image/png",
+          size_bytes: 12,
+          storage_backend: "firebase_storage",
+          storage_bucket: "codeq8.appspot.com",
+          storage_key:
+            "chat_attachments/github:abdul/wct_123/wcm_123/wca_screenshot/Screenshot.png",
+        },
+      ],
+      attachmentRootPath: tempRoot,
+      workerUrl: "https://worker.example",
+      adminToken: "runner_token",
+      threadId: "wct_123",
+      commandEnv: {
+        FIREBASE_JSON_KEY: '{"client_email":"customer@example.com","private_key":"unused"}',
+      },
+      readWebChatAttachmentReadUrlImpl: async (request) => {
+        calls.signedUrlReads.push(request);
+        return {
+          attachment: {
+            ...request,
+            attachment_id: "wca_screenshot",
+            name: "Screenshot.png",
+            content_type: "image/png",
+            size_bytes: 12,
+          },
+          downloadUrl: "https://storage.googleapis.com/codeq8.appspot.com/signed.png",
+        };
+      },
+      readFirebaseStorageSignedAttachmentImpl: async ({ attachment, downloadUrl }) => {
+        calls.signedDownloads.push({ attachment, downloadUrl });
+        return {
+          attachment,
+          fileContentsBase64Url: Buffer.from("signed-image-bytes", "utf8").toString(
+            "base64url",
+          ),
+        };
+      },
+      readFirebaseStorageAttachmentImpl: async () => {
+        calls.firebaseDirectReads += 1;
+        throw new Error("Codeq8 direct Firebase credential fallback should not run");
+      },
+      readWebChatAttachmentImpl: async () => {
+        calls.workerReads += 1;
+        throw new Error("worker byte fallback should not run");
+      },
+    });
+
+    assert.equal(calls.signedUrlReads.length, 1);
+    assert.equal(calls.signedDownloads.length, 1);
+    assert.equal(calls.firebaseDirectReads, 0);
+    assert.equal(calls.workerReads, 0);
+    assert.equal(materialized.length, 1);
+    assert.equal(await fs.readFile(materialized[0].local_path, "utf8"), "signed-image-bytes");
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("materializeWebChatAttachments falls back to direct Codeq8 credentials when signed URLs are unavailable", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-attachment-test-"));
   const calls = {
     firebaseReads: [],
@@ -266,7 +423,10 @@ test("materializeWebChatAttachments reads Firebase Storage attachments directly 
       adminToken: "runner_token",
       threadId: "wct_123",
       commandEnv: {
-        FIREBASE_JSON_KEY: '{"client_email":"runner@example.com","private_key":"unused"}',
+        CODEQ8_FIREBASE_JSON_KEY: '{"client_email":"runner@example.com","private_key":"unused"}',
+      },
+      readWebChatAttachmentReadUrlImpl: async () => {
+        throw new Error("signed URL route unavailable");
       },
       readFirebaseStorageAttachmentImpl: async ({ attachment, firebaseJsonKey }) => {
         calls.firebaseReads.push({ attachment, firebaseJsonKey });
@@ -292,6 +452,65 @@ test("materializeWebChatAttachments reads Firebase Storage attachments directly 
       "wca_screenshot-Screenshot.png",
     );
     assert.equal(await fs.readFile(materialized[0].local_path, "utf8"), "image-bytes");
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("materializeWebChatAttachments ignores customer FIREBASE_JSON_KEY for Codeq8 attachment direct reads", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-attachment-test-"));
+  const calls = {
+    firebaseDirectReads: 0,
+    workerReads: 0,
+  };
+
+  try {
+    const materialized = await materializeWebChatAttachments({
+      attachments: [
+        {
+          attachment_id: "wca_screenshot",
+          name: "Screenshot.png",
+          content_type: "image/png",
+          size_bytes: 12,
+          storage_backend: "firebase_storage",
+          storage_bucket: "codeq8.appspot.com",
+          storage_key:
+            "chat_attachments/github:abdul/wct_123/wcm_123/wca_screenshot/Screenshot.png",
+        },
+      ],
+      attachmentRootPath: tempRoot,
+      workerUrl: "https://worker.example",
+      adminToken: "runner_token",
+      threadId: "wct_123",
+      commandEnv: {
+        FIREBASE_JSON_KEY: '{"client_email":"customer@example.com","private_key":"unused"}',
+      },
+      readWebChatAttachmentReadUrlImpl: async () => {
+        throw new Error("signed URL route unavailable");
+      },
+      readFirebaseStorageAttachmentImpl: async () => {
+        calls.firebaseDirectReads += 1;
+        throw new Error("customer Firebase credential must not be used for Codeq8 storage");
+      },
+      readWebChatAttachmentImpl: async ({ attachmentId }) => {
+        calls.workerReads += 1;
+        return {
+          attachment: {
+            attachment_id: attachmentId,
+            name: "Screenshot.png",
+            content_type: "image/png",
+            size_bytes: 12,
+          },
+          fileContentsBase64Url: Buffer.from("worker-image-bytes", "utf8").toString(
+            "base64url",
+          ),
+        };
+      },
+    });
+
+    assert.equal(calls.firebaseDirectReads, 0);
+    assert.equal(calls.workerReads, 1);
+    assert.equal(await fs.readFile(materialized[0].local_path, "utf8"), "worker-image-bytes");
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
@@ -331,6 +550,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/web-chat/threads/get",
       ],
       scoped_authorized_paths: [
+        "/web-chat/attachments/read-url",
         "/web-chat/codex-session/upload-direct",
       ],
     });
@@ -393,7 +613,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
           threadId: "wct_123",
           runId: "wcr_123",
         }),
-      /missing authorized paths: \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload-direct, \/web-chat\/codex-session\/upload-discard/,
+      /missing authorized paths: \/web-chat\/attachments\/read-url, \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload-direct, \/web-chat\/codex-session\/upload-discard/,
     );
   } finally {
     globalThis.fetch = originalFetch;
