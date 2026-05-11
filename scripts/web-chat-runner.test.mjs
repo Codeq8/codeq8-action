@@ -906,8 +906,8 @@ test("findPullRequestForBranch only reads existing pull requests", async () => {
   }
 });
 
-test("prepareGitHubCliAuth rejects gh pr body arguments with escaped Markdown newlines", async () => {
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-gh-wrapper-"));
+test("prepareGitHubCliAuth configures gh through environment without wrapping the binary", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-gh-env-"));
   const fakeBinPath = path.join(tempDir, "fake-bin");
   const runtimeHomePath = path.join(tempDir, "runtime");
   const ghCallLogPath = path.join(tempDir, "gh-call-log.txt");
@@ -917,42 +917,36 @@ test("prepareGitHubCliAuth rejects gh pr body arguments with escaped Markdown ne
     fakeGhPath,
     [
       "#!/bin/sh",
-      `printf '%s\\n' "$*" >> ${JSON.stringify(ghCallLogPath)}`,
+      `log_path=${JSON.stringify(ghCallLogPath)}`,
+      "printf 'GH_TOKEN=%s\\nGITHUB_TOKEN=%s\\nGH_CONFIG_DIR=%s\\nGH_PROMPT_DISABLED=%s\\nARGS=%s\\n' \"$GH_TOKEN\" \"$GITHUB_TOKEN\" \"$GH_CONFIG_DIR\" \"$GH_PROMPT_DISABLED\" \"$*\" >> \"$log_path\"",
       "",
     ].join("\n"),
     { mode: 0o755 },
   );
   await fs.chmod(fakeGhPath, 0o755);
 
+  const originalPath = `${fakeBinPath}${path.delimiter}${process.env.PATH || ""}`;
   const commandEnv = {
     ...process.env,
-    PATH: `${fakeBinPath}${path.delimiter}${process.env.PATH || ""}`,
+    PATH: originalPath,
     CODEX_GITHUB_WRITE_TOKEN: "token",
+    CODEX_GITHUB_TOKEN_HELPER_PATH: "",
   };
   const prepared = await prepareGitHubCliAuth({
     commandEnv,
     runtimeHomePath,
   });
   assert.equal(prepared.available, true);
-
-  assert.throws(
-    () =>
-      execFileSync(
-        "gh",
-        ["pr", "create", "--body", "## Summary\\n- broken"],
-        {
-          env: commandEnv,
-          encoding: "utf8",
-          stdio: "pipe",
-        },
-      ),
-    /literal escaped Markdown newlines/,
-  );
-  await assert.rejects(() => fs.readFile(ghCallLogPath, "utf8"), /ENOENT/);
+  assert.equal(prepared.binPath, fakeGhPath);
+  assert.equal(commandEnv.PATH, originalPath);
+  assert.equal(commandEnv.GH_TOKEN, "token");
+  assert.equal(commandEnv.GITHUB_TOKEN, "token");
+  assert.equal(commandEnv.GH_PROMPT_DISABLED, "1");
+  assert.equal(commandEnv.GH_CONFIG_DIR, path.join(runtimeHomePath, "gh-config"));
 
   execFileSync(
     "gh",
-    ["pr", "create", "--body-file", "body.md"],
+    ["pr", "create", "--body", "## Summary\\n- raw gh input"],
     {
       env: commandEnv,
       encoding: "utf8",
@@ -960,7 +954,11 @@ test("prepareGitHubCliAuth rejects gh pr body arguments with escaped Markdown ne
     },
   );
   const ghCallLog = await fs.readFile(ghCallLogPath, "utf8");
-  assert.match(ghCallLog, /pr create --body-file body\.md/);
+  assert.match(ghCallLog, /GH_TOKEN=token/);
+  assert.match(ghCallLog, /GITHUB_TOKEN=token/);
+  assert.match(ghCallLog, /GH_CONFIG_DIR=.*gh-config/);
+  assert.match(ghCallLog, /GH_PROMPT_DISABLED=1/);
+  assert.match(ghCallLog, /ARGS=pr create --body ## Summary\\n- raw gh input/);
 });
 
 test("persistWorkspaceProgress explicitly pushes remembered branches that are ahead of origin", async () => {

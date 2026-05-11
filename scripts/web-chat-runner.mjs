@@ -4202,7 +4202,7 @@ async function prepareGitHubCliAuth({
   runtimeHomePath,
 }) {
   const helperPath = normalizeText(commandEnv.CODEX_GITHUB_TOKEN_HELPER_PATH);
-  const githubToken = resolveWebChatGitHubWriteToken(commandEnv);
+  let githubToken = resolveWebChatGitHubWriteToken(commandEnv);
   if (!helperPath && !githubToken) {
     return {
       available: false,
@@ -4221,67 +4221,35 @@ async function prepareGitHubCliAuth({
   }
 
   const normalizedRuntimeHomePath = path.resolve(runtimeHomePath);
-  const wrapperBinPath = path.join(normalizedRuntimeHomePath, "bin");
-  const wrapperPath = path.join(wrapperBinPath, "gh");
   const ghConfigDir = path.join(normalizedRuntimeHomePath, "gh-config");
-  await ensureDirectory(wrapperBinPath);
   await ensureDirectory(ghConfigDir);
 
-  const wrapperScript = [
-    "#!/bin/sh",
-    "reject_escaped_pr_body_newlines() {",
-    '  body_arg="$1"',
-    '  case "$body_arg" in',
-    "    *'\\n'*)",
-      '      echo "gh pr body contains literal escaped Markdown newlines; use --body-file with real newlines instead of --body with \\\\n." >&2',
-    "      exit 2",
-    "      ;;",
-    "  esac",
-    "}",
-    'if [ "${1:-}" = "pr" ] && { [ "${2:-}" = "create" ] || [ "${2:-}" = "edit" ]; }; then',
-    '  previous_arg=""',
-    '  for arg in "$@"; do',
-    '    if [ "$previous_arg" = "--body" ]; then',
-    '      reject_escaped_pr_body_newlines "$arg"',
-    "    fi",
-    '    case "$arg" in',
-    "      --body=*)",
-    '        reject_escaped_pr_body_newlines "${arg#--body=}"',
-    "        ;;",
-    "    esac",
-    '    previous_arg="$arg"',
-    "  done",
-    "fi",
-    'github_token=""',
-    'helper_path="${CODEX_GITHUB_TOKEN_HELPER_PATH:-}"',
-    'if [ -n "$helper_path" ] && [ -x "$helper_path" ]; then',
-    '  github_token=$("$helper_path" print-token 2>/dev/null || printf "")',
-    "fi",
-    'if [ -z "$github_token" ]; then',
-    '  github_token="${CODEX_GITHUB_WRITE_TOKEN:-}"',
-    "fi",
-    "if [ -n \"$github_token\" ]; then",
-    `  exec env GH_TOKEN="$github_token" GITHUB_TOKEN="$github_token" GH_CONFIG_DIR=${quoteShellArgument(
-      ghConfigDir,
-    )} GH_PROMPT_DISABLED=1 ${quoteShellArgument(ghPath)} "$@"`,
-    "fi",
-    `exec env GH_CONFIG_DIR=${quoteShellArgument(ghConfigDir)} GH_PROMPT_DISABLED=1 ${quoteShellArgument(
-      ghPath,
-    )} "$@"`,
-    "",
-  ].join("\n");
-  await fs.writeFile(wrapperPath, wrapperScript, { mode: 0o755 });
-  await fs.chmod(wrapperPath, 0o755);
+  if (helperPath && (await isExecutableFile(helperPath))) {
+    const refreshedToken = await runProcessCapture(helperPath, ["print-token"], {
+      cwd: process.cwd(),
+      env: commandEnv,
+    });
+    if (refreshedToken.ok) {
+      githubToken = normalizeText(refreshedToken.stdout) || githubToken;
+    }
+  }
 
-  const currentPath = String(commandEnv.PATH || "");
-  commandEnv.PATH = currentPath
-    ? `${wrapperBinPath}${path.delimiter}${currentPath}`
-    : wrapperBinPath;
+  if (!githubToken) {
+    return {
+      available: false,
+      reason: "No GitHub write credential was available for gh auth.",
+    };
+  }
+
+  commandEnv.GH_TOKEN = githubToken;
+  commandEnv.GITHUB_TOKEN = githubToken;
+  commandEnv.GH_CONFIG_DIR = ghConfigDir;
+  commandEnv.GH_PROMPT_DISABLED = "1";
 
   return {
     available: true,
     binPath: ghPath,
-    wrapperPath,
+    configDir: ghConfigDir,
   };
 }
 
