@@ -56,6 +56,44 @@ test("applyCodexNodeOptions maps dedicated Codex preloads onto the Codex child e
   );
 });
 
+test("runCodex applies dedicated Node options only to the Codex process env", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-node-options-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.sh");
+  const envOutputPath = path.join(workspacePath, "node-options.txt");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/bin/sh",
+      `printf '%s' "$NODE_OPTIONS" > ${JSON.stringify(envOutputPath)}`,
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const commandEnv = {
+    ...process.env,
+    CODEQ8_CODEX_NODE_OPTIONS: "--no-warnings",
+    NODE_OPTIONS: "",
+  };
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "print env",
+    workspacePath,
+    commandEnv,
+    timeoutSeconds: 30,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(await fs.readFile(envOutputPath, "utf8"), "--no-warnings");
+  assert.equal(commandEnv.NODE_OPTIONS, "");
+});
+
 test("normalizeAttachmentRecord preserves Firebase Storage metadata for direct reads", () => {
   assert.deepEqual(
     normalizeAttachmentRecord({

@@ -5111,7 +5111,7 @@ async function runCodex({
       args,
       {
         cwd: workspacePath,
-        env: commandEnv,
+        env: applyCodexNodeOptions({ ...commandEnv }),
         stdio: ["ignore", "pipe", "pipe"],
         detached: process.platform !== "win32",
       },
@@ -5831,7 +5831,6 @@ async function main() {
     GIT_HTTP_LOW_SPEED_LIMIT: DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT,
     GIT_HTTP_LOW_SPEED_TIME: DEFAULT_GIT_HTTP_LOW_SPEED_TIME,
   };
-  applyCodexNodeOptions(commandEnv);
   log(
     "Resolved web chat worker target",
     `thread_id=${threadId} worker=${normalizeBaseUrl(workerUrl)}`,
