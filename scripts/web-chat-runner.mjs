@@ -5098,7 +5098,10 @@ async function runCodex({
       "sqlite",
       "--output-last-message",
       resolvedOutputFilePath,
-      "--yolo",
+      "--sandbox",
+      "workspace-write",
+      "--ask-for-approval",
+      "never",
     ];
     if (normalizedMode === "resume") {
       args.push("resume", normalizedSessionId, normalizedTask);
