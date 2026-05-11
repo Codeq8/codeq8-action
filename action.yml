@@ -11,6 +11,8 @@ runs:
   steps:
     - name: Prepare Codeq8 action runtime
       shell: bash
+      env:
+        NODE_OPTIONS: ""
       run: |
         set -euo pipefail
 
@@ -74,6 +76,7 @@ runs:
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github_token }}
+        NODE_OPTIONS: ""
       run: |
         set -euo pipefail
 

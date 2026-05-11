@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   assertWebChatRunnerRuntimeCompatibility,
+  applyCodexNodeOptions,
   buildFirebaseStorageDownloadUrl,
   buildCodexPrompt,
   buildResumePrompt,
@@ -39,6 +40,20 @@ const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
 
 test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
   assert.equal(DEFAULT_TIMEOUT_SECONDS, 72 * 60 * 60);
+});
+
+test("applyCodexNodeOptions maps dedicated Codex preloads onto the Codex child env", () => {
+  const commandEnv = {
+    CODEQ8_CODEX_NODE_OPTIONS:
+      " --import=/workspace/scripts/register-node-typescript-loader.mjs --import=/workspace/scripts/allow-dirty-branch-worktree-preload.mts ",
+    NODE_OPTIONS: "",
+  };
+
+  assert.equal(applyCodexNodeOptions(commandEnv), commandEnv);
+  assert.equal(
+    commandEnv.NODE_OPTIONS,
+    "--import=/workspace/scripts/register-node-typescript-loader.mjs --import=/workspace/scripts/allow-dirty-branch-worktree-preload.mts",
+  );
 });
 
 test("normalizeAttachmentRecord preserves Firebase Storage metadata for direct reads", () => {

@@ -5229,6 +5229,14 @@ async function runCodex({
   });
 }
 
+export function applyCodexNodeOptions(commandEnv = {}) {
+  const codexNodeOptions = normalizeText(commandEnv.CODEQ8_CODEX_NODE_OPTIONS);
+  if (codexNodeOptions) {
+    commandEnv.NODE_OPTIONS = codexNodeOptions;
+  }
+  return commandEnv;
+}
+
 async function workingTreeHasChanges({ workspacePath, commandEnv }) {
   const status = await runProcessCapture("git", ["status", "--porcelain"], {
     cwd: workspacePath,
@@ -5823,6 +5831,7 @@ async function main() {
     GIT_HTTP_LOW_SPEED_LIMIT: DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT,
     GIT_HTTP_LOW_SPEED_TIME: DEFAULT_GIT_HTTP_LOW_SPEED_TIME,
   };
+  applyCodexNodeOptions(commandEnv);
   log(
     "Resolved web chat worker target",
     `thread_id=${threadId} worker=${normalizeBaseUrl(workerUrl)}`,
