@@ -19,15 +19,3 @@ Example usage:
   with:
     github_token: ${{ github.token }}
 ```
-
-PR wakeup action: reports pull request workflow and review events back to the
-Codeq8 backend. The backend owns all thread selection, prompting, reviewer, and
-merge decisions.
-
-Example usage:
-
-```yml
-- uses: Codeq8/codeq8-action/pr-wakeup@main
-  with:
-    github_token: ${{ github.token }}
-```
