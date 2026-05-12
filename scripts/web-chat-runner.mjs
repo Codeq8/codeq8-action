@@ -2243,8 +2243,9 @@ async function readBranchDivergenceCounts({ workspacePath, commandEnv, branch })
   };
 }
 
-async function readHeadCommitSha({ workspacePath, commandEnv }) {
-  const result = await runProcessCapture("git", ["rev-parse", "HEAD"], {
+async function readGitCommitSha({ workspacePath, commandEnv, ref = "HEAD" }) {
+  const normalizedRef = normalizeText(ref) || "HEAD";
+  const result = await runProcessCapture("git", ["rev-parse", normalizedRef], {
     cwd: workspacePath,
     env: commandEnv,
   });
@@ -2252,6 +2253,10 @@ async function readHeadCommitSha({ workspacePath, commandEnv }) {
     return "";
   }
   return normalizeText(result.stdout);
+}
+
+async function readHeadCommitSha({ workspacePath, commandEnv }) {
+  return readGitCommitSha({ workspacePath, commandEnv, ref: "HEAD" });
 }
 
 async function readWorkspacePersistenceState({
@@ -2283,6 +2288,14 @@ async function readWorkspacePersistenceState({
     workspacePath,
     commandEnv,
   }).catch(() => "");
+  const remoteHeadCommitSha =
+    normalizedBranch && hasRemoteBranch
+      ? await readGitCommitSha({
+          workspacePath,
+          commandEnv,
+          ref: `origin/${normalizedBranch}`,
+        }).catch(() => "")
+      : "";
   const statusFingerprint = await runProcessCapture("git", ["status", "--porcelain"], {
     cwd: workspacePath,
     env: commandEnv,
@@ -2296,6 +2309,7 @@ async function readWorkspacePersistenceState({
     hasRemoteBranch,
     aheadCount,
     headCommitSha,
+    remoteHeadCommitSha,
     statusFingerprint,
   };
 }
@@ -5517,6 +5531,19 @@ function workspaceStateChangedSinceBaseline({
   );
 }
 
+function protectedBranchStateIsCleanRemoteSync({
+  currentState = null,
+}) {
+  const current = currentState || {};
+  return (
+    current.hasRemoteBranch === true &&
+    current.hasWorkingTreeChanges !== true &&
+    parsePositiveInteger(current.aheadCount, 0) === 0 &&
+    normalizeText(current.headCommitSha) &&
+    normalizeText(current.headCommitSha) === normalizeText(current.remoteHeadCommitSha)
+  );
+}
+
 function isRememberedThreadBranch({
   branch = "",
   writeMode = "",
@@ -5637,11 +5664,18 @@ async function persistWorkspaceProgress({
       baseBranch,
       protectedBranches,
     });
+    const cleanProtectedBranchRemoteSync =
+      normalizeText(writeMode) === "branch_and_pr" &&
+      !branchIsRemembered &&
+      protectedBranchStateIsCleanRemoteSync({
+        currentState,
+      });
 
     if (
       normalizeText(writeMode) === "branch_and_pr" &&
       !branchIsRemembered &&
-      meaningfulRepoWork
+      meaningfulRepoWork &&
+      !cleanProtectedBranchRemoteSync
     ) {
       result.skippedProtectedBranch = normalizedBranch;
       result.error = `Codex left repo changes on protected branch ${normalizedBranch}. Create and switch to a normal git branch before finishing.`;
