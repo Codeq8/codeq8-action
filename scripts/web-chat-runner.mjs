@@ -299,6 +299,7 @@ function isCodexTransportNoiseLine(line = "", { afterTokensUsed = false } = {}) 
     /^ERROR:\s*stream disconnected before completion:/i,
     /^You can retry your request, or contact us through our help center at help\.openai\.com/i,
     /^Warning:\s*no last agent message;/i,
+    /^ERROR:\s*Selected model is at capacity\. Please try a different model\.?$/i,
     /^tokens used$/i,
     /request ID .* in your message\.?\)?$/i,
     /an error occurred while processing your request/i,
@@ -341,6 +342,7 @@ function isRecoverableCodexTransportFailure({ reason = "", output = "" } = {}) {
     /request ID .* in your message/i,
     /help\.openai\.com/i,
     /an error occurred while processing your request/i,
+    /selected model is at capacity/i,
   ].some((pattern) => pattern.test(haystack));
 }
 
@@ -376,6 +378,10 @@ function shouldTreatCodexFailureAsCompleted({
 }
 
 function toUserVisibleRunnerFailureMessage(value) {
+  const rawMessage = normalizeText(extractErrorMessage(value));
+  if (/selected model is at capacity/i.test(rawMessage)) {
+    return "The selected Codex model is temporarily at capacity. Retry the run.";
+  }
   const message = extractUserVisibleFailureHeadline(value);
   if (!message) {
     return "I couldn't complete that run.";
@@ -6723,7 +6729,10 @@ async function main() {
 
         if (!execution.ok && !recoveredTransportFailure) {
           const executionFailureDetails =
-            execution.reason || execution.diagnosticOutput || "Web chat runner failed.";
+            [execution.reason, execution.diagnosticOutput]
+              .map((entry) => normalizeText(entry))
+              .filter(Boolean)
+              .join("\n\n") || "Web chat runner failed.";
           const userVisibleFailureMessage = toUserVisibleRunnerFailureMessage(
             executionFailureDetails,
           );

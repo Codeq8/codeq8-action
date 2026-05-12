@@ -20,6 +20,7 @@ import {
   flushServerOwnedCodeq8File,
   hydrateServerOwnedCodeq8File,
   extractUserVisibleFailureHeadline,
+  isRecoverableCodexTransportFailure,
   isRecoverableCodexSessionErrorState,
   materializeWebChatAttachments,
   normalizeAttachmentRecord,
@@ -33,6 +34,8 @@ import {
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
   runCodex,
+  shouldTreatCodexFailureAsCompleted,
+  stripLeadingCodexTransportNoise,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
@@ -1643,6 +1646,34 @@ test("isRecoverableCodexSessionErrorState treats worker fetch failures as recove
   );
 });
 
+test("Codex model capacity errors are recoverable after workspace persistence", () => {
+  const diagnosticOutput = [
+    "ERROR: Selected model is at capacity. Please try a different model.",
+    "tokens used",
+    "575,792",
+  ].join("\n");
+
+  assert.equal(
+    isRecoverableCodexTransportFailure({
+      reason: "Codex exited with code=1 signal=none.",
+      output: diagnosticOutput,
+    }),
+    true,
+  );
+  assert.equal(stripLeadingCodexTransportNoise(diagnosticOutput), "");
+  assert.equal(
+    shouldTreatCodexFailureAsCompleted({
+      execution: {
+        ok: false,
+        reason: "Codex exited with code=1 signal=none.",
+        diagnosticOutput,
+      },
+      persistenceSummary: "PR: https://github.com/Codeq8/Codeq8/pull/1208.",
+    }),
+    true,
+  );
+});
+
 test("extractUserVisibleFailureHeadline drops terminal log tails from failure blobs", () => {
   const headline = extractUserVisibleFailureHeadline(`
     Codex exited with code=1 signal=none.
@@ -1665,6 +1696,14 @@ test("toUserVisibleRunnerFailureMessage keeps generic exit failures concise", ()
   `);
 
   assert.equal(message, "Codex exited with code=1 signal=none.");
+});
+
+test("toUserVisibleRunnerFailureMessage maps model capacity errors to retry guidance", () => {
+  const message = toUserVisibleRunnerFailureMessage(`
+    ERROR: Selected model is at capacity. Please try a different model.
+  `);
+
+  assert.equal(message, "The selected Codex model is temporarily at capacity. Retry the run.");
 });
 
 test("buildUploadedCodexSessionStoredValue builds a wrapped version 3 envelope", async () => {
