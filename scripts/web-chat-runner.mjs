@@ -472,12 +472,25 @@ function normalizeCodexSessionStatus(value) {
   return "missing";
 }
 
+function isSupersededWebChatRunError(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return false;
+  }
+  return (
+    /run\s+wcr_[A-Za-z0-9._:@-]+\s+was superseded by a newer message/i.test(normalized) ||
+    /superseded by a newer web chat message/i.test(normalized) ||
+    /cancelled because a newer user message arrived/i.test(normalized)
+  );
+}
+
 function isRecoverableCodexSessionErrorState(value) {
   const normalized = normalizeText(value);
   if (!normalized) {
     return false;
   }
   return (
+    isSupersededWebChatRunError(normalized) ||
     /authorization token path mismatch/i.test(normalized) ||
     /failed to update web chat codex session state/i.test(normalized) ||
     /web chat codex session revision conflict/i.test(normalized) ||
@@ -1934,6 +1947,21 @@ async function postRunCallback({ publicBaseUrl, workerUrl, adminToken, body }) {
     );
   }
   return response.payload;
+}
+
+function shouldStopBeforeCodexForRunCallbackPayload(value) {
+  const payload = normalizeObject(value);
+  const run = normalizeObject(payload.run);
+  const metadata = normalizeObject(run.metadata);
+  const status = normalizeText(run.status).toLowerCase();
+  return (
+    payload.ignored === true &&
+    status === "cancelled" &&
+    (metadata.superseded_by_new_message === true ||
+      metadata.superseded_by_message_edit === true ||
+      metadata.stop_requested_by_user === true ||
+      metadata.stopped_by_user === true)
+  );
 }
 
 function resolveWorkspacePath({ repository, overridePath }) {
@@ -6351,6 +6379,13 @@ async function main() {
           }
         } catch (sessionError) {
           const sessionMessage = extractErrorMessage(sessionError);
+          if (isSupersededWebChatRunError(sessionMessage)) {
+            log(
+              "Web chat run was superseded before Codex prompt construction; exiting without recording a session error",
+              `thread_id=${threadId} run_id=${runId}`,
+            );
+            return;
+          }
           await safePersistCodexSessionError({
             workerUrl,
             adminToken,
@@ -6367,7 +6402,7 @@ async function main() {
           startedAt = Date.now();
         }
         try {
-          await postRunCallback({
+          const runningCallbackPayload = await postRunCallback({
             publicBaseUrl,
             workerUrl,
             adminToken,
@@ -6393,6 +6428,13 @@ async function main() {
               }),
             },
           });
+          if (shouldStopBeforeCodexForRunCallbackPayload(runningCallbackPayload)) {
+            log(
+              "Web chat run was already cancelled before Codex started; exiting",
+              `thread_id=${threadId} run_id=${runId}`,
+            );
+            return;
+          }
         } catch (error) {
           throw new Error(
             `Failed to post running web chat callback: ${
@@ -6959,6 +7001,7 @@ export {
   isRecoverableCodexTransportFailure,
   isRecoverableCodexResumeFailure,
   isRecoverableCodexSessionErrorState,
+  isSupersededWebChatRunError,
   parseCodexSessionBundleContents,
   isRetryableCodexSessionPersistenceError,
   prepareWebChatCodexSessionUpload,
@@ -7000,6 +7043,7 @@ export {
   runCodex,
   assertWebChatRunnerRuntimeCompatibility,
   shouldLookUpPullRequest,
+  shouldStopBeforeCodexForRunCallbackPayload,
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,
   extractUserVisibleFailureHeadline,

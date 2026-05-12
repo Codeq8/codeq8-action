@@ -22,6 +22,7 @@ import {
   extractUserVisibleFailureHeadline,
   isRecoverableCodexTransportFailure,
   isRecoverableCodexSessionErrorState,
+  isSupersededWebChatRunError,
   materializeWebChatAttachments,
   normalizeAttachmentRecord,
   persistCapturedCodexSessionBundleWithRetries,
@@ -34,6 +35,7 @@ import {
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
   runCodex,
+  shouldStopBeforeCodexForRunCallbackPayload,
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,
   toUserVisibleRunnerFailureMessage,
@@ -1643,6 +1645,41 @@ test("isRecoverableCodexSessionErrorState treats worker fetch failures as recove
       "Codex session state is in error status: Worker request failed: fetch failed",
     ),
     true,
+  );
+});
+
+test("superseded web chat runs do not poison Codex session state", () => {
+  const message =
+    "Codex session state is in error status: Run wcr_098550d0-7874-4f2e-856b-433034c63793 was superseded by a newer message.";
+
+  assert.equal(isSupersededWebChatRunError(message), true);
+  assert.equal(isRecoverableCodexSessionErrorState(message), true);
+});
+
+test("ignored cancelled running callbacks stop before Codex starts", () => {
+  assert.equal(
+    shouldStopBeforeCodexForRunCallbackPayload({
+      ok: true,
+      ignored: true,
+      run: {
+        status: "cancelled",
+        metadata: {
+          superseded_by_new_message: true,
+        },
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    shouldStopBeforeCodexForRunCallbackPayload({
+      ok: true,
+      ignored: false,
+      run: {
+        status: "running",
+        metadata: {},
+      },
+    }),
+    false,
   );
 });
 
