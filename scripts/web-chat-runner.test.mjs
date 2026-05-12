@@ -756,6 +756,16 @@ function readAheadCount(workspacePath, branch) {
   return Number.parseInt(aheadText, 10) || 0;
 }
 
+function readHeadCommitSha(workspacePath) {
+  return String(
+    execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: workspacePath,
+      env: process.env,
+      encoding: "utf8",
+    }) || "",
+  ).trim();
+}
+
 test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -1349,6 +1359,115 @@ test("persistWorkspaceProgress explicitly pushes remembered branches that are ah
     assert.equal(result.pushed, true);
     assert.equal(result.resolvedWriteBranch, "feature/test");
     assert.equal(readAheadCount(workspacePath, "feature/test"), 0);
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("persistWorkspaceProgress accepts clean protected branch fast-forwards already synced to origin", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-protected-sync-"));
+  const remotePath = path.join(tempRoot, "remote.git");
+  const seedPath = path.join(tempRoot, "seed");
+  const workspacePath = path.join(tempRoot, "workspace");
+
+  try {
+    git(tempRoot, ["init", "--bare", remotePath]);
+    await fs.mkdir(seedPath, { recursive: true });
+    git(seedPath, ["init"]);
+    git(seedPath, ["checkout", "-b", "main"]);
+    git(seedPath, ["config", "user.name", "Codeq8 Test"]);
+    git(seedPath, ["config", "user.email", "codeq8@example.com"]);
+    await fs.writeFile(path.join(seedPath, "README.md"), "seed\n");
+    git(seedPath, ["add", "README.md"]);
+    git(seedPath, ["commit", "-m", "Initial commit"]);
+    git(seedPath, ["remote", "add", "origin", remotePath]);
+    git(seedPath, ["push", "-u", "origin", "main"]);
+
+    git(tempRoot, ["clone", remotePath, workspacePath]);
+    git(workspacePath, ["checkout", "main"]);
+    const baselineState = {
+      headCommitSha: readHeadCommitSha(workspacePath),
+      statusFingerprint: "",
+    };
+
+    await fs.writeFile(path.join(seedPath, "README.md"), "merged\n");
+    git(seedPath, ["add", "README.md"]);
+    git(seedPath, ["commit", "-m", "Merge accepted PR"]);
+    git(seedPath, ["push", "origin", "main"]);
+    git(workspacePath, ["fetch", "origin", "main"]);
+    git(workspacePath, ["merge", "--ff-only", "origin/main"]);
+
+    const result = await persistWorkspaceProgress({
+      workspacePath,
+      commandEnv: process.env,
+      sourceType: "default_branch",
+      branch: "main",
+      writeMode: "branch_and_pr",
+      repository: "Codeq8/codeq8-action",
+      headRepository: "Codeq8/codeq8-action",
+      baseBranch: "main",
+      gitToken: "",
+      protectedBranches: ["main"],
+      baselineState,
+    });
+
+    assert.equal(result.error, "");
+    assert.equal(result.skippedProtectedBranch, "");
+    assert.equal(result.pendingRemoteSync, "");
+    assert.equal(result.pushed, false);
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("persistWorkspaceProgress still rejects unpushed protected branch commits", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-protected-local-"));
+  const remotePath = path.join(tempRoot, "remote.git");
+  const seedPath = path.join(tempRoot, "seed");
+  const workspacePath = path.join(tempRoot, "workspace");
+
+  try {
+    git(tempRoot, ["init", "--bare", remotePath]);
+    await fs.mkdir(seedPath, { recursive: true });
+    git(seedPath, ["init"]);
+    git(seedPath, ["checkout", "-b", "main"]);
+    git(seedPath, ["config", "user.name", "Codeq8 Test"]);
+    git(seedPath, ["config", "user.email", "codeq8@example.com"]);
+    await fs.writeFile(path.join(seedPath, "README.md"), "seed\n");
+    git(seedPath, ["add", "README.md"]);
+    git(seedPath, ["commit", "-m", "Initial commit"]);
+    git(seedPath, ["remote", "add", "origin", remotePath]);
+    git(seedPath, ["push", "-u", "origin", "main"]);
+
+    git(tempRoot, ["clone", remotePath, workspacePath]);
+    git(workspacePath, ["checkout", "main"]);
+    git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
+    git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
+    const baselineState = {
+      headCommitSha: readHeadCommitSha(workspacePath),
+      statusFingerprint: "",
+    };
+
+    await fs.writeFile(path.join(workspacePath, "protected.txt"), "local\n");
+    git(workspacePath, ["add", "protected.txt"]);
+    git(workspacePath, ["commit", "-m", "Local protected branch work"]);
+
+    const result = await persistWorkspaceProgress({
+      workspacePath,
+      commandEnv: process.env,
+      sourceType: "default_branch",
+      branch: "main",
+      writeMode: "branch_and_pr",
+      repository: "Codeq8/codeq8-action",
+      headRepository: "Codeq8/codeq8-action",
+      baseBranch: "main",
+      gitToken: "",
+      protectedBranches: ["main"],
+      baselineState,
+    });
+
+    assert.match(result.error, /protected branch main/);
+    assert.equal(result.skippedProtectedBranch, "main");
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
