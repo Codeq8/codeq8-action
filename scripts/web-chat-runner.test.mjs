@@ -10,6 +10,7 @@ import {
   assertWebChatRunnerRuntimeCompatibility,
   applyCodexNodeOptions,
   buildFirebaseStorageDownloadUrl,
+  buildFinalWorkspaceStateCallbackPayload,
   buildCodexPrompt,
   buildResumePrompt,
   buildUploadedCodexSessionStoredValue,
@@ -61,6 +62,27 @@ test("applyCodexNodeOptions maps dedicated Codex preloads onto the Codex child e
     commandEnv.NODE_OPTIONS,
     "--import=/workspace/scripts/register-node-typescript-loader.mjs --import=/workspace/scripts/allow-dirty-branch-worktree-preload.mts",
   );
+});
+
+test("buildFinalWorkspaceStateCallbackPayload serializes final branch state", () => {
+  assert.deepEqual(
+    buildFinalWorkspaceStateCallbackPayload({
+      branch: "refs/heads/codex/final-target",
+      headCommitSha: "abc123",
+      hasWorkingTreeChanges: false,
+      hasRemoteBranch: true,
+      aheadCount: 2,
+    }),
+    {
+      branch: "codex/final-target",
+      head_sha: "abc123",
+      has_working_tree_changes: false,
+      has_remote_branch: true,
+      ahead_count: 2,
+      detached: false,
+    },
+  );
+  assert.equal(buildFinalWorkspaceStateCallbackPayload({ branch: "HEAD" }), null);
 });
 
 test("runCodex applies dedicated Node options only to the Codex process env", async (t) => {
