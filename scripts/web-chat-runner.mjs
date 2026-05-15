@@ -2314,6 +2314,42 @@ async function readWorkspacePersistenceState({
   };
 }
 
+function buildFinalWorkspaceStateCallbackPayload(state = null) {
+  const normalizedState = normalizeObject(state);
+  const branch = normalizeBranchName(normalizedState.branch);
+  if (!branch || branch.toLowerCase() === "head") {
+    return null;
+  }
+  return {
+    branch,
+    head_sha: normalizeText(normalizedState.headCommitSha),
+    has_working_tree_changes: normalizedState.hasWorkingTreeChanges === true,
+    has_remote_branch: normalizedState.hasRemoteBranch === true,
+    ahead_count: parsePositiveInteger(normalizedState.aheadCount, 0),
+    detached: false,
+  };
+}
+
+async function readFinalWorkspaceStateCallbackPayload({
+  workspacePath,
+  commandEnv,
+  branch = "",
+}) {
+  const finalBranch = normalizeBranchName(branch) || await currentBranch({
+    workspacePath,
+    commandEnv,
+  }).catch(() => "");
+  if (!finalBranch) {
+    return null;
+  }
+  const state = await readWorkspacePersistenceState({
+    workspacePath,
+    commandEnv,
+    branch: finalBranch,
+  });
+  return buildFinalWorkspaceStateCallbackPayload(state);
+}
+
 async function checkoutOriginBranch({
   workspacePath,
   commandEnv,
@@ -6561,6 +6597,11 @@ async function main() {
             `Codex changed branches unexpectedly (expected ${preparedWorkspace.effectiveWriteBranch}, got ${finalBranch || "<unknown>"}).`,
           );
         }
+        const finalWorkspaceState = await readFinalWorkspaceStateCallbackPayload({
+          workspacePath: preparedWorkspace.workspacePath,
+          commandEnv,
+          branch: finalBranch,
+        });
 
         const latestThread = await loadWebChatThread({
           workerUrl,
@@ -6599,6 +6640,7 @@ async function main() {
                 status: "completed",
                 summary: `Updated the conversation to ${nextTargetDescription}.`,
                 assistant_message: assistantMessage,
+                final_workspace_state: finalWorkspaceState || undefined,
                 started_at: startedAt,
                 completed_at: Date.now(),
                 metadata: buildCodexRunMetadata({
@@ -6861,6 +6903,7 @@ async function main() {
             resolved_pull_request_url: resolvedPullRequestUrl,
             resolved_pull_request_title: persistenceResult.pullRequestTitle || "",
             assistant_message: assistantMessage,
+            final_workspace_state: finalWorkspaceState || undefined,
             assistant_metadata: {
               exit_code: execution.exitCode,
               signal: execution.signal || "",
@@ -6947,6 +6990,12 @@ async function main() {
   } catch (error) {
     const message = extractErrorMessage(error);
     log("ERROR", message);
+    const failureFinalWorkspaceState = preparedWorkspace?.workspacePath
+      ? await readFinalWorkspaceStateCallbackPayload({
+          workspacePath: preparedWorkspace.workspacePath,
+          commandEnv,
+        }).catch(() => null)
+      : null;
 
     try {
       await postRunCallback({
@@ -6972,6 +7021,7 @@ async function main() {
                 toUserVisibleRunnerFailureMessage(message),
               MAX_OUTPUT_CHARS,
             ),
+          final_workspace_state: failureFinalWorkspaceState || undefined,
           started_at: startedAt || undefined,
           completed_at: Date.now(),
           metadata: buildCodexRunMetadata({
@@ -7017,6 +7067,7 @@ export {
   buildCodexRunMetadata,
   buildGitHubActionsControlPlaneUrl,
   buildResumePrompt,
+  buildFinalWorkspaceStateCallbackPayload,
   buildUploadedCodexSessionStoredValue,
   captureCodexSessionBundle,
   checkoutPreparedWorkspaceBranch,
