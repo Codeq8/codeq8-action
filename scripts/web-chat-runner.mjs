@@ -4426,6 +4426,53 @@ async function prepareRunnerDiscordDmCli({
   };
 }
 
+function prependCommandPath(commandEnv, binPath) {
+  const currentPath = String(commandEnv.PATH || "");
+  const normalizedBinPath = normalizeText(binPath);
+  const pathEntries = currentPath
+    .split(path.delimiter)
+    .map((entry) => normalizeText(entry))
+    .filter(Boolean);
+  if (!pathEntries.includes(normalizedBinPath)) {
+    commandEnv.PATH = currentPath
+      ? `${normalizedBinPath}${path.delimiter}${currentPath}`
+      : normalizedBinPath;
+  }
+}
+
+async function prepareRefreshingGitHubCliWrapper({
+  commandEnv,
+  runtimeHomePath,
+  ghPath,
+  helperPath,
+}) {
+  const normalizedHelperPath = normalizeText(helperPath);
+  if (!normalizedHelperPath || !(await isExecutableFile(normalizedHelperPath))) {
+    return "";
+  }
+
+  const wrapperBinPath = path.join(path.resolve(runtimeHomePath), "bin");
+  const wrapperPath = path.join(wrapperBinPath, "gh");
+  await ensureDirectory(wrapperBinPath);
+  const wrapperScript = [
+    "#!/bin/sh",
+    "set -eu",
+    `helper_path=${quoteShellArgument(normalizedHelperPath)}`,
+    `real_gh_path=${quoteShellArgument(ghPath)}`,
+    'fresh_token="$("$helper_path" print-token)"',
+    'if [ -n "$fresh_token" ]; then',
+    '  export GH_TOKEN="$fresh_token"',
+    '  export GITHUB_TOKEN="$fresh_token"',
+    "fi",
+    'exec "$real_gh_path" "$@"',
+    "",
+  ].join("\n");
+  await fs.writeFile(wrapperPath, wrapperScript, { mode: 0o755 });
+  await fs.chmod(wrapperPath, 0o755);
+  prependCommandPath(commandEnv, wrapperBinPath);
+  return wrapperPath;
+}
+
 async function prepareGitHubCliAuth({
   commandEnv,
   runtimeHomePath,
@@ -4475,9 +4522,17 @@ async function prepareGitHubCliAuth({
   commandEnv.GH_CONFIG_DIR = ghConfigDir;
   commandEnv.GH_PROMPT_DISABLED = "1";
 
+  const wrapperPath = await prepareRefreshingGitHubCliWrapper({
+    commandEnv,
+    runtimeHomePath,
+    ghPath,
+    helperPath,
+  });
+
   return {
     available: true,
-    binPath: ghPath,
+    binPath: wrapperPath || ghPath,
+    wrappedBinPath: wrapperPath ? ghPath : "",
     configDir: ghConfigDir,
   };
 }

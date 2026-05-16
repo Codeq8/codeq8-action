@@ -1322,6 +1322,86 @@ test("prepareGitHubCliAuth configures gh through environment without wrapping th
   assert.match(ghCallLog, /ARGS=pr create --body ## Summary\\n- raw gh input/);
 });
 
+test("prepareGitHubCliAuth refreshes gh tokens before each invocation", async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-gh-refresh-"));
+  const fakeBinPath = path.join(tempDir, "fake-bin");
+  const runtimeHomePath = path.join(tempDir, "runtime");
+  const helperStatePath = path.join(tempDir, "helper-count.txt");
+  const ghCallLogPath = path.join(tempDir, "gh-call-log.txt");
+  await fs.mkdir(fakeBinPath, { recursive: true });
+
+  const fakeGhPath = path.join(fakeBinPath, "gh");
+  await fs.writeFile(
+    fakeGhPath,
+    [
+      "#!/bin/sh",
+      `log_path=${JSON.stringify(ghCallLogPath)}`,
+      "printf 'GH_TOKEN=%s\\nGITHUB_TOKEN=%s\\nARGS=%s\\n' \"$GH_TOKEN\" \"$GITHUB_TOKEN\" \"$*\" >> \"$log_path\"",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await fs.chmod(fakeGhPath, 0o755);
+
+  const helperPath = path.join(tempDir, "token-helper.sh");
+  await fs.writeFile(
+    helperPath,
+    [
+      "#!/bin/sh",
+      `state_path=${JSON.stringify(helperStatePath)}`,
+      'count="$(cat "$state_path" 2>/dev/null || printf 0)"',
+      'count="$((count + 1))"',
+      'printf "%s" "$count" > "$state_path"',
+      'printf "fresh-token-%s" "$count"',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await fs.chmod(helperPath, 0o755);
+
+  const originalPath = `${fakeBinPath}${path.delimiter}${process.env.PATH || ""}`;
+  const commandEnv = {
+    ...process.env,
+    PATH: originalPath,
+    CODEX_GITHUB_WRITE_TOKEN: "startup-token",
+    CODEX_GITHUB_TOKEN_HELPER_PATH: helperPath,
+  };
+
+  const prepared = await prepareGitHubCliAuth({
+    commandEnv,
+    runtimeHomePath,
+  });
+  assert.equal(prepared.available, true);
+  assert.equal(prepared.wrappedBinPath, fakeGhPath);
+  assert.equal(prepared.binPath, path.join(runtimeHomePath, "bin", "gh"));
+  assert.equal(commandEnv.GH_TOKEN, "fresh-token-1");
+  assert.equal(commandEnv.GITHUB_TOKEN, "fresh-token-1");
+  const escapedRuntimeBinPath = path
+    .join(runtimeHomePath, "bin")
+    .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(commandEnv.PATH, new RegExp(`^${escapedRuntimeBinPath}${path.delimiter}`));
+
+  execFileSync("gh", ["pr", "view", "1"], {
+    env: commandEnv,
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+  execFileSync("gh", ["run", "view", "2"], {
+    env: commandEnv,
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+
+  const ghCallLog = await fs.readFile(ghCallLogPath, "utf8");
+  assert.match(ghCallLog, /GH_TOKEN=fresh-token-2/);
+  assert.match(ghCallLog, /GITHUB_TOKEN=fresh-token-2/);
+  assert.match(ghCallLog, /ARGS=pr view 1/);
+  assert.match(ghCallLog, /GH_TOKEN=fresh-token-3/);
+  assert.match(ghCallLog, /GITHUB_TOKEN=fresh-token-3/);
+  assert.match(ghCallLog, /ARGS=run view 2/);
+  assert.doesNotMatch(ghCallLog, /startup-token/);
+});
+
 test("persistWorkspaceProgress explicitly pushes remembered branches that are ahead of origin", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-push-"));
   const remotePath = path.join(tempRoot, "remote.git");
