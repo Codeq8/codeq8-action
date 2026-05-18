@@ -1872,6 +1872,18 @@ test("isRecoverableCodexSessionErrorState treats worker fetch failures as recove
     ),
     true,
   );
+  assert.equal(
+    isRecoverableCodexSessionErrorState(
+      "Codex session state is in error status: fetch failed",
+    ),
+    true,
+  );
+  assert.equal(
+    isRecoverableCodexSessionErrorState(
+      "Codex session state is in error status: Codex session state is in error status: fetch failed",
+    ),
+    true,
+  );
 });
 
 test("superseded web chat runs do not poison Codex session state", () => {
@@ -1889,6 +1901,12 @@ test("transient Codex session persistence failures do not fail completed runs", 
   );
   assert.equal(
     shouldContinueAfterCodexSessionPersistenceFailure("Worker request failed: fetch failed"),
+    true,
+  );
+  assert.equal(
+    shouldContinueAfterCodexSessionPersistenceFailure(
+      "Codex session state is in error status: Codex session state is in error status: fetch failed",
+    ),
     true,
   );
   assert.equal(

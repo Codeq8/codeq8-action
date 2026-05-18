@@ -472,8 +472,18 @@ function normalizeCodexSessionStatus(value) {
   return "missing";
 }
 
+function normalizeCodexSessionErrorStateMessage(value) {
+  let normalized = normalizeText(value);
+  while (/^codex session state is in error status:\s*/i.test(normalized)) {
+    normalized = normalized
+      .replace(/^codex session state is in error status:\s*/i, "")
+      .trim();
+  }
+  return normalized;
+}
+
 function isSupersededWebChatRunError(value) {
-  const normalized = normalizeText(value);
+  const normalized = normalizeCodexSessionErrorStateMessage(value);
   if (!normalized) {
     return false;
   }
@@ -485,7 +495,7 @@ function isSupersededWebChatRunError(value) {
 }
 
 function isRecoverableCodexSessionErrorState(value) {
-  const normalized = normalizeText(value);
+  const normalized = normalizeCodexSessionErrorStateMessage(value);
   if (!normalized) {
     return false;
   }
@@ -508,7 +518,7 @@ function isRecoverableCodexSessionErrorState(value) {
 }
 
 function isInvalidCodexSessionBundleError(value) {
-  const normalized = normalizeText(value);
+  const normalized = normalizeCodexSessionErrorStateMessage(value);
   if (!normalized) {
     return false;
   }
@@ -534,7 +544,7 @@ function isRecoverableCodexResumeFailure({ reason = "", output = "" } = {}) {
 }
 
 function isRetryableCodexSessionPersistenceError(value) {
-  const normalized = normalizeText(value);
+  const normalized = normalizeCodexSessionErrorStateMessage(value);
   if (!normalized) {
     return false;
   }
@@ -552,7 +562,7 @@ function isRetryableCodexSessionPersistenceError(value) {
 }
 
 function shouldContinueAfterCodexSessionPersistenceFailure(value) {
-  const normalized = normalizeText(value);
+  const normalized = normalizeCodexSessionErrorStateMessage(value);
   if (!normalized) {
     return false;
   }
