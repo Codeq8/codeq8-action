@@ -1542,6 +1542,72 @@ test("persistWorkspaceProgress pushes committed new remembered branches even wit
   }
 });
 
+test("persistWorkspaceProgress pushes committed new branches when the base ref is unavailable", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-missing-base-"));
+  const remotePath = path.join(tempRoot, "remote.git");
+  const seedPath = path.join(tempRoot, "seed");
+  const workspacePath = path.join(tempRoot, "workspace");
+  const originalFetch = globalThis.fetch;
+
+  try {
+    globalThis.fetch = async () => Response.json([]);
+    git(tempRoot, ["init", "--bare", remotePath]);
+    await fs.mkdir(seedPath, { recursive: true });
+    git(seedPath, ["init"]);
+    git(seedPath, ["checkout", "-b", "main"]);
+    git(seedPath, ["config", "user.name", "Codeq8 Test"]);
+    git(seedPath, ["config", "user.email", "codeq8@example.com"]);
+    await fs.writeFile(path.join(seedPath, "README.md"), "seed\n");
+    git(seedPath, ["add", "README.md"]);
+    git(seedPath, ["commit", "-m", "Initial commit"]);
+    git(seedPath, ["remote", "add", "origin", remotePath]);
+    git(seedPath, ["push", "-u", "origin", "main"]);
+
+    git(tempRoot, ["clone", remotePath, workspacePath]);
+    git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
+    git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
+    git(workspacePath, ["checkout", "-b", "codeq8/remove-human-review-policy", "origin/main"]);
+    const baselineState = {
+      headCommitSha: readHeadCommitSha(workspacePath),
+      statusFingerprint: "",
+    };
+
+    await fs.writeFile(path.join(workspacePath, "codeq8.json"), '{ "review": false }\n');
+    git(workspacePath, ["add", "codeq8.json"]);
+    git(workspacePath, ["commit", "-m", "Remove human review policy"]);
+    git(workspacePath, ["update-ref", "-d", "refs/remotes/origin/main"]);
+
+    const result = await persistWorkspaceProgress({
+      workspacePath,
+      commandEnv: process.env,
+      sourceType: "default_branch",
+      branch: "codeq8/remove-human-review-policy",
+      writeMode: "branch_and_pr",
+      repository: "Codeq8/Codeq8",
+      headRepository: "Codeq8/Codeq8",
+      baseBranch: "main",
+      gitToken: "github-token",
+      protectedBranches: ["main"],
+      baselineState,
+    });
+
+    const remoteHeads = execFileSync(
+      "git",
+      ["ls-remote", "--heads", "origin", "codeq8/remove-human-review-policy"],
+      { cwd: workspacePath, env: process.env, encoding: "utf8" },
+    );
+
+    assert.equal(result.error, "");
+    assert.equal(result.pendingRemoteSync, "");
+    assert.equal(result.pushed, true);
+    assert.equal(result.resolvedWriteBranch, "codeq8/remove-human-review-policy");
+    assert.match(remoteHeads, /refs\/heads\/codeq8\/remove-human-review-policy/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("persistWorkspaceProgress accepts clean protected branch fast-forwards already synced to origin", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-protected-sync-"));
   const remotePath = path.join(tempRoot, "remote.git");

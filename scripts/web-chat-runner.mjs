@@ -5650,6 +5650,15 @@ function workspaceStateChangedSinceBaseline({
   );
 }
 
+function workspaceHeadChangedSinceBaseline({
+  baselineState = null,
+  currentState = null,
+}) {
+  const baselineHead = normalizeText(baselineState?.headCommitSha);
+  const currentHead = normalizeText(currentState?.headCommitSha);
+  return Boolean(baselineHead && currentHead && baselineHead !== currentHead);
+}
+
 function protectedBranchStateIsCleanRemoteSync({
   currentState = null,
 }) {
@@ -5806,15 +5815,21 @@ async function persistWorkspaceProgress({
     }
 
     result.resolvedWriteBranch = normalizedBranch;
+    const headChangedSinceBaseline = workspaceHeadChangedSinceBaseline({
+      baselineState,
+      currentState,
+    });
     const hasCommittedBranchProgress =
-      currentState.hasRemoteBranch
-        ? currentState.aheadCount > 0
-        : await branchHasCommitsAgainstBase({
+      currentState.aheadCount > 0 ||
+      headChangedSinceBaseline ||
+      (!currentState.hasRemoteBranch
+        ? await branchHasCommitsAgainstBase({
             workspacePath,
             commandEnv,
             branch: normalizedBranch,
             baseBranch,
-          }).catch(() => false);
+          }).catch(() => false)
+        : false);
     const shouldAttemptRescuePush =
       meaningfulRepoWork &&
       hasCommittedBranchProgress &&
