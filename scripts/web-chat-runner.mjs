@@ -489,6 +489,7 @@ function isSupersededWebChatRunError(value) {
   }
   return (
     /run\s+wcr_[A-Za-z0-9._:@-]+\s+was superseded by a newer message/i.test(normalized) ||
+    /run\s+wcr_[A-Za-z0-9._:@-]+\s+is already cancell?ed/i.test(normalized) ||
     /superseded by a newer web chat message/i.test(normalized) ||
     /cancelled because a newer user message arrived/i.test(normalized)
   );

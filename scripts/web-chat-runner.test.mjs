@@ -1967,6 +1967,12 @@ test("superseded web chat runs do not poison Codex session state", () => {
 
   assert.equal(isSupersededWebChatRunError(message), true);
   assert.equal(isRecoverableCodexSessionErrorState(message), true);
+
+  const cancelledWakeupMessage =
+    "Codex session state is in error status: Codex session state is in error status: Run wcr_codeq8_wakeup_68f18ca4f99faa9384f9a8295c5aa0807688d548 is already cancelled.";
+
+  assert.equal(isSupersededWebChatRunError(cancelledWakeupMessage), true);
+  assert.equal(isRecoverableCodexSessionErrorState(cancelledWakeupMessage), true);
 });
 
 test("transient Codex session persistence failures do not fail completed runs", () => {
