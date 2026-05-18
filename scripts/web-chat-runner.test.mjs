@@ -36,6 +36,7 @@ import {
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
   runCodex,
+  shouldContinueAfterCodexSessionPersistenceFailure,
   shouldStopBeforeCodexForRunCallbackPayload,
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,
@@ -1862,6 +1863,10 @@ test("isRecoverableCodexSessionErrorState treats worker fetch failures as recove
     true,
   );
   assert.equal(
+    isRecoverableCodexSessionErrorState("fetch failed"),
+    true,
+  );
+  assert.equal(
     isRecoverableCodexSessionErrorState(
       "Codex session state is in error status: Worker request failed: fetch failed",
     ),
@@ -1875,6 +1880,27 @@ test("superseded web chat runs do not poison Codex session state", () => {
 
   assert.equal(isSupersededWebChatRunError(message), true);
   assert.equal(isRecoverableCodexSessionErrorState(message), true);
+});
+
+test("transient Codex session persistence failures do not fail completed runs", () => {
+  assert.equal(
+    shouldContinueAfterCodexSessionPersistenceFailure("fetch failed"),
+    true,
+  );
+  assert.equal(
+    shouldContinueAfterCodexSessionPersistenceFailure("Worker request failed: fetch failed"),
+    true,
+  );
+  assert.equal(
+    shouldContinueAfterCodexSessionPersistenceFailure("web chat codex session revision conflict"),
+    false,
+  );
+  assert.equal(
+    shouldContinueAfterCodexSessionPersistenceFailure(
+      "Codex run finished without creating a session bundle",
+    ),
+    false,
+  );
 });
 
 test("ignored cancelled running callbacks stop before Codex starts", () => {

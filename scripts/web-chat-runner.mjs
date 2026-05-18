@@ -502,7 +502,8 @@ function isRecoverableCodexSessionErrorState(value) {
     ) ||
     /stored codex session bundle is not a valid codex session file/i.test(normalized) ||
     /failed to parse thread ID from rollout file/i.test(normalized) ||
-    /worker request failed:\s*fetch failed/i.test(normalized)
+    /worker request failed:\s*fetch failed/i.test(normalized) ||
+    /^fetch failed$/i.test(normalized)
   );
 }
 
@@ -547,6 +548,22 @@ function isRetryableCodexSessionPersistenceError(value) {
     /upstream/i.test(normalized) ||
     /network/i.test(normalized) ||
     /fetch failed/i.test(normalized)
+  );
+}
+
+function shouldContinueAfterCodexSessionPersistenceFailure(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return false;
+  }
+  return (
+    /^fetch failed$/i.test(normalized) ||
+    /worker request failed:\s*fetch failed/i.test(normalized) ||
+    /network/i.test(normalized) ||
+    /timed out/i.test(normalized) ||
+    /timeout/i.test(normalized) ||
+    /temporary/i.test(normalized) ||
+    /upstream/i.test(normalized)
   );
 }
 
@@ -6813,25 +6830,43 @@ async function main() {
         } catch (sessionError) {
           const sessionMessage =
             sessionError instanceof Error ? sessionError.message : String(sessionError);
-          await safePersistCodexSessionError({
-            workerUrl,
-            adminToken,
-            threadId,
-            runId,
-            error: sessionMessage,
-            lastResumedAt: resumeAttemptedAt,
-            expectedBundleRevision,
-          });
-          assistantMessage = truncate(
-            [
-              "I couldn't save the conversation state after the run, so I marked this run failed.",
-              assistantMessage,
-            ]
-              .filter(Boolean)
-              .join("\n\n"),
-            MAX_OUTPUT_CHARS,
-          );
-          throw new Error(`Codex session persistence failed: ${sessionMessage}`);
+          if (shouldContinueAfterCodexSessionPersistenceFailure(sessionMessage)) {
+            nonFatalCodexSessionLoadWarning = truncate(
+              [
+                nonFatalCodexSessionLoadWarning,
+                `Continuing without an updated Codex session bundle after a transient persistence failure: ${sessionMessage}`,
+              ]
+                .filter(Boolean)
+                .join("\n\n"),
+              1000,
+            );
+            persistedCodexSessionState = codexSessionState;
+            log(
+              "WARN",
+              "Continuing after transient Codex session persistence failure",
+              `thread_id=${threadId} run_id=${runId} reason=${truncate(sessionMessage, 500)}`,
+            );
+          } else {
+            await safePersistCodexSessionError({
+              workerUrl,
+              adminToken,
+              threadId,
+              runId,
+              error: sessionMessage,
+              lastResumedAt: resumeAttemptedAt,
+              expectedBundleRevision,
+            });
+            assistantMessage = truncate(
+              [
+                "I couldn't save the conversation state after the run, so I marked this run failed.",
+                assistantMessage,
+              ]
+                .filter(Boolean)
+                .join("\n\n"),
+              MAX_OUTPUT_CHARS,
+            );
+            throw new Error(`Codex session persistence failed: ${sessionMessage}`);
+          }
         }
 
         const refreshedWorkspaceGitToken = await applyWorkspaceGitToken({
@@ -7142,6 +7177,7 @@ export {
   isRecoverableCodexResumeFailure,
   isRecoverableCodexSessionErrorState,
   isSupersededWebChatRunError,
+  shouldContinueAfterCodexSessionPersistenceFailure,
   parseCodexSessionBundleContents,
   isRetryableCodexSessionPersistenceError,
   prepareWebChatCodexSessionUpload,
