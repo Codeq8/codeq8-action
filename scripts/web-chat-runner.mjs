@@ -5805,9 +5805,18 @@ async function persistWorkspaceProgress({
     }
 
     result.resolvedWriteBranch = normalizedBranch;
+    const hasCommittedBranchProgress =
+      currentState.hasRemoteBranch
+        ? currentState.aheadCount > 0
+        : await branchHasCommitsAgainstBase({
+            workspacePath,
+            commandEnv,
+            branch: normalizedBranch,
+            baseBranch,
+          }).catch(() => false);
     const shouldAttemptRescuePush =
       meaningfulRepoWork &&
-      !currentState.hasWorkingTreeChanges &&
+      hasCommittedBranchProgress &&
       (!currentState.hasRemoteBranch || currentState.aheadCount > 0);
     if (shouldAttemptRescuePush) {
       const pushed = await pushRememberedThreadBranch({
