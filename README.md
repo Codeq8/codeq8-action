@@ -6,6 +6,7 @@ The public action owns transport/bootstrap concerns such as:
 - runner bootstrap
 - repository auth handoff
 - workspace persistence
+- runner lifecycle diagnostics delivery
 - callback delivery
 
 Prompt construction, runner policy, and pull-request presentation are server-owned by Codeq8 and are fetched at run time through the signed web-chat runner contract. Public action version bumps should only be needed for runtime/protocol changes, not for prompt or product-policy tweaks.

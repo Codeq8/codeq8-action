@@ -8,6 +8,7 @@
   "required_paths": [
     "/api/github/workspace-git-token",
     "/api/chat/runs/callback",
+    "/api/chat/runs/diagnostic",
     "/api/chat/runs/runtime-manifest",
     "/api/chat/runs/prompt",
     "/web-chat/attachments/get",

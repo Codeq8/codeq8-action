@@ -9,10 +9,13 @@ import test from "node:test";
 import {
   assertWebChatRunnerRuntimeCompatibility,
   applyCodexNodeOptions,
+  appendWebChatRunMarkerToPrompt,
   buildFirebaseStorageDownloadUrl,
   buildFinalWorkspaceStateCallbackPayload,
   buildCodexPrompt,
   buildResumePrompt,
+  buildWebChatRunMarker,
+  buildWebChatRunnerDiagnosticRequest,
   buildUploadedCodexSessionStoredValue,
   configureWorkspaceGitCredentialHelper,
   configureWorkspacePushPolicy,
@@ -26,6 +29,7 @@ import {
   isSupersededWebChatRunError,
   materializeWebChatAttachments,
   normalizeAttachmentRecord,
+  postWebChatRunnerDiagnostic,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
   prepareGitHubCliAuth,
@@ -36,6 +40,7 @@ import {
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
   runCodex,
+  sessionContainsWebChatRunMarker,
   shouldContinueAfterCodexSessionPersistenceFailure,
   shouldStopBeforeCodexForRunCallbackPayload,
   shouldTreatCodexFailureAsCompleted,
@@ -49,6 +54,106 @@ const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
 
 test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
   assert.equal(DEFAULT_TIMEOUT_SECONDS, 72 * 60 * 60);
+});
+
+test("web chat run markers prove captured Codex sessions contain the current run", () => {
+  const marker = buildWebChatRunMarker({
+    threadId: "wct_123",
+    runId: "wcr_456",
+  });
+  const otherMarker = buildWebChatRunMarker({
+    threadId: "wct_123",
+    runId: "wcr_789",
+  });
+  const prompt = appendWebChatRunMarkerToPrompt({
+    prompt: "Fix the failing runner.",
+    marker,
+  });
+
+  assert.match(marker, /^codeq8-run-marker:v1:[0-9a-f]{16}$/);
+  assert.match(prompt, /do not mention in the reply/);
+  assert.equal(
+    sessionContainsWebChatRunMarker({
+      sessionFileContents: prompt,
+      marker,
+    }),
+    true,
+  );
+  assert.equal(
+    sessionContainsWebChatRunMarker({
+      sessionFileContents: prompt,
+      marker: otherMarker,
+    }),
+    false,
+  );
+});
+
+test("runner diagnostic requests redact secrets before posting", async () => {
+  const diagnostic = buildWebChatRunnerDiagnosticRequest({
+    event: "runner_session_marker_missing",
+    failureClass: "runner_session_marker_missing",
+    severity: "warning",
+    ok: false,
+    mode: "resume",
+    workspaceRepository: "Codeq8/Codeq8",
+    threadId: "wct_123",
+    runId: "wcr_456",
+    messageId: "wcm_789",
+    details: {
+      authorization: "Bearer header.payload.signature",
+      github_token: "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+      nested: {
+        password: "super-secret",
+        message: "safe context",
+      },
+    },
+  });
+
+  assert.equal(diagnostic.source, "web_chat_runner_diagnostic");
+  assert.equal(diagnostic.failure_class, "runner_session_marker_missing");
+  assert.equal(diagnostic.ok, false);
+  assert.equal(diagnostic.details.authorization, "[redacted]");
+  assert.equal(diagnostic.details.github_token, "[redacted]");
+  assert.equal(diagnostic.details.nested.password, "[redacted]");
+  assert.equal(diagnostic.details.nested.message, "safe context");
+
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({
+      url: String(url),
+      method: init?.method || "GET",
+      authorization: String(init?.headers?.Authorization || ""),
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    return Response.json(
+      {
+        ok: true,
+        report: {
+          ok: true,
+          status: 202,
+        },
+      },
+      { status: 202 },
+    );
+  };
+
+  try {
+    const result = await postWebChatRunnerDiagnostic({
+      publicBaseUrl: "https://codeq8.example.com",
+      webChatRunToken: "header.payload.signature",
+      diagnostic,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.url, "https://codeq8.example.com/api/chat/runs/diagnostic");
+    assert.equal(calls[0]?.method, "POST");
+    assert.equal(calls[0]?.authorization, "Bearer header.payload.signature");
+    assert.equal(calls[0]?.body?.details?.authorization, "[redacted]");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("applyCodexNodeOptions maps dedicated Codex preloads onto the Codex child env", () => {
@@ -578,6 +683,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/web-chat/threads/get",
       ],
       scoped_authorized_paths: [
+        "/api/chat/runs/diagnostic",
         "/web-chat/attachments/read-url",
         "/web-chat/codex-session/upload-direct",
       ],
@@ -641,7 +747,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
           threadId: "wct_123",
           runId: "wcr_123",
         }),
-      /missing authorized paths: \/web-chat\/attachments\/read-url, \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload-direct, \/web-chat\/codex-session\/upload-discard/,
+      /missing authorized paths: \/api\/chat\/runs\/diagnostic, \/web-chat\/attachments\/read-url, \/web-chat\/codex-session\/upload-prepare, \/web-chat\/codex-session\/upload-direct, \/web-chat\/codex-session\/upload-discard/,
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -1900,6 +2006,7 @@ test("prepare/upload/discard codex session bundle calls the staged worker routes
 test("persistCapturedCodexSessionBundleWithRetries accepts duplicate same-run revision conflicts", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
+  const diagnostics = [];
   const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-home-"));
   const sessionFileRelativePath =
     "sessions/2026/05/02/rollout-2026-05-02T01-06-49-019dd643-e3ec-76e1-952c-3dc25053e8c3.jsonl";
@@ -1972,6 +2079,14 @@ test("persistCapturedCodexSessionBundleWithRetries accepts duplicate same-run re
       model: "gpt-5.5",
       targetSignature: "target",
       expectedBundleRevision: 161,
+      expectedRunMarker: buildWebChatRunMarker({
+        threadId: "wct_123",
+        runId: "wcr_duplicate",
+      }),
+      reportRunnerDiagnostic: async (diagnostic) => {
+        diagnostics.push(diagnostic);
+        return { ok: true };
+      },
     });
 
     assert.equal(state.status, "ready");
@@ -1980,6 +2095,21 @@ test("persistCapturedCodexSessionBundleWithRetries accepts duplicate same-run re
     assert.deepEqual(
       calls.map((call) => call.path),
       ["/web-chat/codex-session/upload-prepare", "/web-chat/codex-session/get"],
+    );
+    assert.equal(
+      diagnostics.some(
+        (diagnostic) =>
+          diagnostic.failureClass === "runner_session_capture_marker_missing" ||
+          diagnostic.failure_class === "runner_session_capture_marker_missing",
+      ),
+      true,
+    );
+    assert.equal(
+      diagnostics.some(
+        (diagnostic) =>
+          diagnostic.event === "runner_session_revision_conflict_accepted",
+      ),
+      true,
     );
   } finally {
     globalThis.fetch = originalFetch;
