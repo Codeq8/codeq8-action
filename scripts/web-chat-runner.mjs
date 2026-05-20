@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { createSign, webcrypto } from "node:crypto";
+import { createHash, createSign, webcrypto } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -32,10 +32,12 @@ import {
 import {
   WEB_CHAT_RUNNER_CODEQ8_FILE_PATH,
   WEB_CHAT_RUNNER_CODEQ8_FILE_SAVE_PATH,
+  WEB_CHAT_RUNNER_DIAGNOSTIC_PATH,
   supportsServerOwnedCodeq8FileSync,
   supportsServerOwnedDiscordDmChat,
   webChatRunnerCodeq8FileResponseSchema,
   webChatRunnerCodeq8FileSaveResponseSchema,
+  webChatRunnerDiagnosticResponseSchema,
   webChatRunnerPromptResponseSchema,
   webChatRunnerRuntimeManifestResponseSchema,
 } from "../lib/web-chat-runner-runtime-contract.mjs";
@@ -50,7 +52,12 @@ const MAX_OUTPUT_CHARS = 120000;
 const MAX_REFERENCED_THREAD_MESSAGES = 8;
 const MAX_THREAD_TARGET_RESTARTS = 2;
 const MAX_CODEX_RESUME_RECOVERY_ATTEMPTS = 1;
+const MAX_RUNNER_DIAGNOSTIC_DETAIL_KEYS = 32;
+const MAX_RUNNER_DIAGNOSTIC_STRING_CHARS = 2000;
 const CODEX_AUTH_PRECHECK_TIMEOUT_SECONDS = 45;
+const WEB_CHAT_RUNNER_DIAGNOSTIC_SOURCE = "web_chat_runner_diagnostic";
+const WEB_CHAT_RUN_MARKER_VERSION = "v1";
+const WEB_CHAT_RUN_MARKER_PREFIX = "codeq8-run-marker";
 const CODEX_SESSION_COMPACTION_TYPES = new Set([
   "compaction",
   "context_compacted",
@@ -218,6 +225,155 @@ function normalizeRunId(value) {
     return "";
   }
   return normalized;
+}
+
+function hashDiagnosticValue(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return "";
+  }
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+function redactDiagnosticText(value) {
+  return String(value ?? "")
+    .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, "[redacted_github_token]")
+    .replace(/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b/g, "[redacted_jwt]")
+    .replace(/(authorization\s*:\s*bearer\s+)[^\s]+/gi, "$1[redacted]")
+    .replace(/(bearer\s+)[A-Za-z0-9._-]{20,}/gi, "$1[redacted]")
+    .replace(/(token|secret|password|private[_-]?key|credential)=([^&\s]+)/gi, "$1=[redacted]")
+    .replace(/https:\/\/[^:@/\s]+:[^@/\s]+@github\.com/gi, "https://[redacted]@github.com");
+}
+
+function truncateDiagnosticString(value) {
+  const redacted = redactDiagnosticText(value);
+  if (redacted.length <= MAX_RUNNER_DIAGNOSTIC_STRING_CHARS) {
+    return redacted;
+  }
+  return `${redacted.slice(0, MAX_RUNNER_DIAGNOSTIC_STRING_CHARS)}...[truncated ${redacted.length - MAX_RUNNER_DIAGNOSTIC_STRING_CHARS} chars]`;
+}
+
+function sanitizeDiagnosticDetailValue(value, depth = 0) {
+  if (value == null) {
+    return null;
+  }
+  if (typeof value === "string") {
+    return truncateDiagnosticString(value);
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : String(value);
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    if (depth >= 2) {
+      return "[max_depth]";
+    }
+    return value.slice(0, 24).map((entry) => sanitizeDiagnosticDetailValue(entry, depth + 1));
+  }
+  if (typeof value === "object") {
+    if (depth >= 2) {
+      return "[max_depth]";
+    }
+    const output = {};
+    for (const [key, entry] of Object.entries(value).slice(0, MAX_RUNNER_DIAGNOSTIC_DETAIL_KEYS)) {
+      const normalizedKey = normalizeText(key);
+      if (!normalizedKey) {
+        continue;
+      }
+      output[normalizedKey] = /authorization|cookie|token|secret|password|private[_-]?key|credential/i.test(
+        normalizedKey,
+      )
+        ? "[redacted]"
+        : sanitizeDiagnosticDetailValue(entry, depth + 1);
+    }
+    return output;
+  }
+  return truncateDiagnosticString(String(value));
+}
+
+function sanitizeDiagnosticDetails(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const output = {};
+  for (const [key, entry] of Object.entries(value).slice(0, MAX_RUNNER_DIAGNOSTIC_DETAIL_KEYS)) {
+    const normalizedKey = normalizeText(key);
+    if (!normalizedKey) {
+      continue;
+    }
+    output[normalizedKey] = /authorization|cookie|token|secret|password|private[_-]?key|credential/i.test(
+      normalizedKey,
+    )
+      ? "[redacted]"
+      : sanitizeDiagnosticDetailValue(entry, 0);
+  }
+  return output;
+}
+
+function normalizeRunnerDiagnosticMode(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  return normalized === "fresh" || normalized === "resume" ? normalized : "unknown";
+}
+
+function normalizeRunnerDiagnosticSeverity(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  return normalized === "warning" || normalized === "error" || normalized === "trace"
+    ? normalized
+    : "trace";
+}
+
+function buildWebChatRunMarker({ threadId, runId }) {
+  const normalizedThreadId = normalizeThreadId(threadId) || normalizeText(threadId);
+  const normalizedRunId = normalizeRunId(runId) || normalizeText(runId);
+  if (!normalizedThreadId || !normalizedRunId) {
+    return "";
+  }
+  return `${WEB_CHAT_RUN_MARKER_PREFIX}:${WEB_CHAT_RUN_MARKER_VERSION}:${hashDiagnosticValue(
+    `${normalizedThreadId}:${normalizedRunId}:${WEB_CHAT_RUN_MARKER_VERSION}`,
+  )}`;
+}
+
+function appendWebChatRunMarkerToPrompt({ prompt, marker }) {
+  const normalizedPrompt = normalizeText(prompt);
+  const normalizedMarker = normalizeText(marker);
+  if (!normalizedPrompt || !normalizedMarker) {
+    return normalizedPrompt;
+  }
+  return [
+    normalizedPrompt,
+    "",
+    `Codeq8 runner integrity marker (do not mention in the reply): ${normalizedMarker}`,
+  ].join("\n");
+}
+
+function sessionContainsWebChatRunMarker({ sessionFileContents, marker }) {
+  const normalizedMarker = normalizeText(marker);
+  return Boolean(normalizedMarker && String(sessionFileContents || "").includes(normalizedMarker));
+}
+
+function summarizeCodexSessionStateForDiagnostic(value) {
+  const state = normalizeCodexSessionState(value);
+  return {
+    status: state.status,
+    session_id_hash: hashDiagnosticValue(state.session_id),
+    session_file_relative_path_hash: hashDiagnosticValue(state.session_file_relative_path),
+    has_bundle_storage_key: Boolean(state.bundle_storage_key),
+    storage_backend: state.storage_backend,
+    bundle_revision: state.bundle_revision,
+    bundle_size_bytes: state.bundle_size_bytes,
+    bundle_compressed_size_bytes: state.bundle_compressed_size_bytes,
+    target_signature_hash: hashDiagnosticValue(state.target_signature),
+    cli_version: state.cli_version,
+    model: state.model,
+    last_run_id: state.last_run_id,
+    last_uploaded_at: state.last_uploaded_at,
+    last_resumed_at: state.last_resumed_at,
+    last_compaction_observed_at: state.last_compaction_observed_at,
+    has_last_error: Boolean(state.last_error),
+    ...(state.last_error ? { last_error: truncateDiagnosticString(state.last_error) } : {}),
+  };
 }
 
 function toBase64Url(bytes) {
@@ -1383,6 +1539,140 @@ async function requestWebChatRunnerRuntimeJson({
     throw new Error(`${normalizeText(responseLabel) || "Codeq8 runner runtime response"} is invalid.`);
   }
   return parsed.data;
+}
+
+function buildWebChatRunnerDiagnosticRequest({
+  event,
+  failureClass = "",
+  severity = "trace",
+  ok = true,
+  mode = "unknown",
+  workspaceRepository = "",
+  threadId = "",
+  runId = "",
+  messageId = "",
+  details = {},
+}) {
+  const normalizedEvent = normalizeText(event);
+  return {
+    source: WEB_CHAT_RUNNER_DIAGNOSTIC_SOURCE,
+    event: normalizedEvent,
+    failure_class: normalizeText(failureClass) || normalizedEvent,
+    severity: normalizeRunnerDiagnosticSeverity(severity),
+    ok: Boolean(ok),
+    workspace_repository: normalizeText(workspaceRepository),
+    thread_id: normalizeText(threadId),
+    run_id: normalizeText(runId),
+    message_id: normalizeText(messageId),
+    mode: normalizeRunnerDiagnosticMode(mode),
+    details: sanitizeDiagnosticDetails(details),
+  };
+}
+
+async function postWebChatRunnerDiagnostic({
+  publicBaseUrl,
+  webChatRunToken,
+  diagnostic,
+}) {
+  const normalizedToken = normalizeText(webChatRunToken);
+  if (!normalizedToken || normalizedToken.split(".").length !== 3) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "missing_scoped_run_token",
+      status: 0,
+    };
+  }
+
+  const response = await fetchJson(
+    new URL(WEB_CHAT_RUNNER_DIAGNOSTIC_PATH, normalizeCodePublicBaseUrl(publicBaseUrl)).toString(),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${normalizedToken}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(diagnostic),
+    },
+  );
+  const parsed = webChatRunnerDiagnosticResponseSchema.safeParse(response.payload);
+  const payload = parsed.success ? parsed.data : response.payload;
+  return {
+    ok: response.ok && payload.ok !== false,
+    skipped: Boolean(payload.report?.skipped),
+    reason: normalizeText(payload.report?.reason),
+    error: normalizeText(payload.report?.error || payload.error || payload.message),
+    status: response.status || Number(payload.report?.status || 0) || 0,
+  };
+}
+
+function createWebChatRunnerDiagnosticReporter({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  messageId,
+}) {
+  return async function reportWebChatRunnerDiagnostic(input = {}) {
+    const diagnostic = buildWebChatRunnerDiagnosticRequest({
+      ...normalizeObject(input),
+      workspaceRepository,
+      threadId,
+      runId,
+      messageId,
+    });
+    if (!diagnostic.event || !diagnostic.workspace_repository || !diagnostic.thread_id || !diagnostic.run_id) {
+      return {
+        ok: false,
+        skipped: true,
+        reason: "invalid_diagnostic_context",
+        status: 0,
+      };
+    }
+    try {
+      const result = await postWebChatRunnerDiagnostic({
+        publicBaseUrl,
+        webChatRunToken,
+        diagnostic,
+      });
+      if (!result.ok && !result.skipped) {
+        log(
+          "WARN",
+          "Runner diagnostic reporting failed",
+          `event=${diagnostic.event} status=${result.status} reason=${truncateDiagnosticString(
+            result.error || result.reason || "unknown",
+          )}`,
+        );
+      }
+      return result;
+    } catch (error) {
+      log(
+        "WARN",
+        "Runner diagnostic reporting failed",
+        `event=${diagnostic.event} reason=${truncateDiagnosticString(extractErrorMessage(error))}`,
+      );
+      return {
+        ok: false,
+        skipped: false,
+        reason: "request_failed",
+        error: extractErrorMessage(error),
+        status: 0,
+      };
+    }
+  };
+}
+
+async function maybeReportRunnerDiagnostic(reportRunnerDiagnostic, diagnostic) {
+  if (typeof reportRunnerDiagnostic !== "function") {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "diagnostic_reporter_missing",
+      status: 0,
+    };
+  }
+  return reportRunnerDiagnostic(diagnostic);
 }
 
 async function requestWebChatRunnerRuntimeManifest({
@@ -3748,7 +4038,9 @@ async function loadCodexSessionStateForExecution({
   workerUrl,
   adminToken,
   threadId,
+  runId = "",
   thread,
+  reportRunnerDiagnostic = null,
   retries = 2,
   retryDelayMs = 750,
 }) {
@@ -3756,6 +4048,16 @@ async function loadCodexSessionStateForExecution({
     normalizeObject(thread).codex_session_state || null,
   );
   const expectedBundleRevision = persistedCodexSessionState.bundle_revision || 0;
+  await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+    event: "runner_session_state_load_started",
+    mode: persistedCodexSessionState.status === "ready" ? "resume" : "fresh",
+    details: {
+      persisted_session_state: summarizeCodexSessionStateForDiagnostic(
+        persistedCodexSessionState,
+      ),
+      expected_bundle_revision: expectedBundleRevision,
+    },
+  });
 
   try {
     const loadedCodexSession = await loadWebChatCodexSessionState({
@@ -3788,6 +4090,22 @@ async function loadCodexSessionStateForExecution({
         );
       }
     }
+    await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+      event: "runner_session_state_load_finished",
+      mode: resolvedCodexSessionState.status === "ready" ? "resume" : "fresh",
+      details: {
+        resolved_session_state: summarizeCodexSessionStateForDiagnostic(
+          resolvedCodexSessionState,
+        ),
+        expected_bundle_revision:
+          resolvedCodexSessionState.bundle_revision || expectedBundleRevision,
+        session_file_contents_bytes: Buffer.byteLength(
+          String(loadedCodexSession.sessionFileContents || ""),
+          "utf8",
+        ),
+        can_resume: resolvedCodexSessionState.status === "ready",
+      },
+    });
     return {
       loadedCodexSession,
       codexSessionState: resolvedCodexSessionState,
@@ -3813,6 +4131,22 @@ async function loadCodexSessionStateForExecution({
           continuityWarning,
           `thread_id=${normalizeText(threadId)} worker=${normalizeBaseUrl(workerUrl)}`,
         );
+        await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+          event: "runner_session_state_invalidated",
+          failureClass: "runner_session_state_invalidated",
+          severity: "warning",
+          ok: false,
+          mode: "fresh",
+          details: {
+            reason: message,
+            previous_session_state: summarizeCodexSessionStateForDiagnostic(
+              persistedCodexSessionState,
+            ),
+            invalidated_session_state: summarizeCodexSessionStateForDiagnostic(
+              invalidatedState,
+            ),
+          },
+        });
         return {
           loadedCodexSession: {
             thread: normalizeObject(invalidated.thread || thread),
@@ -3844,6 +4178,23 @@ async function loadCodexSessionStateForExecution({
     const freshCodexSessionState = buildFreshStartCodexSessionState(
       persistedCodexSessionState,
     );
+    await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+      event: "runner_session_recovery_fallback_used",
+      failureClass: "runner_session_recovery_fallback_used",
+      severity: "warning",
+      ok: false,
+      mode: "fresh",
+      details: {
+        run_id: normalizeText(runId),
+        reason: message,
+        previous_session_state: summarizeCodexSessionStateForDiagnostic(
+          persistedCodexSessionState,
+        ),
+        fallback_session_state: summarizeCodexSessionStateForDiagnostic(
+          freshCodexSessionState,
+        ),
+      },
+    });
     return {
       loadedCodexSession: {
         thread: normalizeObject(thread),
@@ -4003,18 +4354,81 @@ async function persistCapturedCodexSessionBundle({
   model,
   targetSignature,
   expectedBundleRevision = null,
+  sessionFileSnapshot = null,
+  runStartedAt = 0,
   lastResumedAt = 0,
+  mode = "unknown",
+  expectedRunMarker = "",
+  reportRunnerDiagnostic = null,
 }) {
+  await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+    event: "runner_session_capture_started",
+    mode,
+    details: {
+      existing_session_state: summarizeCodexSessionStateForDiagnostic(
+        existingSessionState,
+      ),
+      expected_bundle_revision: expectedBundleRevision,
+      target_signature_hash: hashDiagnosticValue(targetSignature),
+      has_expected_run_marker: Boolean(normalizeText(expectedRunMarker)),
+    },
+  });
   const capturedSessionBundle = await captureCodexSessionBundle({
     codexHome,
     existingSessionState,
     model,
+    sessionFileSnapshot,
+    runStartedAt,
+  });
+  const markerPresent = sessionContainsWebChatRunMarker({
+    sessionFileContents: capturedSessionBundle.sessionFileContents,
+    marker: expectedRunMarker,
+  });
+  await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+    event: "runner_session_capture_finished",
+    failureClass:
+      expectedRunMarker && !markerPresent
+        ? "runner_session_capture_marker_missing"
+        : "runner_session_capture_finished",
+    severity: expectedRunMarker && !markerPresent ? "warning" : "trace",
+    ok: !expectedRunMarker || markerPresent,
+    mode,
+    details: {
+      session_id_hash: hashDiagnosticValue(capturedSessionBundle.sessionId),
+      session_file_relative_path_hash: hashDiagnosticValue(
+        capturedSessionBundle.sessionFileRelativePath,
+      ),
+      cli_version: capturedSessionBundle.cliVersion,
+      model: capturedSessionBundle.model || model,
+      session_file_contents_bytes: Buffer.byteLength(
+        String(capturedSessionBundle.sessionFileContents || ""),
+        "utf8",
+      ),
+      marker_present: markerPresent,
+      marker_hash: hashDiagnosticValue(expectedRunMarker),
+    },
   });
   const uploadPreparation = await prepareWebChatCodexSessionUpload({
     workerUrl,
     adminToken,
     threadId,
     expectedBundleRevision,
+  });
+  await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+    event: "runner_session_upload_prepared",
+    mode,
+    details: {
+      expected_bundle_revision:
+        uploadPreparation.uploadPreparation.expectedBundleRevision,
+      next_bundle_revision: uploadPreparation.uploadPreparation.nextBundleRevision,
+      storage_backend: uploadPreparation.uploadPreparation.storageBackend,
+      storage_bucket_hash: hashDiagnosticValue(
+        uploadPreparation.uploadPreparation.storageBucket,
+      ),
+      storage_key_hash: hashDiagnosticValue(
+        uploadPreparation.uploadPreparation.storageKey,
+      ),
+    },
   });
   const preparedBundle = await buildUploadedCodexSessionStoredValue({
     threadId,
@@ -4032,6 +4446,21 @@ async function persistCapturedCodexSessionBundle({
     storageBucket: uploadPreparation.uploadPreparation.storageBucket,
     storageBackend: uploadPreparation.uploadPreparation.storageBackend,
     storedValue: preparedBundle.storedValue,
+  });
+  await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+    event: "runner_session_upload_finished",
+    mode,
+    details: {
+      storage_backend: uploadPreparation.uploadPreparation.storageBackend,
+      storage_bucket_hash: hashDiagnosticValue(
+        uploadPreparation.uploadPreparation.storageBucket,
+      ),
+      storage_key_hash: hashDiagnosticValue(
+        uploadPreparation.uploadPreparation.storageKey,
+      ),
+      bundle_size_bytes: preparedBundle.bundleSizeBytes,
+      bundle_compressed_size_bytes: preparedBundle.bundleCompressedSizeBytes,
+    },
   });
 
   let persistedSession;
@@ -4059,6 +4488,16 @@ async function persistCapturedCodexSessionBundle({
       expectedBundleRevision,
       status: "ready",
     });
+    await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+      event: "runner_session_upsert_finished",
+      mode,
+      details: {
+        persisted_session_state: summarizeCodexSessionStateForDiagnostic(
+          persistedSession.codexSessionState,
+        ),
+        expected_bundle_revision: expectedBundleRevision,
+      },
+    });
   } catch (error) {
     try {
       await discardPreparedWebChatCodexSessionBundle({
@@ -4077,6 +4516,24 @@ async function persistCapturedCodexSessionBundle({
         }`,
       );
     }
+    await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+      event: "runner_session_upsert_failed",
+      failureClass: "runner_session_upsert_failed",
+      severity: "error",
+      ok: false,
+      mode,
+      details: {
+        error: extractErrorMessage(error),
+        storage_backend: uploadPreparation.uploadPreparation.storageBackend,
+        storage_bucket_hash: hashDiagnosticValue(
+          uploadPreparation.uploadPreparation.storageBucket,
+        ),
+        storage_key_hash: hashDiagnosticValue(
+          uploadPreparation.uploadPreparation.storageKey,
+        ),
+        expected_bundle_revision: expectedBundleRevision,
+      },
+    });
     throw error;
   }
   return persistedSession.codexSessionState;
@@ -4095,6 +4552,9 @@ async function persistCapturedCodexSessionBundleWithRetries({
   sessionFileSnapshot = null,
   runStartedAt = 0,
   lastResumedAt = 0,
+  mode = "unknown",
+  expectedRunMarker = "",
+  reportRunnerDiagnostic = null,
   attempts = 3,
   retryDelayMs = 750,
 }) {
@@ -4116,10 +4576,30 @@ async function persistCapturedCodexSessionBundleWithRetries({
         sessionFileSnapshot,
         runStartedAt,
         lastResumedAt,
+        mode,
+        expectedRunMarker,
+        reportRunnerDiagnostic,
       });
     } catch (error) {
       lastError = error;
       const message = extractErrorMessage(error);
+      await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+        event: "runner_session_persistence_attempt_failed",
+        failureClass: isCodexSessionRevisionConflictError(message)
+          ? "runner_session_revision_conflict"
+          : "runner_session_persistence_attempt_failed",
+        severity: "warning",
+        ok: false,
+        mode,
+        details: {
+          attempt,
+          attempts: normalizedAttempts,
+          retryable:
+            attempt < normalizedAttempts && isRetryableCodexSessionPersistenceError(message),
+          error: message,
+          expected_bundle_revision: expectedBundleRevision,
+        },
+      });
       if (isCodexSessionRevisionConflictError(message)) {
         try {
           const latestCodexSession = await readWebChatCodexSessionState({
@@ -4137,6 +4617,19 @@ async function persistCapturedCodexSessionBundleWithRetries({
               "Using already-persisted Codex session state after duplicate run revision conflict",
               `thread_id=${normalizeText(threadId)} run_id=${normalizeText(runId)} revision=${latestCodexSessionState.bundle_revision}`,
             );
+            await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+              event: "runner_session_revision_conflict_accepted",
+              failureClass: "runner_session_revision_conflict_accepted",
+              severity: "warning",
+              ok: true,
+              mode,
+              details: {
+                latest_session_state: summarizeCodexSessionStateForDiagnostic(
+                  latestCodexSessionState,
+                ),
+                expected_bundle_revision: expectedBundleRevision,
+              },
+            });
             return latestCodexSessionState;
           }
         } catch (readError) {
@@ -6196,13 +6689,53 @@ async function main() {
   );
 
   const webChatRunToken = resolveWebChatRunToken(commandEnv);
-  const runtimeManifest = await assertWebChatRunnerRuntimeCompatibility({
+  const reportRunnerDiagnostic = createWebChatRunnerDiagnosticReporter({
     publicBaseUrl,
     webChatRunToken,
     workspaceRepository,
     threadId,
     runId,
+    messageId,
   });
+  let runtimeManifest;
+  try {
+    runtimeManifest = await assertWebChatRunnerRuntimeCompatibility({
+      publicBaseUrl,
+      webChatRunToken,
+      workspaceRepository,
+      threadId,
+      runId,
+    });
+    await reportRunnerDiagnostic({
+      event: "runner_runtime_manifest_validated",
+      details: {
+        contract_version: normalizeText(runtimeManifest.contract_version),
+        capabilities_count: Array.isArray(runtimeManifest.capabilities)
+          ? runtimeManifest.capabilities.length
+          : 0,
+        authorized_paths_count: Array.isArray(runtimeManifest.authorized_paths)
+          ? runtimeManifest.authorized_paths.length
+          : 0,
+        scoped_authorized_paths_count: Array.isArray(runtimeManifest.scoped_authorized_paths)
+          ? runtimeManifest.scoped_authorized_paths.length
+          : 0,
+        runner_required_paths_count: Array.isArray(runtimeManifest.runner_required_paths)
+          ? runtimeManifest.runner_required_paths.length
+          : 0,
+      },
+    });
+  } catch (error) {
+    await reportRunnerDiagnostic({
+      event: "runner_runtime_manifest_validation_failed",
+      failureClass: "runner_runtime_manifest_validation_failed",
+      severity: "error",
+      ok: false,
+      details: {
+        error: extractErrorMessage(error),
+      },
+    });
+    throw error;
+  }
   log(
     "Validated Codeq8 runner runtime manifest",
     `contract=${normalizeText(runtimeManifest.contract_version)} capabilities=${Array.isArray(runtimeManifest.capabilities) ? runtimeManifest.capabilities.length : 0} authorized_paths=${Array.isArray(runtimeManifest.authorized_paths) ? runtimeManifest.authorized_paths.length : 0}`,
@@ -6446,7 +6979,9 @@ async function main() {
             workerUrl,
             adminToken,
             threadId,
+            runId,
             thread,
+            reportRunnerDiagnostic,
           });
           let loadedCodexSession = loadedCodexSessionResult.loadedCodexSession;
           codexSessionState = loadedCodexSessionResult.codexSessionState;
@@ -6498,11 +7033,6 @@ async function main() {
                 "Codex session state is marked ready but no session bundle was stored.",
               );
             }
-            await restoreCodexSessionBundle({
-              codexHome: attemptRunRuntime.codexHome,
-              sessionFileRelativePath: codexSessionState.session_file_relative_path,
-              sessionFileContents: loadedCodexSession.sessionFileContents,
-            });
             executionMode = "resume";
             resumeAttemptedAt = Date.now();
             resumeTargetShift =
@@ -6511,6 +7041,69 @@ async function main() {
                 normalizeText(codexSessionState.target_signature) &&
                 normalizeText(codexSessionState.target_signature) !== currentTargetSignature
               );
+            const previousRunMarker = buildWebChatRunMarker({
+              threadId,
+              runId: codexSessionState.last_run_id,
+            });
+            const previousRunMarkerPresent = sessionContainsWebChatRunMarker({
+              sessionFileContents: loadedCodexSession.sessionFileContents,
+              marker: previousRunMarker,
+            });
+            await reportRunnerDiagnostic({
+              event: "runner_resume_selected",
+              mode: "resume",
+              details: {
+                session_state: summarizeCodexSessionStateForDiagnostic(codexSessionState),
+                target_signature_hash: hashDiagnosticValue(currentTargetSignature),
+                target_shift: resumeTargetShift,
+                previous_run_marker_hash: hashDiagnosticValue(previousRunMarker),
+                previous_run_marker_present: previousRunMarkerPresent,
+                previous_run_marker_action:
+                  previousRunMarker && !previousRunMarkerPresent ? "report_only" : "none",
+                session_file_contents_bytes: Buffer.byteLength(
+                  String(loadedCodexSession.sessionFileContents || ""),
+                  "utf8",
+                ),
+              },
+            });
+            if (previousRunMarker && !previousRunMarkerPresent) {
+              await reportRunnerDiagnostic({
+                event: "runner_session_marker_missing",
+                failureClass: "runner_session_marker_missing",
+                severity: "warning",
+                ok: false,
+                mode: "resume",
+                details: {
+                  expected_last_run_id: codexSessionState.last_run_id,
+                  marker_hash: hashDiagnosticValue(previousRunMarker),
+                  bundle_revision: codexSessionState.bundle_revision,
+                  action: "report_only",
+                },
+              });
+            }
+            await reportRunnerDiagnostic({
+              event: "runner_session_restore_started",
+              mode: "resume",
+              details: {
+                session_state: summarizeCodexSessionStateForDiagnostic(codexSessionState),
+                session_file_contents_bytes: Buffer.byteLength(
+                  String(loadedCodexSession.sessionFileContents || ""),
+                  "utf8",
+                ),
+              },
+            });
+            await restoreCodexSessionBundle({
+              codexHome: attemptRunRuntime.codexHome,
+              sessionFileRelativePath: codexSessionState.session_file_relative_path,
+              sessionFileContents: loadedCodexSession.sessionFileContents,
+            });
+            await reportRunnerDiagnostic({
+              event: "runner_session_restore_finished",
+              mode: "resume",
+              details: {
+                session_state: summarizeCodexSessionStateForDiagnostic(codexSessionState),
+              },
+            });
             prompt = await buildResumePrompt({
               publicBaseUrl,
               webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
@@ -6572,8 +7165,37 @@ async function main() {
             lastResumedAt: resumeAttemptedAt,
             expectedBundleRevision,
           });
+          await reportRunnerDiagnostic({
+            event: "runner_prompt_setup_failed",
+            failureClass: "runner_prompt_setup_failed",
+            severity: "error",
+            ok: false,
+            mode: executionMode,
+            details: {
+              error: sessionMessage,
+              expected_bundle_revision: expectedBundleRevision,
+            },
+          });
           throw sessionError;
         }
+
+        const currentRunMarker = buildWebChatRunMarker({ threadId, runId });
+        prompt = appendWebChatRunMarkerToPrompt({
+          prompt,
+          marker: currentRunMarker,
+        });
+        await reportRunnerDiagnostic({
+          event: "runner_prompt_prepared",
+          mode: executionMode,
+          details: {
+            prompt_chars: prompt.length,
+            marker_hash: hashDiagnosticValue(currentRunMarker),
+            attachments_count: materializedAttachments.length,
+            referenced_threads_count: referencedThreads.length,
+            target_shift: resumeTargetShift,
+            thread_target_restart_count: threadTargetRestartCount,
+          },
+        });
 
         if (!startedAt) {
           startedAt = Date.now();
@@ -6623,6 +7245,17 @@ async function main() {
           "Starting web chat codex run",
           `repository=${activeWorkspaceRepository} branch=${preparedWorkspace.effectiveWriteBranch} model=${codexModel} mode=${executionMode} restart_count=${threadTargetRestartCount}`,
         );
+        await reportRunnerDiagnostic({
+          event: "runner_codex_command_started",
+          mode: executionMode,
+          details: {
+            repository: activeWorkspaceRepository,
+            branch: preparedWorkspace.effectiveWriteBranch,
+            model: codexModel,
+            session_state: summarizeCodexSessionStateForDiagnostic(codexSessionState),
+            thread_target_restart_count: threadTargetRestartCount,
+          },
+        });
 
         const execution = await runCodex({
           codexPath,
@@ -6634,6 +7267,24 @@ async function main() {
           mode: executionMode,
           sessionId: codexSessionState.session_id,
           outputFilePath: path.join(attemptRunRuntime.homePath, "last-message.txt"),
+        });
+        await reportRunnerDiagnostic({
+          event: "runner_codex_command_finished",
+          failureClass: execution.ok
+            ? "runner_codex_command_finished"
+            : "runner_codex_command_failed",
+          severity: execution.ok ? "trace" : "error",
+          ok: execution.ok,
+          mode: executionMode,
+          details: {
+            exit_code: execution.exitCode,
+            signal: execution.signal || "",
+            timed_out: execution.timedOut,
+            duration_ms: execution.durationMs,
+            output_chars: normalizeText(execution.output).length,
+            diagnostic_output_chars: normalizeText(execution.diagnosticOutput).length,
+            reason: execution.ok ? "" : execution.reason,
+          },
         });
         if (
           executionMode === "resume" &&
@@ -6657,6 +7308,20 @@ async function main() {
             adminToken,
             threadId,
             reason: resumeFailureMessage,
+          });
+          await reportRunnerDiagnostic({
+            event: "runner_resume_fallback_used",
+            failureClass: "runner_resume_fallback_used",
+            severity: "warning",
+            ok: false,
+            mode: "resume",
+            details: {
+              reason: resumeFailureMessage,
+              retry_count: codexResumeRecoveryCount,
+              invalidated_session_state: summarizeCodexSessionStateForDiagnostic(
+                invalidatedSession.codexSessionState,
+              ),
+            },
           });
           persistedCodexSessionState = invalidatedSession.codexSessionState;
           nonFatalCodexSessionLoadWarning =
@@ -6785,6 +7450,9 @@ async function main() {
                 executionMode === "resume"
                   ? resumeAttemptedAt || Date.now()
                   : persistedCodexSessionState.last_resumed_at,
+              mode: executionMode,
+              expectedRunMarker: currentRunMarker,
+              reportRunnerDiagnostic,
             });
             log(
               "Persisted Codex session bundle before retarget restart",
@@ -6857,6 +7525,9 @@ async function main() {
               executionMode === "resume"
                 ? resumeAttemptedAt || Date.now()
                 : persistedCodexSessionState.last_resumed_at,
+            mode: executionMode,
+            expectedRunMarker: currentRunMarker,
+            reportRunnerDiagnostic,
           });
           log(
             "Persisted Codex session bundle",
@@ -6876,6 +7547,20 @@ async function main() {
               1000,
             );
             persistedCodexSessionState = codexSessionState;
+            await reportRunnerDiagnostic({
+              event: "runner_session_persistence_failed_nonfatal",
+              failureClass: "runner_session_persistence_failed_nonfatal",
+              severity: "warning",
+              ok: false,
+              mode: executionMode,
+              details: {
+                error: sessionMessage,
+                fallback_session_state: summarizeCodexSessionStateForDiagnostic(
+                  persistedCodexSessionState,
+                ),
+                expected_bundle_revision: expectedBundleRevision,
+              },
+            });
             log(
               "WARN",
               "Continuing after transient Codex session persistence failure",
@@ -7098,6 +7783,29 @@ async function main() {
             }),
           },
         });
+        await reportRunnerDiagnostic({
+          event: "runner_run_finished",
+          failureClass: "runner_run_finished",
+          mode: executionMode,
+          details: {
+            status: "completed",
+            duration_ms: execution.durationMs,
+            exit_code: execution.exitCode,
+            signal: execution.signal || "",
+            timed_out: execution.timedOut,
+            recovered_transport_failure: recoveredTransportFailure,
+            persisted_session_state: summarizeCodexSessionStateForDiagnostic(
+              persistedCodexSessionState,
+            ),
+            resolved_write_branch:
+              persistenceResult.resolvedWriteBranch ||
+              preparedWorkspace.durableWriteBranch ||
+              "",
+            resolved_pull_request_number: resolvedPullRequestNumber,
+            has_resolved_pull_request_url: Boolean(resolvedPullRequestUrl),
+            thread_target_restart_count: threadTargetRestartCount,
+          },
+        });
         log(
           "Web chat runner completed successfully",
           `duration_ms=${execution.durationMs}`,
@@ -7121,6 +7829,24 @@ async function main() {
           commandEnv,
         }).catch(() => null)
       : null;
+    await reportRunnerDiagnostic({
+      event: "runner_run_finished",
+      failureClass: "runner_run_failed",
+      severity: "error",
+      ok: false,
+      mode: executionMode,
+      details: {
+        status: "failed",
+        error: message,
+        started: Boolean(startedAt),
+        persisted_session_state: summarizeCodexSessionStateForDiagnostic(
+          persistedCodexSessionState,
+        ),
+        final_workspace_state: failureFinalWorkspaceState || null,
+        thread_target_restart_count: threadTargetRestartCount,
+        nonfatal_session_warning: nonFatalCodexSessionLoadWarning,
+      },
+    });
 
     try {
       await postRunCallback({
@@ -7188,9 +7914,12 @@ export {
   applyRunControlPlaneContextToCallbackBody,
   applyWorkspaceGitToken,
   applyWorkspaceGitIdentity,
+  appendWebChatRunMarkerToPrompt,
   buildCodexPrompt,
   buildCodexRunMetadata,
   buildGitHubActionsControlPlaneUrl,
+  buildWebChatRunMarker,
+  buildWebChatRunnerDiagnosticRequest,
   buildResumePrompt,
   buildFinalWorkspaceStateCallbackPayload,
   buildUploadedCodexSessionStoredValue,
@@ -7228,6 +7957,7 @@ export {
   buildFirebaseStorageDownloadUrl,
   materializeWebChatAttachments,
   normalizeAttachmentRecord,
+  postWebChatRunnerDiagnostic,
   readFirebaseStorageAttachment,
   readFirebaseStorageSignedAttachment,
   readWebChatAttachment,
@@ -7252,6 +7982,7 @@ export {
   requireWebChatGitHubWriteToken,
   requireWebChatGitHubUserToken,
   runCodex,
+  sessionContainsWebChatRunMarker,
   assertWebChatRunnerRuntimeCompatibility,
   shouldLookUpPullRequest,
   shouldStopBeforeCodexForRunCallbackPayload,
