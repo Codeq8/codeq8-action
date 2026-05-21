@@ -6307,6 +6307,7 @@ async function runCodexAppServer({
     let appServerThreadId = "";
     let activeTurnId = "";
     let nextRequestId = 1;
+    let appServerTraceCount = 0;
     const pendingRequests = new Map();
     const progressReporter = createAppServerProgressReporter(appServerContext || {});
     let controlPoller = null;
@@ -6378,18 +6379,49 @@ async function runCodexAppServer({
     };
 
     const sendNotification = (method, params = {}) => {
+      if (method === "initialized") {
+        log("Codex app-server notification sent", "method=initialized");
+      }
       child.stdin?.write(`${JSON.stringify({ method, params })}\n`);
+    };
+
+    const describeAppServerRequestParams = (params = {}) => {
+      const normalizedParams = normalizeObject(params);
+      const sandboxPolicy = normalizeObject(normalizedParams.sandboxPolicy);
+      const input = Array.isArray(normalizedParams.input) ? normalizedParams.input : [];
+      return [
+        normalizedParams.approvalPolicy ? `approval_policy=${normalizeText(normalizedParams.approvalPolicy)}` : "",
+        normalizedParams.sandbox ? `sandbox=${normalizeText(normalizedParams.sandbox)}` : "",
+        sandboxPolicy.type ? `sandbox_policy=${normalizeText(sandboxPolicy.type)}` : "",
+        input.length ? `input_items=${input.length}` : "",
+        normalizedParams.threadId ? "has_thread_id=true" : "",
+        normalizedParams.cwd ? "has_cwd=true" : "",
+        normalizedParams.model ? "has_model=true" : "",
+      ].filter(Boolean).join(" ");
+    };
+
+    const logAppServerTrace = (message, details = "") => {
+      if (appServerTraceCount >= 80) {
+        return;
+      }
+      appServerTraceCount += 1;
+      log(message, details);
     };
 
     const sendRequest = (method, params = {}) => new Promise((requestResolve, requestReject) => {
       const id = nextRequestId;
       nextRequestId += 1;
+      logAppServerTrace(
+        "Codex app-server request sent",
+        `id=${id} method=${normalizeAppServerMethod(method)} ${describeAppServerRequestParams(params)}`.trim(),
+      );
       pendingRequests.set(id, { resolve: requestResolve, reject: requestReject, method });
       child.stdin?.write(`${JSON.stringify({ method, id, params })}\n`);
     });
 
     const handleNotification = (method, params) => {
       const normalizedMethod = normalizeAppServerMethod(method);
+      logAppServerTrace("Codex app-server notification received", `method=${normalizedMethod}`);
       const progressEvent = summarizeAppServerProgressNotification({
         method: normalizedMethod,
         params,
@@ -6441,10 +6473,34 @@ async function runCodexAppServer({
         if (pending) {
           pendingRequests.delete(id);
           if (object.error) {
+            logAppServerTrace(
+              "Codex app-server request failed",
+              `id=${id} method=${normalizeAppServerMethod(pending.method)} error=${truncate(extractErrorMessage(object.error), 300)}`,
+            );
             pending.reject(new Error(extractErrorMessage(object.error, `${pending.method} failed.`)));
           } else {
+            logAppServerTrace(
+              "Codex app-server request completed",
+              `id=${id} method=${normalizeAppServerMethod(pending.method)}`,
+            );
             pending.resolve(object.result || {});
           }
+          return;
+        }
+        if (object.method) {
+          logAppServerTrace(
+            "Codex app-server server request rejected",
+            `id=${id} method=${normalizeAppServerMethod(object.method)}`,
+          );
+          child.stdin?.write(
+            `${JSON.stringify({
+              id,
+              error: {
+                code: -32601,
+                message: "Codeq8 runner does not support server-initiated app-server requests.",
+              },
+            })}\n`,
+          );
         }
         return;
       }
