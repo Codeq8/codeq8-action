@@ -6019,7 +6019,22 @@ function createAppServerProgressReporter({
   let queued = [];
   let timer = null;
   let flushing = false;
+  let flushWaiters = [];
   let reportedEventCount = 0;
+
+  const waitForActiveFlush = () =>
+    new Promise((resolve) => {
+      flushWaiters.push(resolve);
+    });
+
+  const resolveFlushWaiters = () => {
+    const waiters = flushWaiters;
+    flushWaiters = [];
+    for (const resolve of waiters) {
+      resolve();
+    }
+  };
+
   const flush = async () => {
     if (flushing || queued.length === 0) {
       return;
@@ -6049,6 +6064,7 @@ function createAppServerProgressReporter({
       ).catch(() => null);
     } finally {
       flushing = false;
+      resolveFlushWaiters();
       if (queued.length > 0 && !timer) {
         timer = setTimeout(() => {
           timer = null;
@@ -6084,7 +6100,11 @@ function createAppServerProgressReporter({
         clearTimeout(timer);
         timer = null;
       }
-      while (queued.length > 0) {
+      while (queued.length > 0 || flushing) {
+        if (flushing) {
+          await waitForActiveFlush();
+          continue;
+        }
         await flush();
       }
     },
