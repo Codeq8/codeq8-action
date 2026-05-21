@@ -1146,6 +1146,55 @@ test("runCodex preserves AppServer agent delta whitespace", async (t) => {
   assert.equal(result.output, "Yes, I'm getting it. This run is targeting PR #1698.");
 });
 
+test("runCodex returns only the last AppServer agent message", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-agent-final-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_status', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_status', delta: 'I will inspect the screenshot.' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_status', type: 'agent_message', text: 'I will inspect the screenshot.' } } });",
+      "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: 'view_image' } } });",
+      "    send({ method: 'item/completed', params: { item: { type: 'command_execution', command: 'view_image' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_final', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_final', delta: 'The attachment is a tiny cropped screenshot.' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_final', type: 'agent_message', text: 'The attachment is a tiny cropped screenshot.' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "do not persist status text",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "The attachment is a tiny cropped screenshot.");
+});
+
 test("runCodex returns normal diagnostics for auth-like stderr", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-stderr-auth-text-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");

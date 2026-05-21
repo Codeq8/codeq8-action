@@ -5953,6 +5953,35 @@ function extractAppServerCompletedAgentText(params) {
   return extractAppServerTextPreservingWhitespace(item, ["text", "content", "message"]);
 }
 
+function extractAppServerItemId(params) {
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  return normalizeText(
+    item.id ||
+      item.itemId ||
+      item.item_id ||
+      object.itemId ||
+      object.item_id ||
+      object.id ||
+      object.messageId ||
+      object.message_id,
+  );
+}
+
+function isAppServerAgentMessageItem(params) {
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  const itemType = normalizeText(
+    item.type ||
+      item.kind ||
+      object.type ||
+      object.kind ||
+      object.itemType ||
+      object.item_type,
+  ).toLowerCase();
+  return /agent|assistant/.test(itemType);
+}
+
 function summarizeAppServerProgressNotification({ method, params, now = Date.now() }) {
   const normalizedMethod = normalizeAppServerMethod(method);
   const object = normalizeObject(params);
@@ -6357,7 +6386,10 @@ async function runCodexAppServer({
   return new Promise((resolve) => {
     const startMs = Date.now();
     let stderr = "";
-    let assistantOutput = "";
+    let currentAgentMessageItemId = "";
+    let currentAgentMessageOutput = "";
+    let lastAgentMessageOutput = "";
+    let agentMessageSequence = 0;
     let timedOut = false;
     let settled = false;
     let appServerThreadId = "";
@@ -6388,6 +6420,42 @@ async function runCodexAppServer({
         return target;
       }
       return truncate(`${target}${nextChunk}`, MAX_OUTPUT_CHARS * 2);
+    };
+
+    const getAssistantOutput = () => lastAgentMessageOutput || currentAgentMessageOutput;
+
+    const startAgentMessage = (params) => {
+      agentMessageSequence += 1;
+      const itemId = extractAppServerItemId(params) || `agent_message:${agentMessageSequence}`;
+      if (itemId !== currentAgentMessageItemId) {
+        currentAgentMessageItemId = itemId;
+        currentAgentMessageOutput = "";
+      }
+    };
+
+    const appendAgentMessageDelta = (params) => {
+      const itemId = extractAppServerItemId(params);
+      if (itemId && itemId !== currentAgentMessageItemId) {
+        currentAgentMessageItemId = itemId;
+        currentAgentMessageOutput = "";
+      }
+      currentAgentMessageOutput = appendOutput(
+        currentAgentMessageOutput,
+        extractAppServerAgentDelta(params),
+      );
+    };
+
+    const completeAgentMessage = (params) => {
+      const itemId = extractAppServerItemId(params);
+      const completedText = extractAppServerCompletedAgentText(params);
+      if (itemId && itemId !== currentAgentMessageItemId) {
+        currentAgentMessageItemId = itemId;
+        currentAgentMessageOutput = "";
+      }
+      const output = completedText || currentAgentMessageOutput;
+      if (output) {
+        lastAgentMessageOutput = truncate(output, MAX_OUTPUT_CHARS * 2);
+      }
     };
 
     const killChild = (signal) => {
@@ -6488,18 +6556,21 @@ async function runCodexAppServer({
       if (normalizedMethod === "turn/started") {
         activeTurnId = extractAppServerTurnId(params) || activeTurnId;
       }
-      if (normalizedMethod === "item/agentMessage/delta") {
-        assistantOutput = appendOutput(assistantOutput, extractAppServerAgentDelta(params));
+      if (normalizedMethod === "item/started" && isAppServerAgentMessageItem(params)) {
+        startAgentMessage(params);
       }
-      if (normalizedMethod === "item/completed" && !assistantOutput) {
-        assistantOutput = appendOutput(assistantOutput, extractAppServerCompletedAgentText(params));
+      if (normalizedMethod === "item/agentMessage/delta") {
+        appendAgentMessageDelta(params);
+      }
+      if (normalizedMethod === "item/completed" && isAppServerAgentMessageItem(params)) {
+        completeAgentMessage(params);
       }
       if (normalizedMethod === "turn/completed") {
         const status = extractAppServerTurnStatus(params);
         const ok = !/failed|error|cancel/i.test(status);
         void finish({
           ok,
-          output: truncate(normalizeText(assistantOutput), MAX_OUTPUT_CHARS),
+          output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
           diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
           reason: ok ? "" : `Codex app-server turn completed with status ${status || "unknown"}.`,
           exitCode: ok ? 0 : 1,
@@ -6576,7 +6647,7 @@ async function runCodexAppServer({
     child.on("error", (error) => {
       void finish({
         ok: false,
-        output: truncate(normalizeText(assistantOutput), MAX_OUTPUT_CHARS),
+        output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
         diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
         reason: extractErrorMessage(error),
         exitCode: -1,
@@ -6591,7 +6662,7 @@ async function runCodexAppServer({
       }
       void finish({
         ok: false,
-        output: truncate(normalizeText(assistantOutput), MAX_OUTPUT_CHARS),
+        output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
         diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
         reason: timedOut
           ? `Codex app-server timed out after ${Math.floor(timeoutMs / 1000)} seconds.`
@@ -6661,7 +6732,7 @@ async function runCodexAppServer({
     })().catch((error) => {
       void finish({
         ok: false,
-        output: truncate(normalizeText(assistantOutput), MAX_OUTPUT_CHARS),
+        output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
         diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
         reason: extractErrorMessage(error, "Codex app-server run failed."),
         exitCode: -1,
