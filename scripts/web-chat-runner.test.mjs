@@ -258,9 +258,9 @@ test("runCodex allows Git metadata writes without approval prompts", async (t) =
   const turnStart = requests.find((request) => request.method === "turn/start");
 
   assert.equal(threadStart?.params?.approvalPolicy, "never");
-  assert.equal(threadStart?.params?.sandbox, "dangerFullAccess");
+  assert.equal(threadStart?.params?.sandbox, "danger-full-access");
   assert.equal(turnStart?.params?.approvalPolicy, "never");
-  assert.deepEqual(turnStart?.params?.sandboxPolicy, { type: "danger-full-access" });
+  assert.deepEqual(turnStart?.params?.sandboxPolicy, { type: "dangerFullAccess" });
 });
 
 test("runCodex can drive codex app-server over stdio and report bounded progress", async (t) => {

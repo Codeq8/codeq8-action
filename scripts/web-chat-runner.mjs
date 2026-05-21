@@ -6515,13 +6515,13 @@ async function runCodexAppServer({
               model: normalizedModel,
               cwd: workspacePath,
               approvalPolicy: "never",
-              sandbox: "dangerFullAccess",
+              sandbox: "danger-full-access",
             })
           : await sendRequest("thread/start", {
               model: normalizedModel,
               cwd: workspacePath,
               approvalPolicy: "never",
-              sandbox: "dangerFullAccess",
+              sandbox: "danger-full-access",
             });
       appServerThreadId = extractAppServerThreadId(threadResult);
       if (!appServerThreadId) {
@@ -6541,7 +6541,7 @@ async function runCodexAppServer({
         model: normalizedModel,
         approvalPolicy: "never",
         sandboxPolicy: {
-          type: "danger-full-access",
+          type: "dangerFullAccess",
         },
         effort: DEFAULT_CODEX_REASONING_EFFORT,
       });
