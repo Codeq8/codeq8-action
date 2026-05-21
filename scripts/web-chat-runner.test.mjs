@@ -340,6 +340,88 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   );
 });
 
+test("runCodex sends AppServer steer requests with the active expected turn id", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-steer-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    requestsOutputPath,
+    agentMessage: "steered ok",
+    delayTurnCompletionMs: 2200,
+  });
+
+  let controlGetCount = 0;
+  let steerReturned = false;
+  const acknowledgementBodies = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "use app server steering",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+    },
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "runner_token",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      fetchImpl: async (url, init = {}) => {
+        if (String(url).includes("/api/chat/runs/app-server/control")) {
+          const method = String(init.method || "GET").toUpperCase();
+          if (method === "POST") {
+            acknowledgementBodies.push(JSON.parse(String(init.body || "{}")));
+            return new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          controlGetCount += 1;
+          const requests =
+            controlGetCount >= 2 && !steerReturned
+              ? [
+                  {
+                    request_id: "wcasr_steer",
+                    sequence: 1,
+                    kind: "steer",
+                    content: "Actually say awesome.",
+                  },
+                ]
+              : [];
+          steerReturned = steerReturned || requests.length > 0;
+          return new Response(JSON.stringify({ ok: true, requests }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "steered ok");
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  const steerRequest = requests.find((request) => request.method === "turn/steer");
+  assert.equal(steerRequest?.params?.threadId, "thr_app");
+  assert.equal(steerRequest?.params?.expectedTurnId, "turn_app");
+  assert.deepEqual(steerRequest?.params?.input, [
+    { type: "text", text: "Actually say awesome." },
+  ]);
+  assert.deepEqual(acknowledgementBodies.at(-1)?.acknowledgements, [
+    { request_id: "wcasr_steer", status: "accepted" },
+  ]);
+});
+
 test("runCodex completes while an AppServer progress flush is active", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-flush-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
@@ -1236,6 +1318,7 @@ async function writeFakeCodexAppServer(
     requestsOutputPath = "",
     agentMessage = "done",
     commandLabel = "npm test",
+    delayTurnCompletionMs = 0,
   } = {},
 ) {
   await fs.writeFile(
@@ -1249,6 +1332,7 @@ async function writeFakeCodexAppServer(
       `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
       `const agentMessage = ${JSON.stringify(agentMessage)};`,
       `const commandLabel = ${JSON.stringify(commandLabel)};`,
+      `const delayTurnCompletionMs = ${JSON.stringify(delayTurnCompletionMs)};`,
       "const agentMessages = Array.isArray(agentMessage) ? agentMessage : [agentMessage];",
       "if (argsOutputPath) await fs.writeFile(argsOutputPath, JSON.stringify(process.argv.slice(2)), 'utf8');",
       "if (envOutputPath) await fs.writeFile(envOutputPath, process.env.NODE_OPTIONS || '', 'utf8');",
@@ -1270,10 +1354,17 @@ async function writeFakeCodexAppServer(
       "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
       "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: commandLabel } } });",
       "    for (const delta of agentMessages) send({ method: 'item/agentMessage/delta', params: { delta } });",
-      "    send({ method: 'item/completed', params: { item: { type: 'command_execution', command: commandLabel } } });",
-      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "    const completeTurn = () => {",
+      "      send({ method: 'item/completed', params: { item: { type: 'command_execution', command: commandLabel } } });",
+      "      send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "    };",
+      "    if (delayTurnCompletionMs > 0) setTimeout(completeTurn, delayTurnCompletionMs);",
+      "    else completeTurn();",
       "  }",
-      "  if (message.method === 'turn/steer') send({ id: message.id, result: { ok: true } });",
+      "  if (message.method === 'turn/steer') {",
+      "    if (message.params?.expectedTurnId !== 'turn_app') send({ id: message.id, error: { message: 'missing field expectedTurnId' } });",
+      "    else send({ id: message.id, result: { ok: true } });",
+      "  }",
       "  if (message.method === 'turn/interrupt') send({ id: message.id, result: { ok: true } });",
       "});",
       "",

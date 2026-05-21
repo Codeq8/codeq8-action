@@ -59,7 +59,7 @@ const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 200;
 const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
-const APP_SERVER_CONTROL_POLL_INTERVAL_MS = 5000;
+const APP_SERVER_CONTROL_POLL_INTERVAL_MS = 1000;
 const CODEX_AUTH_PRECHECK_TIMEOUT_SECONDS = 45;
 const WEB_CHAT_RUNNER_DIAGNOSTIC_SOURCE = "web_chat_runner_diagnostic";
 const WEB_CHAT_RUN_MARKER_VERSION = "v1";
@@ -6277,11 +6277,18 @@ function createAppServerControlPoller({
         const kind = normalizeText(request.kind).toLowerCase();
         const sequence = Number(request.sequence || 0) || 0;
         const appServerThreadId = getAppServerThreadId();
-        lastSequence = Math.max(lastSequence, sequence);
         if (!requestId || !appServerThreadId) {
           continue;
         }
+        if (kind !== "steer" && kind !== "interrupt") {
+          lastSequence = Math.max(lastSequence, sequence);
+          continue;
+        }
         try {
+          const appServerTurnId = getAppServerTurnId();
+          if (!appServerTurnId) {
+            continue;
+          }
           if (kind === "steer") {
             const content = normalizeText(request.content);
             if (!content) {
@@ -6289,14 +6296,11 @@ function createAppServerControlPoller({
             }
             await sendRequest("turn/steer", {
               threadId: appServerThreadId,
+              expectedTurnId: appServerTurnId,
               input: [{ type: "text", text: content }],
             });
             acknowledgements.push({ request_id: requestId, status: "accepted" });
-          } else if (kind === "interrupt") {
-            const appServerTurnId = getAppServerTurnId();
-            if (!appServerTurnId) {
-              throw new Error("Codex app-server has not started a turn yet.");
-            }
+          } else {
             await sendRequest("turn/interrupt", {
               threadId: appServerThreadId,
               turnId: appServerTurnId,
@@ -6310,6 +6314,7 @@ function createAppServerControlPoller({
             error: extractErrorMessage(error),
           });
         }
+        lastSequence = Math.max(lastSequence, sequence);
       }
       await acknowledge(acknowledgements);
     } catch {
