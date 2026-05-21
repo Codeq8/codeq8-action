@@ -5878,6 +5878,41 @@ function extractAppServerString(value, keys = []) {
   return "";
 }
 
+function extractAppServerTextPreservingWhitespace(value, keys = []) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => extractAppServerTextPreservingWhitespace(entry, keys)).join("");
+  }
+  const object = normalizeObject(value);
+  if (Object.keys(object).length === 0) {
+    return "";
+  }
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(object, key)) {
+      continue;
+    }
+    const extracted = extractAppServerTextPreservingWhitespace(object[key], keys);
+    if (extracted) {
+      return extracted;
+    }
+  }
+  for (const key of ["text", "content", "message"]) {
+    if (!Object.prototype.hasOwnProperty.call(object, key)) {
+      continue;
+    }
+    const extracted = extractAppServerTextPreservingWhitespace(object[key], keys);
+    if (extracted) {
+      return extracted;
+    }
+  }
+  return "";
+}
+
 function extractAppServerThreadId(value) {
   const object = normalizeObject(value);
   const thread = normalizeObject(object.thread || object.threadInfo || object.session);
@@ -5904,7 +5939,8 @@ function extractAppServerTurnStatus(value) {
 
 function extractAppServerAgentDelta(params) {
   const object = normalizeObject(params);
-  return extractAppServerString(object.delta || object, ["delta", "text", "content"]);
+  const source = Object.prototype.hasOwnProperty.call(object, "delta") ? object.delta : object;
+  return extractAppServerTextPreservingWhitespace(source, ["delta", "text", "content"]);
 }
 
 function extractAppServerCompletedAgentText(params) {
@@ -5914,7 +5950,7 @@ function extractAppServerCompletedAgentText(params) {
   if (!/agent|assistant/.test(itemType)) {
     return "";
   }
-  return extractAppServerString(item, ["text", "content", "message"]);
+  return extractAppServerTextPreservingWhitespace(item, ["text", "content", "message"]);
 }
 
 function summarizeAppServerProgressNotification({ method, params, now = Date.now() }) {

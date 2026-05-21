@@ -1109,6 +1109,43 @@ test("runCodex treats auth-like agent text as normal output", async (t) => {
   assert.match(result.output, /refresh_token_reused/i);
 });
 
+test("runCodex preserves AppServer agent delta whitespace", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-agent-whitespace-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    agentMessage: [
+      "Yes,",
+      " I",
+      "'m",
+      " getting",
+      " it.",
+      " This",
+      " run",
+      " is",
+      " targeting",
+      " PR",
+      " #1698",
+      ".",
+    ],
+  });
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "preserve streaming whitespace",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "Yes, I'm getting it. This run is targeting PR #1698.");
+});
+
 test("runCodex returns normal diagnostics for auth-like stderr", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-stderr-auth-text-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
@@ -1163,6 +1200,7 @@ async function writeFakeCodexAppServer(
       `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
       `const agentMessage = ${JSON.stringify(agentMessage)};`,
       `const commandLabel = ${JSON.stringify(commandLabel)};`,
+      "const agentMessages = Array.isArray(agentMessage) ? agentMessage : [agentMessage];",
       "if (argsOutputPath) await fs.writeFile(argsOutputPath, JSON.stringify(process.argv.slice(2)), 'utf8');",
       "if (envOutputPath) await fs.writeFile(envOutputPath, process.env.NODE_OPTIONS || '', 'utf8');",
       "const requests = [];",
@@ -1182,7 +1220,7 @@ async function writeFakeCodexAppServer(
       "  if (message.method === 'turn/start') {",
       "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
       "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: commandLabel } } });",
-      "    send({ method: 'item/agentMessage/delta', params: { delta: agentMessage } });",
+      "    for (const delta of agentMessages) send({ method: 'item/agentMessage/delta', params: { delta } });",
       "    send({ method: 'item/completed', params: { item: { type: 'command_execution', command: commandLabel } } });",
       "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
       "  }",
