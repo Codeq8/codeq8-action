@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import readline from "node:readline";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
@@ -32,6 +33,9 @@ import {
 import {
   WEB_CHAT_RUNNER_CODEQ8_FILE_PATH,
   WEB_CHAT_RUNNER_CODEQ8_FILE_SAVE_PATH,
+  WEB_CHAT_RUNNER_APP_SERVER_CONTROL_PATH,
+  WEB_CHAT_RUNNER_APP_SERVER_EVENTS_PATH,
+  WEB_CHAT_RUNNER_APP_SERVER_TURN_CONTROL_CAPABILITY,
   WEB_CHAT_RUNNER_DIAGNOSTIC_PATH,
   supportsServerOwnedCodeq8FileSync,
   supportsServerOwnedDiscordDmChat,
@@ -54,6 +58,11 @@ const MAX_THREAD_TARGET_RESTARTS = 2;
 const MAX_CODEX_RESUME_RECOVERY_ATTEMPTS = 1;
 const MAX_RUNNER_DIAGNOSTIC_DETAIL_KEYS = 32;
 const MAX_RUNNER_DIAGNOSTIC_STRING_CHARS = 2000;
+const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
+const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
+const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 200;
+const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
+const APP_SERVER_CONTROL_POLL_INTERVAL_MS = 5000;
 const CODEX_AUTH_PRECHECK_TIMEOUT_SECONDS = 45;
 const WEB_CHAT_RUNNER_DIAGNOSTIC_SOURCE = "web_chat_runner_diagnostic";
 const WEB_CHAT_RUN_MARKER_VERSION = "v1";
@@ -1713,6 +1722,8 @@ async function assertWebChatRunnerRuntimeCompatibility({
   workspaceRepository,
   threadId,
   runId,
+  requiredCapabilities = REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+  requiredPaths = REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
 }) {
   const manifest = await requestWebChatRunnerRuntimeManifest({
     publicBaseUrl,
@@ -1722,7 +1733,7 @@ async function assertWebChatRunnerRuntimeCompatibility({
     runId,
   });
   const missingCapabilities = listMissingRuntimeEntries(
-    REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+    requiredCapabilities,
     manifest.capabilities,
   );
   const authorizedPaths = Array.from(
@@ -1734,7 +1745,7 @@ async function assertWebChatRunnerRuntimeCompatibility({
     ]),
   );
   const missingPaths = listMissingRuntimeEntries(
-    REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
+    requiredPaths,
     authorizedPaths,
   );
   if (missingCapabilities.length > 0 || missingPaths.length > 0) {
@@ -5840,6 +5851,723 @@ async function captureCodexSessionBundle({
   });
 }
 
+function resolveCodexTransportMode(env = process.env) {
+  const normalized = normalizeText(env.CODEQ8_CODEX_TRANSPORT).toLowerCase();
+  return normalized === "app-server" ? "app-server" : "exec";
+}
+
+function normalizeAppServerMethod(value) {
+  return normalizeText(value);
+}
+
+function extractAppServerString(value, keys = []) {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return normalizeText(value);
+  }
+  if (Array.isArray(value)) {
+    return normalizeText(value.map((entry) => extractAppServerString(entry, keys)).filter(Boolean).join("\n"));
+  }
+  const object = normalizeObject(value);
+  if (Object.keys(object).length === 0) {
+    return "";
+  }
+  for (const key of keys) {
+    const extracted = extractAppServerString(object[key], keys);
+    if (extracted) {
+      return extracted;
+    }
+  }
+  for (const key of ["text", "content", "message", "summary", "name", "title", "command"]) {
+    const extracted = extractAppServerString(object[key], keys);
+    if (extracted) {
+      return extracted;
+    }
+  }
+  return "";
+}
+
+function extractAppServerThreadId(value) {
+  const object = normalizeObject(value);
+  const thread = normalizeObject(object.thread || object.threadInfo || object.session);
+  return normalizeCodexSessionId(
+    thread.id ||
+      object.threadId ||
+      object.thread_id ||
+      object.id ||
+      "",
+  );
+}
+
+function extractAppServerTurnId(value) {
+  const object = normalizeObject(value);
+  const turn = normalizeObject(object.turn);
+  return normalizeCodexSessionId(turn.id || object.turnId || object.turn_id || "");
+}
+
+function extractAppServerTurnStatus(value) {
+  const object = normalizeObject(value);
+  const turn = normalizeObject(object.turn);
+  return normalizeText(turn.status || object.status || "");
+}
+
+function extractAppServerAgentDelta(params) {
+  const object = normalizeObject(params);
+  return extractAppServerString(object.delta || object, ["delta", "text", "content"]);
+}
+
+function extractAppServerCompletedAgentText(params) {
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  const itemType = normalizeText(item.type || object.type).toLowerCase();
+  if (!/agent|assistant/.test(itemType)) {
+    return "";
+  }
+  return extractAppServerString(item, ["text", "content", "message"]);
+}
+
+function summarizeAppServerProgressNotification({ method, params, now = Date.now() }) {
+  const normalizedMethod = normalizeAppServerMethod(method);
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  const itemType = normalizeText(item.type || object.type || "").toLowerCase();
+  const itemLabel = truncate(
+    extractAppServerString(item, ["title", "name", "command", "text", "content"]) ||
+      extractAppServerString(object, ["title", "name", "summary"]) ||
+      normalizedMethod,
+    APP_SERVER_PROGRESS_MAX_LABEL_CHARS,
+  );
+  if (normalizedMethod === "turn/started") {
+    return {
+      event_id: `app_server:${now}:turn_started`,
+      kind: "turn_started",
+      label: "Started Codex turn",
+      status: "running",
+      at: now,
+    };
+  }
+  if (normalizedMethod === "turn/completed") {
+    return {
+      event_id: `app_server:${now}:turn_completed`,
+      kind: "turn_completed",
+      label: "Codex turn completed",
+      status: normalizeText(extractAppServerTurnStatus(object)) || "completed",
+      at: now,
+    };
+  }
+  if (normalizedMethod === "item/started") {
+    return {
+      event_id: `app_server:${now}:item_started:${hashDiagnosticValue(itemLabel).slice(0, 12)}`,
+      kind: "item_started",
+      item_type: itemType,
+      label: itemLabel || "Started work item",
+      status: "running",
+      at: now,
+    };
+  }
+  if (normalizedMethod === "item/completed") {
+    return {
+      event_id: `app_server:${now}:item_completed:${hashDiagnosticValue(itemLabel).slice(0, 12)}`,
+      kind: "item_completed",
+      item_type: itemType,
+      label: itemLabel || "Completed work item",
+      status: "completed",
+      at: now,
+    };
+  }
+  if (normalizedMethod === "thread/status/changed") {
+    return {
+      event_id: `app_server:${now}:thread_status`,
+      kind: "thread_status",
+      label: extractAppServerString(object, ["status", "threadStatusType"]) || "Thread status changed",
+      status: extractAppServerString(object, ["status", "threadStatusType"]),
+      at: now,
+    };
+  }
+  return null;
+}
+
+function buildAppServerRouteUrl({ publicBaseUrl, path: routePath, query = null }) {
+  const normalizedBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
+  const url = new URL(routePath, `${normalizedBaseUrl}/`);
+  if (query instanceof URLSearchParams) {
+    for (const [key, value] of query.entries()) {
+      url.searchParams.set(key, value);
+    }
+  }
+  return url.toString();
+}
+
+function createAppServerProgressReporter({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  fetchImpl = globalThis.fetch,
+}) {
+  const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
+  const normalizedToken = normalizeText(webChatRunToken);
+  const normalizedRepository = normalizeRepository(workspaceRepository);
+  const normalizedThreadId = normalizeThreadId(threadId);
+  const normalizedRunId = normalizeRunId(runId);
+  if (
+    !normalizedPublicBaseUrl ||
+    !normalizedToken ||
+    !normalizedRepository ||
+    !normalizedThreadId ||
+    !normalizedRunId ||
+    typeof fetchImpl !== "function"
+  ) {
+    return {
+      enqueue: () => {},
+      flush: async () => {},
+    };
+  }
+
+  let queued = [];
+  let timer = null;
+  let flushing = false;
+  let reportedEventCount = 0;
+  const flush = async () => {
+    if (flushing || queued.length === 0) {
+      return;
+    }
+    flushing = true;
+    const batch = queued.slice(0, APP_SERVER_PROGRESS_MAX_BATCH_SIZE);
+    queued = queued.slice(APP_SERVER_PROGRESS_MAX_BATCH_SIZE);
+    try {
+      await fetchImpl(
+        buildAppServerRouteUrl({
+          publicBaseUrl: normalizedPublicBaseUrl,
+          path: "/api/chat/runs/app-server/events",
+        }),
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${normalizedToken}`,
+            "Content-Type": "application/json; charset=utf-8",
+          },
+          body: JSON.stringify({
+            workspace_repository: normalizedRepository,
+            thread_id: normalizedThreadId,
+            run_id: normalizedRunId,
+            events: batch,
+          }),
+        },
+      ).catch(() => null);
+    } finally {
+      flushing = false;
+      if (queued.length > 0 && !timer) {
+        timer = setTimeout(() => {
+          timer = null;
+          void flush();
+        }, APP_SERVER_PROGRESS_BATCH_INTERVAL_MS);
+        timer.unref?.();
+      }
+    }
+  };
+
+  return {
+    enqueue(event) {
+      const normalizedEvent = normalizeObject(event);
+      if (!normalizeText(normalizedEvent.kind)) {
+        return;
+      }
+      if (reportedEventCount >= APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN) {
+        return;
+      }
+      reportedEventCount += 1;
+      queued.push(normalizedEvent);
+      queued = queued.slice(-50);
+      if (!timer) {
+        timer = setTimeout(() => {
+          timer = null;
+          void flush();
+        }, APP_SERVER_PROGRESS_BATCH_INTERVAL_MS);
+        timer.unref?.();
+      }
+    },
+    async flush() {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      while (queued.length > 0) {
+        await flush();
+      }
+    },
+  };
+}
+
+function createAppServerControlPoller({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  fetchImpl = globalThis.fetch,
+  sendRequest,
+  getAppServerThreadId,
+  getAppServerTurnId,
+}) {
+  const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
+  const normalizedToken = normalizeText(webChatRunToken);
+  const normalizedRepository = normalizeRepository(workspaceRepository);
+  const normalizedThreadId = normalizeThreadId(threadId);
+  const normalizedRunId = normalizeRunId(runId);
+  if (
+    !normalizedPublicBaseUrl ||
+    !normalizedToken ||
+    !normalizedRepository ||
+    !normalizedThreadId ||
+    !normalizedRunId ||
+    typeof fetchImpl !== "function" ||
+    typeof sendRequest !== "function" ||
+    typeof getAppServerThreadId !== "function" ||
+    typeof getAppServerTurnId !== "function"
+  ) {
+    return {
+      start: () => {},
+      stop: async () => {},
+    };
+  }
+
+  let timer = null;
+  let stopped = false;
+  let polling = false;
+  let lastSequence = 0;
+
+  const acknowledge = async (acknowledgements) => {
+    if (!Array.isArray(acknowledgements) || acknowledgements.length === 0) {
+      return;
+    }
+    await fetchImpl(
+      buildAppServerRouteUrl({
+        publicBaseUrl: normalizedPublicBaseUrl,
+        path: "/api/chat/runs/app-server/control",
+      }),
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${normalizedToken}`,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({
+          workspace_repository: normalizedRepository,
+          thread_id: normalizedThreadId,
+          run_id: normalizedRunId,
+          acknowledgements,
+        }),
+      },
+    ).catch(() => null);
+  };
+
+  const poll = async () => {
+    if (stopped || polling) {
+      return;
+    }
+    polling = true;
+    try {
+      const query = new URLSearchParams({
+        workspace_repository: normalizedRepository,
+        thread_id: normalizedThreadId,
+        run_id: normalizedRunId,
+        after_sequence: String(lastSequence),
+      });
+      const response = await fetchImpl(
+        buildAppServerRouteUrl({
+          publicBaseUrl: normalizedPublicBaseUrl,
+          path: "/api/chat/runs/app-server/control",
+          query,
+        }),
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${normalizedToken}`,
+            Accept: "application/json",
+          },
+        },
+      );
+      if (!response?.ok) {
+        return;
+      }
+      const payload = normalizeObject(await response.json().catch(() => null));
+      const requests = Array.isArray(payload.requests) ? payload.requests : [];
+      const acknowledgements = [];
+      for (const rawRequest of requests) {
+        const request = normalizeObject(rawRequest);
+        const requestId = normalizeText(request.request_id || request.requestId);
+        const kind = normalizeText(request.kind).toLowerCase();
+        const sequence = Number(request.sequence || 0) || 0;
+        const appServerThreadId = getAppServerThreadId();
+        lastSequence = Math.max(lastSequence, sequence);
+        if (!requestId || !appServerThreadId) {
+          continue;
+        }
+        try {
+          if (kind === "steer") {
+            const content = normalizeText(request.content);
+            if (!content) {
+              throw new Error("Steer content is empty.");
+            }
+            await sendRequest("turn/steer", {
+              threadId: appServerThreadId,
+              input: [{ type: "text", text: content }],
+            });
+            acknowledgements.push({ request_id: requestId, status: "accepted" });
+          } else if (kind === "interrupt") {
+            const appServerTurnId = getAppServerTurnId();
+            if (!appServerTurnId) {
+              throw new Error("Codex app-server has not started a turn yet.");
+            }
+            await sendRequest("turn/interrupt", {
+              threadId: appServerThreadId,
+              turnId: appServerTurnId,
+            });
+            acknowledgements.push({ request_id: requestId, status: "accepted" });
+          }
+        } catch (error) {
+          acknowledgements.push({
+            request_id: requestId,
+            status: "failed",
+            error: extractErrorMessage(error),
+          });
+        }
+      }
+      await acknowledge(acknowledgements);
+    } catch {
+      // Control polling is best-effort; final run status still comes from Codex.
+    } finally {
+      polling = false;
+    }
+  };
+
+  return {
+    start() {
+      if (timer || stopped) {
+        return;
+      }
+      timer = setInterval(() => {
+        void poll();
+      }, APP_SERVER_CONTROL_POLL_INTERVAL_MS);
+      timer.unref?.();
+      void poll();
+    },
+    async stop() {
+      stopped = true;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      if (polling) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    },
+  };
+}
+
+async function runCodexAppServer({
+  codexPath,
+  model,
+  task,
+  workspacePath,
+  commandEnv,
+  timeoutSeconds,
+  mode = "fresh",
+  sessionId = "",
+  appServerContext = null,
+}) {
+  const normalizedModel = normalizeText(model) || DEFAULT_CODEX_MODEL;
+  const normalizedTask = normalizeText(task);
+  const normalizedMode = normalizeText(mode).toLowerCase() === "resume" ? "resume" : "fresh";
+  const normalizedSessionId = normalizeCodexSessionId(sessionId);
+  if (!normalizedTask) {
+    return {
+      ok: false,
+      output: "",
+      diagnosticOutput: "",
+      reason: "Prompt is empty.",
+      exitCode: -1,
+      signal: "none",
+      timedOut: false,
+      durationMs: 0,
+    };
+  }
+  if (normalizedMode === "resume" && !normalizedSessionId) {
+    return {
+      ok: false,
+      output: "",
+      diagnosticOutput: "",
+      reason: "Codex session id is required for resume mode.",
+      exitCode: -1,
+      signal: "none",
+      timedOut: false,
+      durationMs: 0,
+    };
+  }
+
+  return new Promise((resolve) => {
+    const startMs = Date.now();
+    let stderr = "";
+    let assistantOutput = "";
+    let timedOut = false;
+    let settled = false;
+    let appServerThreadId = "";
+    let activeTurnId = "";
+    let nextRequestId = 1;
+    const pendingRequests = new Map();
+    const progressReporter = createAppServerProgressReporter(appServerContext || {});
+    let controlPoller = null;
+    progressReporter.enqueue({
+      event_id: `app_server:${Date.now()}:transport_started`,
+      kind: "transport_started",
+      label: "Starting Codex",
+      status: "running",
+      at: Date.now(),
+    });
+
+    const child = spawn(codexPath, ["app-server", "--listen", "stdio://"], {
+      cwd: workspacePath,
+      env: applyCodexNodeOptions({ ...commandEnv }),
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+
+    const appendOutput = (target, chunk) => {
+      const nextChunk = String(chunk || "");
+      if (!nextChunk) {
+        return target;
+      }
+      return truncate(`${target}${nextChunk}`, MAX_OUTPUT_CHARS * 2);
+    };
+
+    const killChild = (signal) => {
+      const pid = parsePositiveInteger(child.pid || 0, 0);
+      if (!pid) {
+        return;
+      }
+      try {
+        if (process.platform !== "win32") {
+          process.kill(-pid, signal);
+        } else {
+          child.kill(signal);
+        }
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+          // ignore best-effort kill failures
+        }
+      }
+    };
+
+    const finish = async (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutHandle);
+      await controlPoller?.stop?.();
+      await progressReporter.flush();
+      for (const pending of pendingRequests.values()) {
+        pending.reject(new Error("Codex app-server closed before the request completed."));
+      }
+      pendingRequests.clear();
+      try {
+        child.stdin?.end();
+      } catch {
+        // ignore stdin close failure
+      }
+      killChild("SIGTERM");
+      resolve({
+        ...result,
+        durationMs: Date.now() - startMs,
+      });
+    };
+
+    const sendNotification = (method, params = {}) => {
+      child.stdin?.write(`${JSON.stringify({ method, params })}\n`);
+    };
+
+    const sendRequest = (method, params = {}) => new Promise((requestResolve, requestReject) => {
+      const id = nextRequestId;
+      nextRequestId += 1;
+      pendingRequests.set(id, { resolve: requestResolve, reject: requestReject, method });
+      child.stdin?.write(`${JSON.stringify({ method, id, params })}\n`);
+    });
+
+    const handleNotification = (method, params) => {
+      const normalizedMethod = normalizeAppServerMethod(method);
+      const progressEvent = summarizeAppServerProgressNotification({
+        method: normalizedMethod,
+        params,
+      });
+      if (progressEvent) {
+        progressReporter.enqueue(progressEvent);
+      }
+      if (normalizedMethod === "turn/started") {
+        activeTurnId = extractAppServerTurnId(params) || activeTurnId;
+      }
+      if (normalizedMethod === "item/agentMessage/delta") {
+        assistantOutput = appendOutput(assistantOutput, extractAppServerAgentDelta(params));
+      }
+      if (normalizedMethod === "item/completed" && !assistantOutput) {
+        assistantOutput = appendOutput(assistantOutput, extractAppServerCompletedAgentText(params));
+      }
+      if (normalizedMethod === "turn/completed") {
+        const status = extractAppServerTurnStatus(params);
+        const ok = !/failed|error|cancel/i.test(status);
+        void finish({
+          ok,
+          output: truncate(normalizeText(assistantOutput), MAX_OUTPUT_CHARS),
+          diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
+          reason: ok ? "" : `Codex app-server turn completed with status ${status || "unknown"}.`,
+          exitCode: ok ? 0 : 1,
+          signal: "",
+          timedOut: false,
+        });
+      }
+    };
+
+    const rl = readline.createInterface({ input: child.stdout });
+    rl.on("line", (line) => {
+      const trimmedLine = normalizeText(line);
+      if (!trimmedLine) {
+        return;
+      }
+      let message = null;
+      try {
+        message = JSON.parse(trimmedLine);
+      } catch {
+        stderr = appendOutput(stderr, `${trimmedLine}\n`);
+        return;
+      }
+      const object = normalizeObject(message);
+      if (Object.prototype.hasOwnProperty.call(object, "id")) {
+        const id = Number(object.id);
+        const pending = pendingRequests.get(id);
+        if (pending) {
+          pendingRequests.delete(id);
+          if (object.error) {
+            pending.reject(new Error(extractErrorMessage(object.error, `${pending.method} failed.`)));
+          } else {
+            pending.resolve(object.result || {});
+          }
+        }
+        return;
+      }
+      if (object.method) {
+        handleNotification(object.method, object.params || {});
+      }
+    });
+
+    child.stderr?.on("data", (chunk) => {
+      const text = String(chunk || "");
+      if (text) {
+        process.stderr.write(text);
+        stderr = appendOutput(stderr, text);
+      }
+    });
+
+    child.on("error", (error) => {
+      void finish({
+        ok: false,
+        output: truncate(normalizeText(assistantOutput), MAX_OUTPUT_CHARS),
+        diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
+        reason: extractErrorMessage(error),
+        exitCode: -1,
+        signal: "spawn_error",
+        timedOut,
+      });
+    });
+
+    child.on("close", (code, signal) => {
+      if (settled) {
+        return;
+      }
+      void finish({
+        ok: false,
+        output: truncate(normalizeText(assistantOutput), MAX_OUTPUT_CHARS),
+        diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
+        reason: timedOut
+          ? `Codex app-server timed out after ${Math.floor(timeoutMs / 1000)} seconds.`
+          : `Codex app-server exited with code=${Number.isFinite(code) ? code : "null"} signal=${signal || "none"}.`,
+        exitCode: Number.isFinite(code) ? Number(code) : -1,
+        signal: signal || "",
+        timedOut,
+      });
+    });
+
+    const timeoutMs = Math.max(30, timeoutSeconds) * 1000;
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      killChild("SIGTERM");
+      setTimeout(() => {
+        killChild("SIGKILL");
+      }, 8000).unref();
+    }, timeoutMs);
+
+    (async () => {
+      await sendRequest("initialize", {
+        clientInfo: {
+          name: "codeq8_web_chat_runner",
+          title: "Codeq8 Web Chat Runner",
+          version: "0.1.0",
+        },
+      });
+      sendNotification("initialized", {});
+      const threadResult =
+        normalizedMode === "resume"
+          ? await sendRequest("thread/resume", {
+              threadId: normalizedSessionId,
+              model: normalizedModel,
+              cwd: workspacePath,
+              approvalPolicy: "never",
+              sandbox: "dangerFullAccess",
+            })
+          : await sendRequest("thread/start", {
+              model: normalizedModel,
+              cwd: workspacePath,
+              approvalPolicy: "never",
+              sandbox: "dangerFullAccess",
+            });
+      appServerThreadId = extractAppServerThreadId(threadResult);
+      if (!appServerThreadId) {
+        throw new Error("Codex app-server did not return a thread id.");
+      }
+      controlPoller = createAppServerControlPoller({
+        ...(appServerContext || {}),
+        sendRequest,
+        getAppServerThreadId: () => appServerThreadId,
+        getAppServerTurnId: () => activeTurnId,
+      });
+      controlPoller.start();
+      const turnResult = await sendRequest("turn/start", {
+        threadId: appServerThreadId,
+        input: [{ type: "text", text: normalizedTask }],
+        cwd: workspacePath,
+        model: normalizedModel,
+        approvalPolicy: "never",
+        sandboxPolicy: {
+          type: "dangerFullAccess",
+        },
+        effort: DEFAULT_CODEX_REASONING_EFFORT,
+      });
+      activeTurnId = extractAppServerTurnId(turnResult) || activeTurnId;
+    })().catch((error) => {
+      void finish({
+        ok: false,
+        output: truncate(normalizeText(assistantOutput), MAX_OUTPUT_CHARS),
+        diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
+        reason: extractErrorMessage(error, "Codex app-server run failed."),
+        exitCode: -1,
+        signal: "",
+        timedOut,
+      });
+    });
+  });
+}
+
 async function runCodex({
   codexPath,
   model,
@@ -5850,6 +6578,7 @@ async function runCodex({
   mode = "fresh",
   sessionId = "",
   outputFilePath = "",
+  appServerContext = null,
 }) {
   const normalizedModel = normalizeText(model) || DEFAULT_CODEX_MODEL;
   const normalizedTask = normalizeText(task);
@@ -5879,6 +6608,20 @@ async function runCodex({
       timedOut: false,
       durationMs: 0,
     };
+  }
+
+  if (resolveCodexTransportMode(commandEnv) === "app-server") {
+    return runCodexAppServer({
+      codexPath,
+      model: normalizedModel,
+      task: normalizedTask,
+      workspacePath,
+      commandEnv,
+      timeoutSeconds,
+      mode: normalizedMode,
+      sessionId: normalizedSessionId,
+      appServerContext,
+    });
   }
 
   const resolvedOutputFilePath =
@@ -6683,6 +7426,7 @@ async function main() {
     GIT_HTTP_LOW_SPEED_LIMIT: DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT,
     GIT_HTTP_LOW_SPEED_TIME: DEFAULT_GIT_HTTP_LOW_SPEED_TIME,
   };
+  const codexTransportMode = resolveCodexTransportMode(commandEnv);
   log(
     "Resolved web chat worker target",
     `thread_id=${threadId} worker=${normalizeBaseUrl(workerUrl)}`,
@@ -6705,6 +7449,21 @@ async function main() {
       workspaceRepository,
       threadId,
       runId,
+      requiredCapabilities:
+        codexTransportMode === "app-server"
+          ? [
+              ...REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+              WEB_CHAT_RUNNER_APP_SERVER_TURN_CONTROL_CAPABILITY,
+            ]
+          : REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+      requiredPaths:
+        codexTransportMode === "app-server"
+          ? [
+              ...REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
+              WEB_CHAT_RUNNER_APP_SERVER_EVENTS_PATH,
+              WEB_CHAT_RUNNER_APP_SERVER_CONTROL_PATH,
+            ]
+          : REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
     });
     await reportRunnerDiagnostic({
       event: "runner_runtime_manifest_validated",
@@ -6722,6 +7481,7 @@ async function main() {
         runner_required_paths_count: Array.isArray(runtimeManifest.runner_required_paths)
           ? runtimeManifest.runner_required_paths.length
           : 0,
+        codex_transport: codexTransportMode,
       },
     });
   } catch (error) {
@@ -7267,6 +8027,13 @@ async function main() {
           mode: executionMode,
           sessionId: codexSessionState.session_id,
           outputFilePath: path.join(attemptRunRuntime.homePath, "last-message.txt"),
+          appServerContext: {
+            publicBaseUrl,
+            webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
+            workspaceRepository: activeWorkspaceRepository,
+            threadId,
+            runId,
+          },
         });
         await reportRunnerDiagnostic({
           event: "runner_codex_command_finished",

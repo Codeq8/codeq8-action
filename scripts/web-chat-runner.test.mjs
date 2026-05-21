@@ -280,6 +280,84 @@ test("runCodex allows Git metadata writes without approval prompts", async (t) =
   assert.equal(args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
 });
 
+test("runCodex can drive codex app-server over stdio and report bounded progress", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const argsOutputPath = path.join(workspacePath, "codex-args.json");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import fs from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `await fs.writeFile(${JSON.stringify(argsOutputPath)}, JSON.stringify(process.argv.slice(2)), "utf8");`,
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: 'npm test' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { delta: 'done' } });",
+      "    send({ method: 'item/completed', params: { item: { type: 'command_execution', command: 'npm test' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const fetchCalls = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "use app server",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+      CODEQ8_CODEX_TRANSPORT: "app-server",
+    },
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "runner_token",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      fetchImpl: async (url, init = {}) => {
+        fetchCalls.push({ url: String(url), init });
+        if (String(url).includes("/api/chat/runs/app-server/control")) {
+          return new Response(JSON.stringify({ ok: true, requests: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "done");
+  const args = JSON.parse(await fs.readFile(argsOutputPath, "utf8"));
+  assert.deepEqual(args, ["app-server", "--listen", "stdio://"]);
+  assert(
+    fetchCalls.some((call) =>
+      String(call.url).endsWith("/api/chat/runs/app-server/events"),
+    ),
+  );
+});
+
 test("normalizeAttachmentRecord preserves Firebase Storage metadata for direct reads", () => {
   assert.deepEqual(
     normalizeAttachmentRecord({
@@ -708,6 +786,149 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
       thread_id: "wct_123",
       run_id: "wcr_123",
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("assertWebChatRunnerRuntimeCompatibility accepts AppServer turn-control manifest entries when required", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      capabilities: [
+        "server_owned_prompt",
+        "staged_codex_session_upload",
+        "recoverable_codex_session_errors",
+        "codex_app_server_turn_control",
+      ],
+      authorized_paths: [
+        "/api/github/workspace-git-token",
+        "/api/chat/runs/callback",
+        "/api/chat/runs/runtime-manifest",
+        "/api/chat/runs/prompt",
+        "/web-chat/attachments/get",
+        "/web-chat/codex-session/get",
+        "/web-chat/codex-session/upload-prepare",
+        "/web-chat/codex-session/upload-direct",
+        "/web-chat/codex-session/upload-discard",
+        "/web-chat/codex-session/upsert",
+        "/web-chat/codex-session/invalidate",
+        "/web-chat/threads/get",
+      ],
+      scoped_authorized_paths: [
+        "/api/chat/runs/diagnostic",
+        "/web-chat/attachments/read-url",
+        "/api/chat/runs/app-server/events",
+        "/api/chat/runs/app-server/control",
+      ],
+    });
+
+  try {
+    await assert.doesNotReject(() =>
+      assertWebChatRunnerRuntimeCompatibility({
+        publicBaseUrl: "https://codeq8.example.com",
+        webChatRunToken: "header.payload.signature",
+        workspaceRepository: "Codeq8/Codeq8",
+        threadId: "wct_123",
+        runId: "wcr_123",
+        requiredCapabilities: [
+          "server_owned_prompt",
+          "staged_codex_session_upload",
+          "recoverable_codex_session_errors",
+          "codex_app_server_turn_control",
+        ],
+        requiredPaths: [
+          "/api/github/workspace-git-token",
+          "/api/chat/runs/callback",
+          "/api/chat/runs/diagnostic",
+          "/api/chat/runs/runtime-manifest",
+          "/api/chat/runs/prompt",
+          "/api/chat/runs/app-server/events",
+          "/api/chat/runs/app-server/control",
+          "/web-chat/attachments/get",
+          "/web-chat/attachments/read-url",
+          "/web-chat/codex-session/get",
+          "/web-chat/codex-session/upload-prepare",
+          "/web-chat/codex-session/upload-direct",
+          "/web-chat/codex-session/upload-discard",
+          "/web-chat/codex-session/upsert",
+          "/web-chat/codex-session/invalidate",
+          "/web-chat/threads/get",
+        ],
+      }),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("assertWebChatRunnerRuntimeCompatibility fails fast when AppServer turn-control routes are missing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    Response.json({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      capabilities: [
+        "server_owned_prompt",
+        "staged_codex_session_upload",
+        "recoverable_codex_session_errors",
+      ],
+      authorized_paths: [
+        "/api/github/workspace-git-token",
+        "/api/chat/runs/callback",
+        "/api/chat/runs/runtime-manifest",
+        "/api/chat/runs/prompt",
+        "/web-chat/attachments/get",
+        "/web-chat/attachments/read-url",
+        "/web-chat/codex-session/get",
+        "/web-chat/codex-session/upload-prepare",
+        "/web-chat/codex-session/upload-direct",
+        "/web-chat/codex-session/upload-discard",
+        "/web-chat/codex-session/upsert",
+        "/web-chat/codex-session/invalidate",
+        "/web-chat/threads/get",
+      ],
+      scoped_authorized_paths: ["/api/chat/runs/diagnostic"],
+    });
+
+  try {
+    await assert.rejects(
+      () =>
+        assertWebChatRunnerRuntimeCompatibility({
+          publicBaseUrl: "https://codeq8.example.com",
+          webChatRunToken: "header.payload.signature",
+          workspaceRepository: "Codeq8/Codeq8",
+          threadId: "wct_123",
+          runId: "wcr_123",
+          requiredCapabilities: [
+            "server_owned_prompt",
+            "staged_codex_session_upload",
+            "recoverable_codex_session_errors",
+            "codex_app_server_turn_control",
+          ],
+          requiredPaths: [
+            "/api/github/workspace-git-token",
+            "/api/chat/runs/callback",
+            "/api/chat/runs/diagnostic",
+            "/api/chat/runs/runtime-manifest",
+            "/api/chat/runs/prompt",
+            "/api/chat/runs/app-server/events",
+            "/api/chat/runs/app-server/control",
+            "/web-chat/attachments/get",
+            "/web-chat/attachments/read-url",
+            "/web-chat/codex-session/get",
+            "/web-chat/codex-session/upload-prepare",
+            "/web-chat/codex-session/upload-direct",
+            "/web-chat/codex-session/upload-discard",
+            "/web-chat/codex-session/upsert",
+            "/web-chat/codex-session/invalidate",
+            "/web-chat/threads/get",
+          ],
+        }),
+      /missing capabilities: codex_app_server_turn_control; missing authorized paths: \/api\/chat\/runs\/app-server\/events, \/api\/chat\/runs\/app-server\/control/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
