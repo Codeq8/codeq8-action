@@ -3,12 +3,15 @@
   "required_capabilities": [
     "server_owned_prompt",
     "staged_codex_session_upload",
-    "recoverable_codex_session_errors"
+    "recoverable_codex_session_errors",
+    "codex_app_server_turn_control"
   ],
   "required_paths": [
     "/api/github/workspace-git-token",
     "/api/chat/runs/callback",
     "/api/chat/runs/diagnostic",
+    "/api/chat/runs/app-server/events",
+    "/api/chat/runs/app-server/control",
     "/api/chat/runs/runtime-manifest",
     "/api/chat/runs/prompt",
     "/web-chat/attachments/get",

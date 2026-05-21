@@ -193,22 +193,16 @@ test("buildFinalWorkspaceStateCallbackPayload serializes final branch state", ()
 
 test("runCodex applies dedicated Node options only to the Codex process env", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-node-options-"));
-  const fakeCodexPath = path.join(workspacePath, "fake-codex.sh");
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   const envOutputPath = path.join(workspacePath, "node-options.txt");
   t.after(async () => {
     await fs.rm(workspacePath, { recursive: true, force: true });
   });
 
-  await fs.writeFile(
-    fakeCodexPath,
-    [
-      "#!/bin/sh",
-      `printf '%s' "$NODE_OPTIONS" > ${JSON.stringify(envOutputPath)}`,
-      "exit 0",
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    envOutputPath,
+    agentMessage: "env ok",
+  });
 
   const commandEnv = {
     ...process.env,
@@ -225,6 +219,7 @@ test("runCodex applies dedicated Node options only to the Codex process env", as
   });
 
   assert.equal(result.ok, true);
+  assert.equal(result.output, "env ok");
   assert.equal(await fs.readFile(envOutputPath, "utf8"), "--no-warnings");
   assert.equal(commandEnv.NODE_OPTIONS, "");
 });
@@ -233,20 +228,16 @@ test("runCodex allows Git metadata writes without approval prompts", async (t) =
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-sandbox-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   const argsOutputPath = path.join(workspacePath, "codex-args.json");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
   t.after(async () => {
     await fs.rm(workspacePath, { recursive: true, force: true });
   });
 
-  await fs.writeFile(
-    fakeCodexPath,
-    [
-      "#!/usr/bin/env node",
-      `await import("node:fs/promises").then((fs) => fs.writeFile(${JSON.stringify(argsOutputPath)}, JSON.stringify(process.argv.slice(2)), "utf8"));`,
-      "process.exit(0);",
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    argsOutputPath,
+    requestsOutputPath,
+    agentMessage: "sandbox ok",
+  });
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
@@ -259,25 +250,17 @@ test("runCodex allows Git metadata writes without approval prompts", async (t) =
 
   assert.equal(result.ok, true);
   const args = JSON.parse(await fs.readFile(argsOutputPath, "utf8"));
-  const execIndex = args.indexOf("exec");
-  const sandboxIndex = args.indexOf("--sandbox");
-  const approvalIndex = args.indexOf("--ask-for-approval");
-
-  assert.notEqual(execIndex, -1);
-  assert.notEqual(sandboxIndex, -1);
-  assert(sandboxIndex > execIndex);
-  assert.deepEqual(args.slice(sandboxIndex, sandboxIndex + 2), [
-    "--sandbox",
-    "danger-full-access",
-  ]);
-  assert.notEqual(approvalIndex, -1);
-  assert(approvalIndex < execIndex);
-  assert.deepEqual(args.slice(approvalIndex, approvalIndex + 2), [
-    "--ask-for-approval",
-    "never",
-  ]);
+  assert.deepEqual(args, ["app-server", "--listen", "stdio://"]);
   assert.equal(args.includes("--yolo"), false);
   assert.equal(args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  const threadStart = requests.find((request) => request.method === "thread/start");
+  const turnStart = requests.find((request) => request.method === "turn/start");
+
+  assert.equal(threadStart?.params?.approvalPolicy, "never");
+  assert.equal(threadStart?.params?.sandbox, "dangerFullAccess");
+  assert.equal(turnStart?.params?.approvalPolicy, "never");
+  assert.deepEqual(turnStart?.params?.sandboxPolicy, { type: "dangerFullAccess" });
 });
 
 test("runCodex can drive codex app-server over stdio and report bounded progress", async (t) => {
@@ -322,7 +305,6 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
     workspacePath,
     commandEnv: {
       ...process.env,
-      CODEQ8_CODEX_TRANSPORT: "app-server",
     },
     timeoutSeconds: 30,
     appServerContext: {
@@ -744,6 +726,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "server_owned_codeq8_file_sync",
         "staged_codex_session_upload",
         "recoverable_codex_session_errors",
+        "codex_app_server_turn_control",
       ],
       authorized_paths: [
         "/api/github/workspace-git-token",
@@ -762,6 +745,8 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
       ],
       scoped_authorized_paths: [
         "/api/chat/runs/diagnostic",
+        "/api/chat/runs/app-server/events",
+        "/api/chat/runs/app-server/control",
         "/web-chat/attachments/read-url",
         "/web-chat/codex-session/upload-direct",
       ],
@@ -874,6 +859,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when AppServer turn-con
         "server_owned_prompt",
         "staged_codex_session_upload",
         "recoverable_codex_session_errors",
+        "codex_app_server_turn_control",
       ],
       authorized_paths: [
         "/api/github/workspace-git-token",
@@ -927,7 +913,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when AppServer turn-con
             "/web-chat/threads/get",
           ],
         }),
-      /missing capabilities: codex_app_server_turn_control; missing authorized paths: \/api\/chat\/runs\/app-server\/events, \/api\/chat\/runs\/app-server\/control/,
+      /missing authorized paths: \/api\/chat\/runs\/app-server\/events, \/api\/chat\/runs\/app-server\/control/,
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -955,6 +941,10 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
         "/web-chat/codex-session/upsert",
         "/web-chat/codex-session/invalidate",
         "/web-chat/threads/get",
+      ],
+      scoped_authorized_paths: [
+        "/api/chat/runs/app-server/events",
+        "/api/chat/runs/app-server/control",
       ],
     });
 
@@ -1024,24 +1014,17 @@ test("readWebChatAttachment retries transient worker failures", async () => {
   }
 });
 
-test("runCodex treats auth-like repository stdout as normal output", async (t) => {
-  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-stdout-auth-text-"));
+test("runCodex treats auth-like agent text as normal output", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-agent-auth-text-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   t.after(async () => {
     await fs.rm(workspacePath, { recursive: true, force: true });
   });
 
-  await fs.writeFile(
-    fakeCodexPath,
-    [
-      "#!/usr/bin/env node",
-      "console.log('cloudflare/control-plane/tests/control-plane-routing.test.mjs: error: \"refresh_token_reused\",');",
-      "await new Promise((resolve) => setTimeout(resolve, 100));",
-      "process.exit(0);",
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    agentMessage:
+      'cloudflare/control-plane/tests/control-plane-routing.test.mjs: error: "refresh_token_reused",',
+  });
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
@@ -1053,6 +1036,7 @@ test("runCodex treats auth-like repository stdout as normal output", async (t) =
   });
 
   assert.equal(result.ok, true);
+  assert.match(result.output, /refresh_token_reused/i);
 });
 
 test("runCodex returns normal diagnostics for auth-like stderr", async (t) => {
@@ -1084,9 +1068,62 @@ test("runCodex returns normal diagnostics for auth-like stderr", async (t) => {
   });
 
   assert.equal(result.ok, false);
-  assert.match(result.reason, /Codex exited with code=1 signal=none/i);
+  assert.match(result.reason, /Codex app-server exited with code=1 signal=none/i);
   assert.match(result.diagnosticOutput, /refresh_token_reused/i);
 });
+
+async function writeFakeCodexAppServer(
+  fakeCodexPath,
+  {
+    argsOutputPath = "",
+    envOutputPath = "",
+    requestsOutputPath = "",
+    agentMessage = "done",
+    commandLabel = "npm test",
+  } = {},
+) {
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import fs from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `const argsOutputPath = ${JSON.stringify(argsOutputPath)};`,
+      `const envOutputPath = ${JSON.stringify(envOutputPath)};`,
+      `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
+      `const agentMessage = ${JSON.stringify(agentMessage)};`,
+      `const commandLabel = ${JSON.stringify(commandLabel)};`,
+      "if (argsOutputPath) await fs.writeFile(argsOutputPath, JSON.stringify(process.argv.slice(2)), 'utf8');",
+      "if (envOutputPath) await fs.writeFile(envOutputPath, process.env.NODE_OPTIONS || '', 'utf8');",
+      "const requests = [];",
+      "const persistRequests = async () => {",
+      "  if (requestsOutputPath) await fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",
+      "};",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', async (line) => {",
+      "  const message = JSON.parse(line);",
+      "  requests.push({ method: message.method, params: message.params || {} });",
+      "  await persistRequests();",
+      "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'thread/resume') send({ id: message.id, result: { thread: { id: message.params?.threadId || 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: commandLabel } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { delta: agentMessage } });",
+      "    send({ method: 'item/completed', params: { item: { type: 'command_execution', command: commandLabel } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "  }",
+      "  if (message.method === 'turn/steer') send({ id: message.id, result: { ok: true } });",
+      "  if (message.method === 'turn/interrupt') send({ id: message.id, result: { ok: true } });",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
 
 function git(workspacePath, args) {
   execFileSync("git", args, { cwd: workspacePath, env: process.env });

@@ -33,9 +33,6 @@ import {
 import {
   WEB_CHAT_RUNNER_CODEQ8_FILE_PATH,
   WEB_CHAT_RUNNER_CODEQ8_FILE_SAVE_PATH,
-  WEB_CHAT_RUNNER_APP_SERVER_CONTROL_PATH,
-  WEB_CHAT_RUNNER_APP_SERVER_EVENTS_PATH,
-  WEB_CHAT_RUNNER_APP_SERVER_TURN_CONTROL_CAPABILITY,
   WEB_CHAT_RUNNER_DIAGNOSTIC_PATH,
   supportsServerOwnedCodeq8FileSync,
   supportsServerOwnedDiscordDmChat,
@@ -5851,11 +5848,6 @@ async function captureCodexSessionBundle({
   });
 }
 
-function resolveCodexTransportMode(env = process.env) {
-  const normalized = normalizeText(env.CODEQ8_CODEX_TRANSPORT).toLowerCase();
-  return normalized === "app-server" ? "app-server" : "exec";
-}
-
 function normalizeAppServerMethod(value) {
   return normalizeText(value);
 }
@@ -6577,14 +6569,12 @@ async function runCodex({
   timeoutSeconds,
   mode = "fresh",
   sessionId = "",
-  outputFilePath = "",
   appServerContext = null,
 }) {
   const normalizedModel = normalizeText(model) || DEFAULT_CODEX_MODEL;
   const normalizedTask = normalizeText(task);
   const normalizedMode = normalizeText(mode).toLowerCase() === "resume" ? "resume" : "fresh";
   const normalizedSessionId = normalizeCodexSessionId(sessionId);
-  const reasoningEffortConfig = `model_reasoning_effort="${DEFAULT_CODEX_REASONING_EFFORT}"`;
   if (!normalizedTask) {
     return {
       ok: false,
@@ -6610,173 +6600,16 @@ async function runCodex({
     };
   }
 
-  if (resolveCodexTransportMode(commandEnv) === "app-server") {
-    return runCodexAppServer({
-      codexPath,
-      model: normalizedModel,
-      task: normalizedTask,
-      workspacePath,
-      commandEnv,
-      timeoutSeconds,
-      mode: normalizedMode,
-      sessionId: normalizedSessionId,
-      appServerContext,
-    });
-  }
-
-  const resolvedOutputFilePath =
-    path.resolve(outputFilePath || path.join(workspacePath, ".codeq8-last-message.txt"));
-  await ensureDirectory(path.dirname(resolvedOutputFilePath));
-  await fs.rm(resolvedOutputFilePath, { force: true }).catch(() => {});
-
-  return new Promise((resolve) => {
-    const startMs = Date.now();
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    const args = [
-      "--ask-for-approval",
-      "never",
-      "exec",
-      "--model",
-      normalizedModel,
-      "--config",
-      reasoningEffortConfig,
-      "--disable",
-      "multi_agent",
-      "--disable",
-      "sqlite",
-      "--output-last-message",
-      resolvedOutputFilePath,
-      "--sandbox",
-      "danger-full-access",
-    ];
-    if (normalizedMode === "resume") {
-      args.push("resume", normalizedSessionId, normalizedTask);
-    } else {
-      args.push(normalizedTask);
-    }
-
-    const child = spawn(
-      codexPath,
-      args,
-      {
-        cwd: workspacePath,
-        env: applyCodexNodeOptions({ ...commandEnv }),
-        stdio: ["ignore", "pipe", "pipe"],
-        detached: process.platform !== "win32",
-      },
-    );
-
-    const appendOutput = (target, chunk) => {
-      const nextChunk = String(chunk || "");
-      if (!nextChunk) {
-        return target;
-      }
-      return truncate(`${target}${nextChunk}`, MAX_OUTPUT_CHARS * 2);
-    };
-
-    child.stdout?.on("data", (chunk) => {
-      const text = String(chunk || "");
-      if (text) {
-        process.stdout.write(text);
-        stdout = appendOutput(stdout, text);
-      }
-    });
-
-    child.stderr?.on("data", (chunk) => {
-      const text = String(chunk || "");
-      if (text) {
-        process.stderr.write(text);
-        stderr = appendOutput(stderr, text);
-      }
-    });
-
-    const killChild = (signal) => {
-      const pid = parsePositiveInteger(child.pid || 0, 0);
-      if (!pid) {
-        return;
-      }
-      try {
-        if (process.platform !== "win32") {
-          process.kill(-pid, signal);
-        } else {
-          child.kill(signal);
-        }
-      } catch {
-        try {
-          child.kill(signal);
-        } catch {
-          // ignore best-effort kill failures
-        }
-      }
-    };
-
-    const timeoutMs = Math.max(30, timeoutSeconds) * 1000;
-    const timeoutHandle = setTimeout(() => {
-      timedOut = true;
-      killChild("SIGTERM");
-      setTimeout(() => {
-        killChild("SIGKILL");
-      }, 8000).unref();
-    }, timeoutMs);
-
-    child.on("error", (error) => {
-      clearTimeout(timeoutHandle);
-      resolve({
-        ok: false,
-        output: "",
-        diagnosticOutput: truncate(`${stdout}\n${stderr}`.trim(), MAX_OUTPUT_CHARS),
-        reason: extractErrorMessage(error),
-        exitCode: -1,
-        signal: "spawn_error",
-        timedOut,
-        durationMs: Date.now() - startMs,
-      });
-    });
-
-    child.on("close", async (code, signal) => {
-      clearTimeout(timeoutHandle);
-      const durationMs = Date.now() - startMs;
-      let lastMessageOutput = "";
-      try {
-        if (await isFile(resolvedOutputFilePath)) {
-          lastMessageOutput = normalizeText(await fs.readFile(resolvedOutputFilePath, "utf8"));
-        }
-      } catch {
-        lastMessageOutput = "";
-      }
-      const trimmedCombined = normalizeText(`${stdout}\n${stderr}`);
-      const output = truncate(lastMessageOutput, MAX_OUTPUT_CHARS);
-      const diagnosticOutput = truncate(trimmedCombined, MAX_OUTPUT_CHARS);
-      if (code === 0 && !timedOut) {
-        resolve({
-          ok: true,
-          output,
-          diagnosticOutput,
-          reason: "",
-          exitCode: 0,
-          signal: signal || "",
-          timedOut: false,
-          durationMs,
-        });
-        return;
-      }
-
-      const reason = timedOut
-        ? `Codex timed out after ${Math.floor(timeoutMs / 1000)} seconds.`
-        : `Codex exited with code=${Number.isFinite(code) ? code : "null"} signal=${signal || "none"}.`;
-      resolve({
-        ok: false,
-        output,
-        diagnosticOutput,
-        reason,
-        exitCode: Number.isFinite(code) ? Number(code) : -1,
-        signal: signal || "",
-        timedOut,
-        durationMs,
-      });
-    });
+  return runCodexAppServer({
+    codexPath,
+    model: normalizedModel,
+    task: normalizedTask,
+    workspacePath,
+    commandEnv,
+    timeoutSeconds,
+    mode: normalizedMode,
+    sessionId: normalizedSessionId,
+    appServerContext,
   });
 }
 
@@ -7426,7 +7259,6 @@ async function main() {
     GIT_HTTP_LOW_SPEED_LIMIT: DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT,
     GIT_HTTP_LOW_SPEED_TIME: DEFAULT_GIT_HTTP_LOW_SPEED_TIME,
   };
-  const codexTransportMode = resolveCodexTransportMode(commandEnv);
   log(
     "Resolved web chat worker target",
     `thread_id=${threadId} worker=${normalizeBaseUrl(workerUrl)}`,
@@ -7449,21 +7281,6 @@ async function main() {
       workspaceRepository,
       threadId,
       runId,
-      requiredCapabilities:
-        codexTransportMode === "app-server"
-          ? [
-              ...REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
-              WEB_CHAT_RUNNER_APP_SERVER_TURN_CONTROL_CAPABILITY,
-            ]
-          : REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
-      requiredPaths:
-        codexTransportMode === "app-server"
-          ? [
-              ...REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
-              WEB_CHAT_RUNNER_APP_SERVER_EVENTS_PATH,
-              WEB_CHAT_RUNNER_APP_SERVER_CONTROL_PATH,
-            ]
-          : REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
     });
     await reportRunnerDiagnostic({
       event: "runner_runtime_manifest_validated",
@@ -7481,7 +7298,7 @@ async function main() {
         runner_required_paths_count: Array.isArray(runtimeManifest.runner_required_paths)
           ? runtimeManifest.runner_required_paths.length
           : 0,
-        codex_transport: codexTransportMode,
+        codex_transport: "app-server",
       },
     });
   } catch (error) {
@@ -8026,7 +7843,6 @@ async function main() {
           timeoutSeconds,
           mode: executionMode,
           sessionId: codexSessionState.session_id,
-          outputFilePath: path.join(attemptRunRuntime.homePath, "last-message.txt"),
           appServerContext: {
             publicBaseUrl,
             webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
