@@ -755,6 +755,7 @@ function shouldContinueAfterCodexSessionPersistenceFailure(value) {
   return (
     /^fetch failed$/i.test(normalized) ||
     /worker request failed:\s*fetch failed/i.test(normalized) ||
+    /web chat codex session revision conflict/i.test(normalized) ||
     /network/i.test(normalized) ||
     /timed out/i.test(normalized) ||
     /timeout/i.test(normalized) ||
