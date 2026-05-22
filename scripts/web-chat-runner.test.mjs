@@ -340,6 +340,61 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   );
 });
 
+test("runCodex summarizes AppServer chatter and suppresses successful stderr", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-logs-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "console.error('ERROR codex_core::tools::router: transient tool failure');",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    send({ method: 'thread/status/changed', params: { status: 'running' } });",
+      "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: 'npm test' } } });",
+      "    for (let index = 0; index < 5; index += 1) send({ method: 'item/agentMessage/delta', params: { delta: 'ok' } });",
+      "    send({ method: 'item/completed', params: { item: { type: 'command_execution', command: 'npm test' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const output = await captureRunnerOutput(() =>
+    runCodex({
+      codexPath: fakeCodexPath,
+      model: "gpt-5.5",
+      task: "use app server quietly",
+      workspacePath,
+      commandEnv: process.env,
+      timeoutSeconds: 30,
+    }),
+  );
+
+  assert.equal(output.result.ok, true);
+  assert.equal(output.stderr, "");
+  assert.doesNotMatch(output.logs, /transient tool failure/);
+  assert.doesNotMatch(output.logs, /method=item\/agentMessage\/delta/);
+  assert.doesNotMatch(output.logs, /method=item\/started/);
+  assert.match(output.logs, /Codex app-server notifications summarized/);
+  assert.match(output.logs, /agent_message_deltas=5/);
+  assert.doesNotMatch(output.logs, /item\/agentMessage\/delta=5/);
+  assert.match(output.logs, /Codex app-server stderr captured \| chars=\d+/);
+});
+
 test("runCodex sends AppServer steer requests with the active expected turn id", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-steer-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
@@ -1371,6 +1426,35 @@ async function writeFakeCodexAppServer(
     ].join("\n"),
     { mode: 0o755 },
   );
+}
+
+async function captureRunnerOutput(callback) {
+  const originalConsoleLog = console.log;
+  const originalStderrWrite = process.stderr.write;
+  const logs = [];
+  const stderr = [];
+  console.log = (...args) => {
+    logs.push(args.map((arg) => String(arg)).join(" "));
+  };
+  process.stderr.write = (chunk, encoding, callbackOrError) => {
+    stderr.push(String(chunk || ""));
+    const callbackFn = typeof encoding === "function" ? encoding : callbackOrError;
+    if (typeof callbackFn === "function") {
+      callbackFn();
+    }
+    return true;
+  };
+  try {
+    const result = await callback();
+    return {
+      result,
+      logs: logs.join("\n"),
+      stderr: stderr.join(""),
+    };
+  } finally {
+    console.log = originalConsoleLog;
+    process.stderr.write = originalStderrWrite;
+  }
 }
 
 function git(workspacePath, args) {

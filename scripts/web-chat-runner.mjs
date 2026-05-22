@@ -60,6 +60,24 @@ const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 200;
 const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
 const APP_SERVER_CONTROL_POLL_INTERVAL_MS = 1000;
+const APP_SERVER_NOTIFICATION_SUMMARY_MAX_METHODS = 8;
+const APP_SERVER_NOTIFICATION_TRACE_METHODS = new Set([
+  "turn/started",
+  "turn/completed",
+]);
+const APP_SERVER_NOTIFICATION_SUMMARY_LABELS = new Map([
+  ["account/rateLimits/updated", "rate_limit_updates"],
+  ["item/agentMessage/delta", "agent_message_deltas"],
+  ["item/completed", "items_completed"],
+  ["item/started", "items_started"],
+  ["mcpServer/startupStatus/updated", "mcp_startup_updates"],
+  ["remoteControl/status/changed", "remote_control_status_updates"],
+  ["thread/goal/cleared", "thread_goal_clears"],
+  ["thread/status/changed", "thread_status_updates"],
+  ["thread/tokenUsage/updated", "token_usage_updates"],
+  ["turn/completed", "turn_completed"],
+  ["turn/started", "turn_started"],
+]);
 const CODEX_AUTH_PRECHECK_TIMEOUT_SECONDS = 45;
 const WEB_CHAT_RUNNER_DIAGNOSTIC_SOURCE = "web_chat_runner_diagnostic";
 const WEB_CHAT_RUN_MARKER_VERSION = "v1";
@@ -6043,6 +6061,59 @@ function summarizeAppServerProgressNotification({ method, params, now = Date.now
   return null;
 }
 
+function incrementCount(map, key) {
+  const normalizedKey = normalizeText(key);
+  if (!normalizedKey) {
+    return;
+  }
+  map.set(normalizedKey, (map.get(normalizedKey) || 0) + 1);
+}
+
+function formatAppServerNotificationSummaryLabel(method) {
+  const normalizedMethod = normalizeAppServerMethod(method);
+  return APP_SERVER_NOTIFICATION_SUMMARY_LABELS.get(normalizedMethod) || normalizedMethod;
+}
+
+function summarizeCountMap(counts, maxEntries = APP_SERVER_NOTIFICATION_SUMMARY_MAX_METHODS) {
+  const entries = [...counts.entries()]
+    .filter(([, count]) => count > 0)
+    .sort((first, second) => second[1] - first[1] || first[0].localeCompare(second[0]));
+  if (entries.length === 0) {
+    return "";
+  }
+  const total = entries.reduce((sum, [, count]) => sum + count, 0);
+  const visibleEntries = entries.slice(0, maxEntries);
+  const hiddenMethodCount = Math.max(0, entries.length - visibleEntries.length);
+  return [
+    `total=${total}`,
+    ...visibleEntries.map(
+      ([method, count]) => `${formatAppServerNotificationSummaryLabel(method)}=${count}`,
+    ),
+    hiddenMethodCount ? `other_methods=${hiddenMethodCount}` : "",
+  ].filter(Boolean).join(" ");
+}
+
+function describeAppServerNotificationTrace(method, params = {}) {
+  const normalizedMethod = normalizeAppServerMethod(method);
+  if (normalizedMethod === "turn/started") {
+    const turnId = extractAppServerTurnId(params);
+    return ["method=turn/started", turnId ? "has_turn_id=true" : ""]
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (normalizedMethod === "turn/completed") {
+    const status = extractAppServerTurnStatus(params);
+    return ["method=turn/completed", status ? `status=${status}` : ""]
+      .filter(Boolean)
+      .join(" ");
+  }
+  return `method=${normalizedMethod}`;
+}
+
+function shouldTraceAppServerNotification(method) {
+  return APP_SERVER_NOTIFICATION_TRACE_METHODS.has(normalizeAppServerMethod(method));
+}
+
 function buildAppServerRouteUrl({ publicBaseUrl, path: routePath, query = null }) {
   const normalizedBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
   const url = new URL(routePath, `${normalizedBaseUrl}/`);
@@ -6401,6 +6472,7 @@ async function runCodexAppServer({
     let activeTurnId = "";
     let nextRequestId = 1;
     let appServerTraceCount = 0;
+    const appServerNotificationCounts = new Map();
     const pendingRequests = new Map();
     const progressReporter = createAppServerProgressReporter(appServerContext || {});
     let controlPoller = null;
@@ -6501,6 +6573,18 @@ async function runCodexAppServer({
         // ignore stdin close failure
       }
       killChild("SIGTERM");
+      const notificationSummary = summarizeCountMap(appServerNotificationCounts);
+      if (notificationSummary) {
+        log("Codex app-server notifications summarized", notificationSummary);
+      }
+      const normalizedStderr = normalizeText(stderr);
+      if (normalizedStderr) {
+        if (result.ok) {
+          log("Codex app-server stderr captured", `chars=${normalizedStderr.length}`);
+        } else {
+          process.stderr.write(stderr.endsWith("\n") ? stderr : `${stderr}\n`);
+        }
+      }
       resolve({
         ...result,
         durationMs: Date.now() - startMs,
@@ -6550,7 +6634,13 @@ async function runCodexAppServer({
 
     const handleNotification = (method, params) => {
       const normalizedMethod = normalizeAppServerMethod(method);
-      logAppServerTrace("Codex app-server notification received", `method=${normalizedMethod}`);
+      incrementCount(appServerNotificationCounts, normalizedMethod);
+      if (shouldTraceAppServerNotification(normalizedMethod)) {
+        logAppServerTrace(
+          "Codex app-server notification received",
+          describeAppServerNotificationTrace(normalizedMethod, params),
+        );
+      }
       const progressEvent = summarizeAppServerProgressNotification({
         method: normalizedMethod,
         params,
@@ -6644,7 +6734,6 @@ async function runCodexAppServer({
     child.stderr?.on("data", (chunk) => {
       const text = String(chunk || "");
       if (text) {
-        process.stderr.write(text);
         stderr = appendOutput(stderr, text);
       }
     });
