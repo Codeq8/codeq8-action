@@ -59,6 +59,11 @@ const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 200;
 const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
 const APP_SERVER_CONTROL_POLL_INTERVAL_MS = 1000;
+const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
+  "codex_app_server_attachment_turn_control";
+const APP_SERVER_CONTROL_CAPABILITIES = Object.freeze([
+  APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY,
+]);
 const APP_SERVER_NOTIFICATION_SUMMARY_MAX_METHODS = 8;
 const APP_SERVER_NOTIFICATION_TRACE_METHODS = new Set([
   "turn/started",
@@ -193,6 +198,7 @@ function buildCodexRunMetadata({ model = "", mode = "", extra = {} }) {
     ...(normalizedModel ? { model: normalizedModel } : {}),
     reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT,
     ...(normalizedMode ? { codex_session_mode: normalizedMode } : {}),
+    app_server_control_capabilities: [...APP_SERVER_CONTROL_CAPABILITIES],
     ...extra,
   };
 }
@@ -6055,13 +6061,67 @@ function createAppServerProgressReporter({
   };
 }
 
+function describeMaterializedAppServerAttachment(attachment) {
+  const normalized = normalizeObject(attachment);
+  const name =
+    normalizeAttachmentName(normalized.name || normalized.file_name || normalized.fileName) ||
+    normalizeText(normalized.attachment_id || normalized.attachmentId) ||
+    "attachment";
+  const contentType =
+    normalizeText(normalized.content_type || normalized.contentType) ||
+    "application/octet-stream";
+  const sizeBytes = parseNonNegativeInteger(
+    normalized.size_bytes || normalized.sizeBytes,
+    0,
+  );
+  const localPath = normalizeText(normalized.local_path || normalized.localPath);
+  const detail = [
+    contentType,
+    sizeBytes > 0 ? `${sizeBytes} bytes` : "",
+    normalizeText(normalized.attachment_id || normalized.attachmentId)
+      ? `attachment_id=${normalizeText(normalized.attachment_id || normalized.attachmentId)}`
+      : "",
+  ].filter(Boolean).join(", ");
+  return `- ${name}${detail ? ` (${detail})` : ""}: ${localPath || "<not materialized>"}`;
+}
+
+function buildAppServerSteerInputText({
+  content,
+  attachments,
+}) {
+  const normalizedContent = normalizeText(content);
+  const normalizedAttachments = Array.isArray(attachments) ? attachments : [];
+  if (normalizedAttachments.length === 0) {
+    return normalizedContent;
+  }
+
+  return [
+    "The user sent a follow-up while this run was active.",
+    "",
+    "Message:",
+    normalizedContent || "(no text)",
+    "",
+    "Attachments materialized locally:",
+    ...normalizedAttachments.map((attachment) =>
+      describeMaterializedAppServerAttachment(attachment),
+    ),
+    "",
+    "Inspect these files directly if they are relevant to the request. Do not modify or delete the attached files.",
+  ].join("\n");
+}
+
 function createAppServerControlPoller({
   publicBaseUrl,
   webChatRunToken,
   workspaceRepository,
   threadId,
   runId,
+  workerUrl = "",
+  adminToken = "",
+  attachmentRootPath = "",
+  commandEnv = process.env,
   fetchImpl = globalThis.fetch,
+  materializeWebChatAttachmentsImpl = materializeWebChatAttachments,
   sendRequest,
   getAppServerThreadId,
   getAppServerTurnId,
@@ -6071,6 +6131,9 @@ function createAppServerControlPoller({
   const normalizedRepository = normalizeRepository(workspaceRepository);
   const normalizedThreadId = normalizeThreadId(threadId);
   const normalizedRunId = normalizeRunId(runId);
+  const normalizedWorkerUrl = normalizeBaseUrl(workerUrl);
+  const normalizedAdminToken = normalizeText(adminToken) || normalizedToken;
+  const normalizedAttachmentRootPath = normalizeText(attachmentRootPath);
   if (
     !normalizedPublicBaseUrl ||
     !normalizedToken ||
@@ -6170,13 +6233,31 @@ function createAppServerControlPoller({
           }
           if (kind === "steer") {
             const content = normalizeText(request.content);
-            if (!content) {
+            const attachments = parseAttachmentList(request.attachments);
+            const materializedAttachments = attachments.length > 0
+              ? await materializeWebChatAttachmentsImpl({
+                  attachments,
+                  attachmentRootPath: path.join(
+                    normalizedAttachmentRootPath || os.tmpdir(),
+                    normalizeText(requestId).replace(/[^A-Za-z0-9._:-]/g, "-"),
+                  ),
+                  workerUrl: normalizedWorkerUrl,
+                  adminToken: normalizedAdminToken,
+                  threadId: normalizedThreadId,
+                  commandEnv,
+                })
+              : [];
+            const inputText = buildAppServerSteerInputText({
+              content,
+              attachments: materializedAttachments,
+            });
+            if (!inputText) {
               throw new Error("Steer content is empty.");
             }
             await sendRequest("turn/steer", {
               threadId: appServerThreadId,
               expectedTurnId: appServerTurnId,
-              input: [{ type: "text", text: content }],
+              input: [{ type: "text", text: inputText }],
             });
             acknowledgements.push({ request_id: requestId, status: "accepted" });
           } else {
@@ -7933,6 +8014,10 @@ async function main() {
             workspaceRepository: activeWorkspaceRepository,
             threadId,
             runId,
+            workerUrl,
+            adminToken,
+            attachmentRootPath: path.join(attemptRunRuntime.homePath, "control-attachments"),
+            commandEnv: codexCommandEnv,
           },
         });
         await reportRunnerDiagnostic({

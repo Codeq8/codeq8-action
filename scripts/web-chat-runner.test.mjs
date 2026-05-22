@@ -13,6 +13,7 @@ import {
   buildFirebaseStorageDownloadUrl,
   buildFinalWorkspaceStateCallbackPayload,
   buildCodexPrompt,
+  buildCodexRunMetadata,
   buildResumePrompt,
   buildWebChatRunMarker,
   buildWebChatRunnerDiagnosticRequest,
@@ -86,6 +87,17 @@ test("web chat run markers prove captured Codex sessions contain the current run
     }),
     false,
   );
+});
+
+test("buildCodexRunMetadata advertises AppServer attachment steering support", () => {
+  const metadata = buildCodexRunMetadata({
+    model: "gpt-5.5",
+    mode: "fresh",
+  });
+
+  assert.deepEqual(metadata.app_server_control_capabilities, [
+    "codex_app_server_attachment_turn_control",
+  ]);
 });
 
 test("runner diagnostic requests redact secrets before posting", async () => {
@@ -474,6 +486,121 @@ test("runCodex sends AppServer steer requests with the active expected turn id",
   ]);
   assert.deepEqual(acknowledgementBodies.at(-1)?.acknowledgements, [
     { request_id: "wcasr_steer", status: "accepted" },
+  ]);
+});
+
+test("runCodex materializes AppServer steer attachments before forwarding them", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-steer-attachments-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    requestsOutputPath,
+    agentMessage: "attachment steer ok",
+    delayTurnCompletionMs: 2200,
+  });
+
+  let controlGetCount = 0;
+  let steerReturned = false;
+  const materializeCalls = [];
+  const acknowledgementBodies = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "use app server attachment steering",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+    },
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "runner_token",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      workerUrl: "https://worker.example",
+      adminToken: "runner_token",
+      attachmentRootPath: path.join(workspacePath, "control-attachments"),
+      materializeWebChatAttachmentsImpl: async (args) => {
+        materializeCalls.push(args);
+        return [
+          {
+            attachment_id: "wca_screenshot",
+            name: "Screenshot.png",
+            content_type: "image/png",
+            size_bytes: 12,
+            local_path: path.join(args.attachmentRootPath, "wca_screenshot-Screenshot.png"),
+          },
+        ];
+      },
+      fetchImpl: async (url, init = {}) => {
+        if (String(url).includes("/api/chat/runs/app-server/control")) {
+          const method = String(init.method || "GET").toUpperCase();
+          if (method === "POST") {
+            acknowledgementBodies.push(JSON.parse(String(init.body || "{}")));
+            return new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          controlGetCount += 1;
+          const requests =
+            controlGetCount >= 2 && !steerReturned
+              ? [
+                  {
+                    request_id: "wcasr_attachment_steer",
+                    sequence: 1,
+                    kind: "steer",
+                    content: "",
+                    attachments: [
+                      {
+                        attachment_id: "wca_screenshot",
+                        name: "Screenshot.png",
+                        content_type: "image/png",
+                        size_bytes: 12,
+                        storage_backend: "firebase_storage",
+                        storage_bucket: "codeq8.appspot.com",
+                        storage_key: "chat_attachments/wca_screenshot/Screenshot.png",
+                      },
+                    ],
+                  },
+                ]
+              : [];
+          steerReturned = steerReturned || requests.length > 0;
+          return new Response(JSON.stringify({ ok: true, requests }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "attachment steer ok");
+  assert.equal(materializeCalls.length, 1);
+  assert.equal(materializeCalls[0]?.workerUrl, "https://worker.example");
+  assert.equal(materializeCalls[0]?.threadId, "wct_app");
+  assert.match(materializeCalls[0]?.attachmentRootPath, /wcasr_attachment_steer$/);
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  const steerRequest = requests.find((request) => request.method === "turn/steer");
+  const steerText = String(steerRequest?.params?.input?.[0]?.text || "");
+  assert.equal(steerRequest?.params?.expectedTurnId, "turn_app");
+  assert.match(steerText, /The user sent a follow-up while this run was active\./);
+  assert.match(steerText, /Message:\n\(no text\)/);
+  assert.match(steerText, /Attachments materialized locally:/);
+  assert.match(steerText, /Screenshot\.png/);
+  assert.match(steerText, /wca_screenshot-Screenshot\.png/);
+  assert.deepEqual(acknowledgementBodies.at(-1)?.acknowledgements, [
+    { request_id: "wcasr_attachment_steer", status: "accepted" },
   ]);
 });
 
@@ -934,6 +1061,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "staged_codex_session_upload",
         "recoverable_codex_session_errors",
         "codex_app_server_turn_control",
+        "codex_app_server_attachment_turn_control",
         "runner_codeq8_cli",
       ],
       authorized_paths: [
