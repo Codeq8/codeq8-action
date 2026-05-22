@@ -2892,7 +2892,7 @@ test("superseded web chat runs do not poison Codex session state", () => {
   assert.equal(isRecoverableCodexSessionErrorState(cancelledWakeupMessage), true);
 });
 
-test("transient Codex session persistence failures do not fail completed runs", () => {
+test("recoverable Codex session persistence failures do not fail completed runs", () => {
   assert.equal(
     shouldContinueAfterCodexSessionPersistenceFailure("fetch failed"),
     true,
@@ -2909,7 +2909,13 @@ test("transient Codex session persistence failures do not fail completed runs", 
   );
   assert.equal(
     shouldContinueAfterCodexSessionPersistenceFailure("web chat codex session revision conflict"),
-    false,
+    true,
+  );
+  assert.equal(
+    shouldContinueAfterCodexSessionPersistenceFailure(
+      "Codex session persistence failed: web chat codex session revision conflict (expected 19, found 20).",
+    ),
+    true,
   );
   assert.equal(
     shouldContinueAfterCodexSessionPersistenceFailure(
