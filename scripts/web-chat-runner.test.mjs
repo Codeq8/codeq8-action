@@ -934,6 +934,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "staged_codex_session_upload",
         "recoverable_codex_session_errors",
         "codex_app_server_turn_control",
+        "runner_codeq8_cli",
       ],
       authorized_paths: [
         "/api/github/workspace-git-token",
@@ -1688,6 +1689,7 @@ test("buildResumePrompt fetches the server-owned resume prompt", async () => {
       promptText: "keep going",
       recentUserMessagesPromptText: "Recent user context",
       recentChecksPromptText: "Checks: green",
+      codeq8Cli: { available: true },
       attachments: [],
       referencedThreads: [],
       targetShift: true,
@@ -1698,6 +1700,7 @@ test("buildResumePrompt fetches the server-owned resume prompt", async () => {
     assert.equal(calls[0]?.url, "https://codeq8.example.com/api/chat/runs/prompt");
     assert.equal(calls[0]?.body?.mode, "resume");
     assert.equal(calls[0]?.body?.target_shift, true);
+    assert.equal(calls[0]?.body?.codeq8_cli_available, true);
     assert.equal(calls[0]?.body?.recent_user_messages_prompt_text, "Recent user context");
   } finally {
     globalThis.fetch = originalFetch;

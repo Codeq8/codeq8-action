@@ -10,7 +10,6 @@ import process from "node:process";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
-import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
 import {
   buildControlPlaneRequestAuthorizationHeader,
   resolveControlPlaneRequestAuthSecret,
@@ -4841,37 +4840,6 @@ async function materializeWebChatAttachments({
   return materialized;
 }
 
-async function resolveCodeq8Path(commandEnv) {
-  const explicit = normalizeText(commandEnv.CODEQ8_PATH || process.env.CODEQ8_PATH);
-  if (explicit && (await isExecutableFile(explicit))) {
-    return explicit;
-  }
-
-  const candidates = [
-    "/opt/homebrew/bin/codeq8",
-    "/usr/local/bin/codeq8",
-  ];
-  for (const candidate of candidates) {
-    const normalized = normalizeText(candidate);
-    if (normalized && (await isExecutableFile(normalized))) {
-      return normalized;
-    }
-  }
-
-  const whichResult = await runProcessCapture("/bin/bash", ["-lc", "command -v codeq8"], {
-    cwd: process.cwd(),
-    env: commandEnv,
-  });
-  if (whichResult.ok) {
-    const resolved = normalizeText(whichResult.stdout);
-    if (resolved && (await isExecutableFile(resolved))) {
-      return resolved;
-    }
-  }
-
-  throw new Error("codeq8 executable was not found. Install @codeq8/codeq8 globally on this runner.");
-}
-
 async function resolveGitHubCliPath(commandEnv) {
   const whichResult = await runProcessCapture("/bin/bash", ["-c", "command -v gh"], {
     cwd: process.cwd(),
@@ -5086,189 +5054,28 @@ async function prepareGitHubCliAuth({
 
 async function prepareCodeq8Cli({
   commandEnv,
-  workspacePath,
-  publicBaseUrl,
-  expectedGithubLogin = "",
+  runtimeHomePath,
 }) {
-  try {
-    await ensureRunnerGlobalCliTools({
-      env: commandEnv,
-      cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
-      logger(message, details = "") {
-        log(
-          "Managed CLI refresh",
-          `${message}${normalizeText(details) ? ` | ${normalizeText(details)}` : ""}`,
-        );
-      },
-    });
-  } catch (error) {
-    return {
-      available: false,
-      reason:
-        error instanceof Error
-          ? error.message
-          : "Unable to refresh managed global CLI tools for this run.",
-    };
-  }
-
-  let codeq8Path = "";
-  try {
-    codeq8Path = await resolveCodeq8Path(commandEnv);
-  } catch (error) {
-    return {
-      available: false,
-      reason: extractErrorMessage(error),
-    };
-  }
-
-  const chatHelpCheck = await runProcessCapture(codeq8Path, ["chat", "thread", "--help"], {
-    cwd: workspacePath,
-    env: commandEnv,
-  });
-  const chatHelpOutput =
-    `${normalizeText(chatHelpCheck.stdout)}\n${normalizeText(chatHelpCheck.stderr)}`.trim();
-  const githubIssueHelpCheck = await runProcessCapture(
-    codeq8Path,
-    ["github", "issue", "--help"],
-    {
-      cwd: workspacePath,
-      env: commandEnv,
-    },
+  const normalizedRuntimeHomePath = path.resolve(runtimeHomePath);
+  const wrapperBinPath = path.join(normalizedRuntimeHomePath, "bin");
+  const wrapperPath = path.join(wrapperBinPath, "codeq8");
+  const helperScriptPath = path.resolve(
+    path.dirname(new URL(import.meta.url).pathname),
+    "web-chat-runner-codeq8-cli.mjs",
   );
-  const githubIssueHelpOutput =
-    `${normalizeText(githubIssueHelpCheck.stdout)}\n${normalizeText(githubIssueHelpCheck.stderr)}`.trim();
-  const githubPrHelpCheck = await runProcessCapture(codeq8Path, ["github", "pr", "--help"], {
-    cwd: workspacePath,
-    env: commandEnv,
-  });
-  const githubPrHelpOutput =
-    `${normalizeText(githubPrHelpCheck.stdout)}\n${normalizeText(githubPrHelpCheck.stderr)}`.trim();
-  if (
-    !chatHelpCheck.ok ||
-    !chatHelpOutput.includes("chat thread list") ||
-    !chatHelpOutput.includes("chat thread create") ||
-    !chatHelpOutput.includes("chat thread send") ||
-    !chatHelpOutput.includes("chat thread target-branch") ||
-    !chatHelpOutput.includes("chat thread set-title") ||
-    !githubIssueHelpCheck.ok ||
-    !githubIssueHelpOutput.includes("github issue view") ||
-    !githubIssueHelpOutput.includes("github issue create") ||
-    !githubIssueHelpOutput.includes("github issue update") ||
-    !githubIssueHelpOutput.includes("github issue comment") ||
-    !githubPrHelpCheck.ok ||
-    !githubPrHelpOutput.includes("github pr view") ||
-    !githubPrHelpOutput.includes("github pr comment")
-  ) {
-    return {
-      available: false,
-      reason:
-        "Installed codeq8 CLI does not support the required web chat thread and GitHub commands yet.",
-    };
-  }
-
-  const githubToken = resolveWebChatGitHubWriteToken(commandEnv);
-  if (!githubToken) {
-    return {
-      available: false,
-      reason:
-        "codeq8 CLI is installed, but the repository GitHub App token was unavailable for login.",
-    };
-  }
-
-  const login = await runProcessCapture(
-    codeq8Path,
-    [
-      "login",
-      "--with-token",
-      "--base-url",
-      publicBaseUrl,
-    ],
-    {
-      cwd: workspacePath,
-      env: commandEnv,
-      stdinText: `${githubToken}\n`,
-    },
-  );
-  if (!login.ok) {
-    return {
-      available: false,
-      reason:
-        normalizeText(login.stderr) ||
-        normalizeText(login.stdout) ||
-        login.reason ||
-        "Unable to authenticate codeq8 CLI for this run.",
-    };
-  }
-
-  const status = await runProcessCapture(
-    codeq8Path,
-    [
-      "auth",
-      "status",
-      "--json",
-      "--base-url",
-      publicBaseUrl,
-    ],
-    {
-      cwd: workspacePath,
-      env: commandEnv,
-    },
-  );
-  if (!status.ok) {
-    return {
-      available: false,
-      reason:
-        normalizeText(status.stderr) ||
-        normalizeText(status.stdout) ||
-        "codeq8 auth status failed after runner login.",
-    };
-  }
-
-  let statusPayload = {};
-  try {
-    statusPayload = JSON.parse(normalizeText(status.stdout) || "{}");
-  } catch (error) {
-    return {
-      available: false,
-      reason: `codeq8 auth status returned invalid JSON: ${
-        extractErrorMessage(error)
-      }`,
-    };
-  }
-
-  if (!statusPayload || typeof statusPayload !== "object" || Array.isArray(statusPayload)) {
-    return {
-      available: false,
-      reason: "codeq8 auth status returned an invalid payload.",
-    };
-  }
-
-  if (!statusPayload.authenticated) {
-    return {
-      available: false,
-      reason: normalizeText(statusPayload.error) || "codeq8 auth status reported unauthenticated.",
-    };
-  }
-
-  const authenticatedGithubLogin = normalizeText(statusPayload.github_login);
-  const normalizedExpectedGithubLogin = normalizeText(expectedGithubLogin);
-  if (
-    normalizedExpectedGithubLogin &&
-    authenticatedGithubLogin &&
-    authenticatedGithubLogin !== normalizedExpectedGithubLogin
-  ) {
-    return {
-      available: false,
-      reason:
-        `codeq8 auth status resolved ${authenticatedGithubLogin}, expected ` +
-        `${normalizedExpectedGithubLogin}.`,
-    };
-  }
-
+  await ensureDirectory(wrapperBinPath);
+  const wrapperScript = [
+    "#!/bin/sh",
+    `exec node ${quoteShellArgument(helperScriptPath)} "$@"`,
+    "",
+  ].join("\n");
+  await fs.writeFile(wrapperPath, wrapperScript, { mode: 0o755 });
+  await fs.chmod(wrapperPath, 0o755);
+  prependCommandPath(commandEnv, wrapperBinPath);
   return {
     available: true,
-    binPath: codeq8Path,
-    githubLogin: authenticatedGithubLogin,
+    binPath: wrapperPath,
+    githubLogin: "",
   };
 }
 
@@ -5517,6 +5324,7 @@ async function buildResumePrompt({
   promptText,
   recentUserMessagesPromptText = "",
   recentChecksPromptText = "",
+  codeq8Cli,
   attachments = [],
   referencedThreads = [],
   targetShift = null,
@@ -5543,7 +5351,7 @@ async function buildResumePrompt({
       recent_checks_prompt_text: normalizeText(recentChecksPromptText),
       attachments: Array.isArray(attachments) ? attachments : [],
       referenced_threads: Array.isArray(referencedThreads) ? referencedThreads : [],
-      codeq8_cli_available: false,
+      codeq8_cli_available: Boolean(codeq8Cli?.available),
       target_shift: Boolean(targetShift),
     },
     schema: webChatRunnerPromptResponseSchema,
@@ -7803,14 +7611,12 @@ async function main() {
 
         preparedCodeq8Cli = await prepareCodeq8Cli({
           commandEnv: codexCommandEnv,
-          workspacePath: preparedWorkspace.workspacePath,
-          publicBaseUrl,
-          expectedGithubLogin: githubLogin,
+          runtimeHomePath: attemptRunRuntime.homePath,
         });
         if (preparedCodeq8Cli.available) {
           log(
             "Prepared codeq8 CLI for web chat run",
-            `path=${preparedCodeq8Cli.binPath} login=${normalizeText(preparedCodeq8Cli.githubLogin) || githubLogin || "<unknown>"} config_home=${normalizeText(codexCommandEnv.CODEQ8_CONFIG_HOME)}`,
+            `path=${preparedCodeq8Cli.binPath} config_home=${normalizeText(codexCommandEnv.CODEQ8_CONFIG_HOME)}`,
           );
         } else {
           log(
@@ -7972,6 +7778,7 @@ async function main() {
               promptText,
               recentUserMessagesPromptText,
               recentChecksPromptText,
+              codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
               referencedThreads,
               targetShift: resumeTargetShift ? targetBeforeAttempt : null,
