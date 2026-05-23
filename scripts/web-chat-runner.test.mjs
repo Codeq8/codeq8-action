@@ -81,6 +81,8 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
   );
   assert.match(source, /The bridge owns the AppServer live-cost boundary/);
   assert.match(source, /APP_SERVER_FIRESTORE_SESSION_PATH/);
+  assert.match(source, /app_server_firestore_control_listener_failed/);
+  assert.match(source, /reportRunnerDiagnostic/);
   assert.match(bridgeSource, /import\("firebase\/firestore"\)/);
   assert.match(bridgeSource, /\bonSnapshot\b/);
   assert.match(bridgeSource, /\bterminate\(firestore\)/);

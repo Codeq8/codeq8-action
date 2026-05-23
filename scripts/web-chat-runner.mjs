@@ -5992,6 +5992,25 @@ function buildAppServerRouteUrl({ publicBaseUrl, path: routePath, query = null }
   return url.toString();
 }
 
+async function reportAppServerFirestoreDiagnostic(
+  reportRunnerDiagnostic,
+  {
+    event,
+    failureClass = "",
+    severity = "error",
+    ok = false,
+    details = {},
+  } = {},
+) {
+  await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+    event,
+    failureClass: failureClass || event,
+    severity,
+    ok,
+    details,
+  }).catch(() => null);
+}
+
 function createNoopAppServerProgressReporter() {
   return {
     enqueue: () => {},
@@ -6109,6 +6128,7 @@ function createAppServerFirestoreProgressReporter({
   FieldPathImpl,
   channel,
   docRef,
+  reportRunnerDiagnostic,
   updateDocImpl,
 }) {
   // Batching here reduces Firestore writes. This timer is not a polling loop:
@@ -6171,7 +6191,22 @@ function createAppServerFirestoreProgressReporter({
         String(now),
         "updatedAt",
         now,
-      ).catch(() => null);
+      );
+    } catch (error) {
+      const reason = extractErrorMessage(error);
+      log("Codex app-server Firestore progress write failed", reason);
+      await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+        event: "app_server_firestore_progress_write_failed",
+        failureClass: "app_server_firestore_progress_write_failed",
+        details: {
+          reason,
+          collection_id: normalizeText(channel?.collectionId),
+          document_id_hash: hashDiagnosticValue(channel?.documentId),
+          thread_id: normalizedThreadId,
+          run_id: normalizedRunId,
+          batch_size: batch.length,
+        },
+      });
     } finally {
       flushing = false;
       resolveFlushWaiters();
@@ -6359,6 +6394,7 @@ function createAppServerFirestoreControlListener({
   docRef,
   firestore,
   onSnapshotImpl,
+  reportRunnerDiagnostic,
   runTransactionImpl,
   workerUrl = "",
   adminToken = "",
@@ -6434,7 +6470,22 @@ function createAppServerFirestoreControlListener({
         "updatedAt",
         now,
       );
-    }).catch(() => null);
+    }).catch(async (error) => {
+      const reason = extractErrorMessage(error);
+      log("Codex app-server Firestore control acknowledgement failed", reason);
+      await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+        event: "app_server_firestore_control_acknowledgement_failed",
+        failureClass: "app_server_firestore_control_acknowledgement_failed",
+        details: {
+          reason,
+          collection_id: normalizeText(channel?.collectionId),
+          document_id_hash: hashDiagnosticValue(channel?.documentId),
+          thread_id: normalizedThreadId,
+          run_id: normalizedRunId,
+          acknowledgement_count: acknowledgements.length,
+        },
+      });
+    });
   };
 
   const processRequest = async (rawRequest) => {
@@ -6544,10 +6595,22 @@ function createAppServerFirestoreControlListener({
           handleSnapshotData(snapshot.data());
         },
         (error) => {
+          const reason = extractErrorMessage(error);
           log(
             "Codex app-server Firestore control listener failed",
-            extractErrorMessage(error),
+            reason,
           );
+          void reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+            event: "app_server_firestore_control_listener_failed",
+            failureClass: "app_server_firestore_control_listener_failed",
+            details: {
+              reason,
+              collection_id: normalizeText(channel?.collectionId),
+              document_id_hash: hashDiagnosticValue(channel?.documentId),
+              thread_id: normalizedThreadId,
+              run_id: normalizedRunId,
+            },
+          });
         },
       );
     },
@@ -6575,13 +6638,25 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
   }
 
   let session = null;
+  const reportRunnerDiagnostic = appServerContext?.reportRunnerDiagnostic;
   try {
     session = await fetchAppServerFirestoreSession(appServerContext);
   } catch (error) {
-    log("Codex app-server Firestore session unavailable", extractErrorMessage(error));
+    const reason = extractErrorMessage(error);
+    log("Codex app-server Firestore session unavailable", reason);
+    await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+      event: "app_server_firestore_session_unavailable",
+      failureClass: "app_server_firestore_session_unavailable",
+      details: { reason },
+    });
     return null;
   }
   if (!session) {
+    await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+      event: "app_server_firestore_session_unavailable",
+      failureClass: "app_server_firestore_session_unavailable",
+      details: { reason: "session_bootstrap_returned_empty" },
+    });
     return null;
   }
 
@@ -6615,6 +6690,7 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
         FieldPathImpl: firebaseFirestore.FieldPath,
         channel: session.channel,
         docRef,
+        reportRunnerDiagnostic,
         updateDocImpl: firebaseFirestore.updateDoc,
       }),
       createControlListener(listenerArgs = {}) {
@@ -6626,6 +6702,7 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
           docRef,
           firestore,
           onSnapshotImpl: firebaseFirestore.onSnapshot,
+          reportRunnerDiagnostic,
           runTransactionImpl: firebaseFirestore.runTransaction,
         });
       },
@@ -6645,7 +6722,13 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
       },
     };
   } catch (error) {
-    log("Codex app-server Firestore bridge unavailable", extractErrorMessage(error));
+    const reason = extractErrorMessage(error);
+    log("Codex app-server Firestore bridge unavailable", reason);
+    await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+      event: "app_server_firestore_bridge_unavailable",
+      failureClass: "app_server_firestore_bridge_unavailable",
+      details: { reason },
+    });
     return null;
   }
 }
@@ -8373,6 +8456,7 @@ async function main() {
             adminToken,
             attachmentRootPath: path.join(attemptRunRuntime.homePath, "control-attachments"),
             commandEnv: codexCommandEnv,
+            reportRunnerDiagnostic,
           },
         });
         await reportRunnerDiagnostic({
