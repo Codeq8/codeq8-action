@@ -58,6 +58,9 @@ const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 8;
 const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
+// AppServer live chat transport must not be implemented as recurring runner
+// HTTP calls. The runner gets one Firebase session, then uses Firestore
+// listeners/writes for progress and control.
 const APP_SERVER_FIRESTORE_SESSION_PATH =
   "/api/chat/runs/app-server/firebase-session";
 const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
@@ -5999,6 +6002,9 @@ async function fetchAppServerFirestoreSession({
   runId,
   fetchImpl = globalThis.fetch,
 }) {
+  // This is the only AppServer live-transport HTTP request the runner should
+  // make. It mints a scoped Firebase custom token for one repository live-status
+  // document; all subsequent progress/control traffic stays on Firestore.
   const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
   const normalizedToken = normalizeText(webChatRunToken);
   const normalizedRepository = normalizeRepository(workspaceRepository);
@@ -6068,6 +6074,9 @@ function createAppServerFirestoreProgressReporter({
   docRef,
   updateDocImpl,
 }) {
+  // Batching here reduces Firestore writes. This timer is not a polling loop:
+  // it only flushes locally queued AppServer notifications that already arrived
+  // from the Codex process.
   const normalizedThreadId = normalizeThreadId(channel?.threadId);
   const normalizedRunId = normalizeRunId(channel?.runId);
   if (
@@ -6322,6 +6331,9 @@ function createAppServerFirestoreControlListener({
   getAppServerThreadId,
   getAppServerTurnId,
 }) {
+  // Control is event-driven through Firestore onSnapshot. Do not replace this
+  // with periodic HTTP fetches to the private app; that failure mode has caused
+  // expensive request amplification before.
   const normalizedRepository = normalizeRepository(channel?.workspaceRepository);
   const normalizedThreadId = normalizeThreadId(channel?.threadId);
   const normalizedRunId = normalizeRunId(channel?.runId);
@@ -6517,6 +6529,9 @@ function createAppServerFirestoreControlListener({
 }
 
 async function createAppServerFirestoreBridge(appServerContext = {}) {
+  // The bridge owns the AppServer live-cost boundary: one bootstrap call, one
+  // Firestore document listener, and bounded document updates. If this fails,
+  // AppServer still runs, but the runner must not fall back to control polling.
   const override = appServerContext?.createAppServerFirestoreBridgeImpl;
   if (typeof override === "function") {
     return await override(appServerContext);

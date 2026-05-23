@@ -63,11 +63,23 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
     path.join(process.cwd(), "scripts/web-chat-runner.mjs"),
     "utf8",
   );
+  const readme = await fs.readFile(path.join(process.cwd(), "README.md"), "utf8");
+  const runtimeContract = await fs.readFile(
+    path.join(process.cwd(), "lib/web-chat-runner-runtime-contract.mjs"),
+    "utf8",
+  );
   const bridgeSource = source.slice(
     source.indexOf("async function createAppServerFirestoreBridge"),
     source.indexOf("async function runCodexAppServer"),
   );
 
+  assert.match(readme, /Do not add timer-driven runner HTTP polling/);
+  assert.match(readme, /very large infrastructure bills/);
+  assert.match(
+    runtimeContract,
+    /Do not add the legacy AppServer event or\s+\/\/ control HTTP routes back/,
+  );
+  assert.match(source, /The bridge owns the AppServer live-cost boundary/);
   assert.match(source, /APP_SERVER_FIRESTORE_SESSION_PATH/);
   assert.match(bridgeSource, /import\("firebase\/firestore"\)/);
   assert.match(bridgeSource, /\bonSnapshot\b/);

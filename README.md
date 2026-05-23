@@ -11,6 +11,22 @@ The public action owns transport/bootstrap concerns such as:
 
 Prompt construction, runner policy, and pull-request presentation are server-owned by Codeq8 and are fetched at run time through the signed web-chat runner contract. Public action version bumps should only be needed for runtime/protocol changes, not for prompt or product-policy tweaks.
 
+## AppServer Live Transport
+
+Codex AppServer live progress and control must use the Firestore bridge. The
+runner performs one signed bootstrap request to
+`/api/chat/runs/app-server/firebase-session`, signs in with the returned
+Firebase custom token, writes bounded progress fields directly to the scoped
+repository live-status document, and listens to that same document for
+`turn/steer` and `turn/interrupt` requests.
+
+Do not add timer-driven runner HTTP polling for AppServer control. In
+particular, do not restore `/api/chat/runs/app-server/control` as a required
+runner path, do not post progress through `/api/chat/runs/app-server/events`,
+and do not introduce `setInterval` loops for live chat transport. Those patterns
+can multiply into very large infrastructure bills even when each individual
+request looks cheap.
+
 Root action: web chat run.
 
 Example usage:
