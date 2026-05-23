@@ -58,7 +58,9 @@ const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 8;
 const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
-const APP_SERVER_CONTROL_POLL_INTERVAL_MS = 1000;
+const APP_SERVER_CONTROL_DEFAULT_POLL_INTERVAL_MS = 5000;
+const APP_SERVER_CONTROL_MIN_POLL_INTERVAL_MS = 1000;
+const APP_SERVER_CONTROL_MAX_POLL_INTERVAL_MS = 30000;
 const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
   "codex_app_server_attachment_turn_control";
 const APP_SERVER_CONTROL_CAPABILITIES = Object.freeze([
@@ -5951,6 +5953,17 @@ function buildAppServerRouteUrl({ publicBaseUrl, path: routePath, query = null }
   return url.toString();
 }
 
+function normalizeAppServerControlPollIntervalMs(value) {
+  const parsed = parsePositiveInteger(
+    value,
+    APP_SERVER_CONTROL_DEFAULT_POLL_INTERVAL_MS,
+  );
+  return Math.max(
+    APP_SERVER_CONTROL_MIN_POLL_INTERVAL_MS,
+    Math.min(APP_SERVER_CONTROL_MAX_POLL_INTERVAL_MS, parsed),
+  );
+}
+
 function createAppServerProgressReporter({
   publicBaseUrl,
   webChatRunToken,
@@ -6167,6 +6180,18 @@ function createAppServerControlPoller({
   let stopped = false;
   let polling = false;
   let lastSequence = 0;
+  let nextPollIntervalMs = APP_SERVER_CONTROL_DEFAULT_POLL_INTERVAL_MS;
+
+  const scheduleNextPoll = () => {
+    if (stopped || timer) {
+      return;
+    }
+    timer = setTimeout(() => {
+      timer = null;
+      void poll();
+    }, nextPollIntervalMs);
+    timer.unref?.();
+  };
 
   const acknowledge = async (acknowledgements) => {
     if (!Array.isArray(acknowledgements) || acknowledgements.length === 0) {
@@ -6223,6 +6248,9 @@ function createAppServerControlPoller({
         return;
       }
       const payload = normalizeObject(await response.json().catch(() => null));
+      nextPollIntervalMs = normalizeAppServerControlPollIntervalMs(
+        payload.poll_after_ms || payload.pollAfterMs,
+      );
       const requests = Array.isArray(payload.requests) ? payload.requests : [];
       const acknowledgements = [];
       for (const rawRequest of requests) {
@@ -6293,6 +6321,7 @@ function createAppServerControlPoller({
       // Control polling is best-effort; final run status still comes from Codex.
     } finally {
       polling = false;
+      scheduleNextPoll();
     }
   };
 
@@ -6301,16 +6330,12 @@ function createAppServerControlPoller({
       if (timer || stopped) {
         return;
       }
-      timer = setInterval(() => {
-        void poll();
-      }, APP_SERVER_CONTROL_POLL_INTERVAL_MS);
-      timer.unref?.();
       void poll();
     },
     async stop() {
       stopped = true;
       if (timer) {
-        clearInterval(timer);
+        clearTimeout(timer);
         timer = null;
       }
       if (polling) {

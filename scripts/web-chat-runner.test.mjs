@@ -58,6 +58,21 @@ test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
   assert.equal(DEFAULT_TIMEOUT_SECONDS, 72 * 60 * 60);
 });
 
+test("AppServer control polling honors the server cadence instead of a tight interval", async () => {
+  const source = await fs.readFile(
+    path.join(process.cwd(), "scripts/web-chat-runner.mjs"),
+    "utf8",
+  );
+  const pollerSource = source.slice(
+    source.indexOf("function createAppServerControlPoller"),
+    source.indexOf("async function runCodexAppServer"),
+  );
+
+  assert.match(source, /APP_SERVER_CONTROL_DEFAULT_POLL_INTERVAL_MS = 5000/);
+  assert.match(pollerSource, /payload\.poll_after_ms \|\| payload\.pollAfterMs/);
+  assert.doesNotMatch(pollerSource, /\bsetInterval\s*\(/);
+});
+
 test("web chat run markers prove captured Codex sessions contain the current run", () => {
   const marker = buildWebChatRunMarker({
     threadId: "wct_123",
@@ -542,7 +557,7 @@ test("runCodex sends AppServer steer requests with the active expected turn id",
                 ]
               : [];
           steerReturned = steerReturned || requests.length > 0;
-          return new Response(JSON.stringify({ ok: true, requests }), {
+          return new Response(JSON.stringify({ ok: true, poll_after_ms: 1000, requests }), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           });
@@ -651,7 +666,7 @@ test("runCodex materializes AppServer steer attachments before forwarding them",
                 ]
               : [];
           steerReturned = steerReturned || requests.length > 0;
-          return new Response(JSON.stringify({ ok: true, requests }), {
+          return new Response(JSON.stringify({ ok: true, poll_after_ms: 1000, requests }), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           });
