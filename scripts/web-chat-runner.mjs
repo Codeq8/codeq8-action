@@ -4390,6 +4390,7 @@ async function persistCapturedCodexSessionBundle({
   runStartedAt = 0,
   lastResumedAt = 0,
   mode = "unknown",
+  expectedSessionId = "",
   expectedRunMarker = "",
   reportRunnerDiagnostic = null,
 }) {
@@ -4411,6 +4412,7 @@ async function persistCapturedCodexSessionBundle({
     model,
     sessionFileSnapshot,
     runStartedAt,
+    expectedSessionId,
   });
   const markerPresent = sessionContainsWebChatRunMarker({
     sessionFileContents: capturedSessionBundle.sessionFileContents,
@@ -4436,6 +4438,7 @@ async function persistCapturedCodexSessionBundle({
         String(capturedSessionBundle.sessionFileContents || ""),
         "utf8",
       ),
+      expected_session_id_hash: hashDiagnosticValue(expectedSessionId),
       marker_present: markerPresent,
       marker_hash: hashDiagnosticValue(expectedRunMarker),
     },
@@ -4585,6 +4588,7 @@ async function persistCapturedCodexSessionBundleWithRetries({
   runStartedAt = 0,
   lastResumedAt = 0,
   mode = "unknown",
+  expectedSessionId = "",
   expectedRunMarker = "",
   reportRunnerDiagnostic = null,
   attempts = 3,
@@ -4609,6 +4613,7 @@ async function persistCapturedCodexSessionBundleWithRetries({
         runStartedAt,
         lastResumedAt,
         mode,
+        expectedSessionId,
         expectedRunMarker,
         reportRunnerDiagnostic,
       });
@@ -5535,6 +5540,56 @@ async function readCodexSessionBundle({
   };
 }
 
+async function readCodexSessionIdFromFile(sessionFilePath) {
+  let handle = null;
+  try {
+    handle = await fs.open(sessionFilePath, "r");
+    const buffer = Buffer.alloc(64 * 1024);
+    const result = await handle.read(buffer, 0, buffer.length, 0);
+    const firstChunk = buffer.subarray(0, result.bytesRead).toString("utf8");
+    const firstLine = firstChunk.split(/\r?\n/g)[0] || "";
+    if (!firstLine) {
+      return "";
+    }
+    const parsed = normalizeObject(JSON.parse(firstLine));
+    if (normalizeText(parsed.type).toLowerCase() !== "session_meta") {
+      return "";
+    }
+    const metaPayload = normalizeObject(parsed.payload);
+    return normalizeCodexSessionId(metaPayload.id || parsed.id);
+  } catch {
+    return "";
+  } finally {
+    if (handle) {
+      await handle.close().catch(() => {});
+    }
+  }
+}
+
+async function findCodexSessionFilePathById({ codexHome, sessionId }) {
+  const normalizedSessionId = normalizeCodexSessionId(sessionId);
+  if (!normalizedSessionId) {
+    return "";
+  }
+  const sessionEntries = await listCodexSessionEntries(codexHome);
+  const orderedEntries = [...sessionEntries].sort((left, right) => {
+    const leftNameMatch = path.basename(left.path).includes(normalizedSessionId) ? 1 : 0;
+    const rightNameMatch = path.basename(right.path).includes(normalizedSessionId) ? 1 : 0;
+    if (leftNameMatch !== rightNameMatch) {
+      return rightNameMatch - leftNameMatch;
+    }
+    return right.mtimeMs - left.mtimeMs;
+  });
+
+  for (const entry of orderedEntries) {
+    const entrySessionId = await readCodexSessionIdFromFile(entry.path);
+    if (entrySessionId === normalizedSessionId) {
+      return entry.path;
+    }
+  }
+  return "";
+}
+
 function parseCodexSessionBundleContents({
   sessionFileContents = "",
   fallbackCliVersion = "",
@@ -5638,10 +5693,20 @@ async function captureCodexSessionBundle({
   model,
   sessionFileSnapshot = null,
   runStartedAt = 0,
+  expectedSessionId = "",
 }) {
   const normalizedExistingState = normalizeCodexSessionState(existingSessionState);
+  const normalizedExpectedSessionId = normalizeCodexSessionId(expectedSessionId);
   let sessionFilePath = "";
-  if (normalizedExistingState.session_file_relative_path) {
+  if (normalizedExpectedSessionId) {
+    sessionFilePath = await findCodexSessionFilePathById({
+      codexHome,
+      sessionId: normalizedExpectedSessionId,
+    });
+    if (!sessionFilePath) {
+      throw new Error("Codex run finished without locating the expected session bundle.");
+    }
+  } else if (normalizedExistingState.session_file_relative_path) {
     const explicitSessionFilePath = path.join(
       codexHome,
       normalizedExistingState.session_file_relative_path,
@@ -5673,12 +5738,16 @@ async function captureCodexSessionBundle({
   if (!sessionFilePath) {
     throw new Error("Codex run finished without creating a session bundle.");
   }
-  return readCodexSessionBundle({
+  const capturedBundle = await readCodexSessionBundle({
     codexHome,
     sessionFilePath,
     fallbackCliVersion: normalizedExistingState.cli_version,
     fallbackModel: model,
   });
+  if (normalizedExpectedSessionId && capturedBundle.sessionId !== normalizedExpectedSessionId) {
+    throw new Error("Codex run captured a different session bundle than the App Server thread.");
+  }
+  return capturedBundle;
 }
 
 function normalizeAppServerMethod(value) {
@@ -6412,6 +6481,7 @@ async function runCodexAppServer({
       }
       resolve({
         ...result,
+        sessionId: normalizeCodexSessionId(result.sessionId || appServerThreadId),
         durationMs: Date.now() - startMs,
       });
     };
@@ -7970,6 +8040,7 @@ async function main() {
             signal: execution.signal || "",
             timed_out: execution.timedOut,
             duration_ms: execution.durationMs,
+            session_id_hash: hashDiagnosticValue(execution.sessionId),
             output_chars: normalizeText(execution.output).length,
             diagnostic_output_chars: normalizeText(execution.diagnosticOutput).length,
             reason: execution.ok ? "" : execution.reason,
@@ -8140,6 +8211,7 @@ async function main() {
                   ? resumeAttemptedAt || Date.now()
                   : persistedCodexSessionState.last_resumed_at,
               mode: executionMode,
+              expectedSessionId: execution.sessionId,
               expectedRunMarker: currentRunMarker,
               reportRunnerDiagnostic,
             });
@@ -8215,6 +8287,7 @@ async function main() {
                 ? resumeAttemptedAt || Date.now()
                 : persistedCodexSessionState.last_resumed_at,
             mode: executionMode,
+            expectedSessionId: execution.sessionId,
             expectedRunMarker: currentRunMarker,
             reportRunnerDiagnostic,
           });
