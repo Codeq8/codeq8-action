@@ -56,7 +56,7 @@ const MAX_RUNNER_DIAGNOSTIC_DETAIL_KEYS = 32;
 const MAX_RUNNER_DIAGNOSTIC_STRING_CHARS = 2000;
 const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
-const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 200;
+const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 8;
 const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
 const APP_SERVER_CONTROL_POLL_INTERVAL_MS = 1000;
 const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
@@ -5685,32 +5685,6 @@ function normalizeAppServerMethod(value) {
   return normalizeText(value);
 }
 
-function extractAppServerString(value, keys = []) {
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return normalizeText(value);
-  }
-  if (Array.isArray(value)) {
-    return normalizeText(value.map((entry) => extractAppServerString(entry, keys)).filter(Boolean).join("\n"));
-  }
-  const object = normalizeObject(value);
-  if (Object.keys(object).length === 0) {
-    return "";
-  }
-  for (const key of keys) {
-    const extracted = extractAppServerString(object[key], keys);
-    if (extracted) {
-      return extracted;
-    }
-  }
-  for (const key of ["text", "content", "message", "summary", "name", "title", "command"]) {
-    const extracted = extractAppServerString(object[key], keys);
-    if (extracted) {
-      return extracted;
-    }
-  }
-  return "";
-}
-
 function extractAppServerTextPreservingWhitespace(value, keys = []) {
   if (typeof value === "string") {
     return value;
@@ -5815,65 +5789,33 @@ function isAppServerAgentMessageItem(params) {
   return /agent|assistant/.test(itemType);
 }
 
-function summarizeAppServerProgressNotification({ method, params, now = Date.now() }) {
+function summarizeAppServerProgressNotification({
+  method,
+  params,
+  label = "",
+  now = Date.now(),
+}) {
   const normalizedMethod = normalizeAppServerMethod(method);
   const object = normalizeObject(params);
   const item = normalizeObject(object.item);
   const itemType = normalizeText(item.type || object.type || "").toLowerCase();
+  if (normalizedMethod !== "item/completed" || !isAppServerAgentMessageItem(params)) {
+    return null;
+  }
   const itemLabel = truncate(
-    extractAppServerString(item, ["title", "name", "command", "text", "content"]) ||
-      extractAppServerString(object, ["title", "name", "summary"]) ||
-      normalizedMethod,
+    label || extractAppServerCompletedAgentText(params),
     APP_SERVER_PROGRESS_MAX_LABEL_CHARS,
   );
-  if (normalizedMethod === "turn/started") {
-    return {
-      event_id: `app_server:${now}:turn_started`,
-      kind: "turn_started",
-      label: "Started Codex turn",
-      status: "running",
-      at: now,
-    };
-  }
-  if (normalizedMethod === "turn/completed") {
-    return {
-      event_id: `app_server:${now}:turn_completed`,
-      kind: "turn_completed",
-      label: "Codex turn completed",
-      status: normalizeText(extractAppServerTurnStatus(object)) || "completed",
-      at: now,
-    };
-  }
-  if (normalizedMethod === "item/started") {
-    return {
-      event_id: `app_server:${now}:item_started:${hashDiagnosticValue(itemLabel).slice(0, 12)}`,
-      kind: "item_started",
-      item_type: itemType,
-      label: itemLabel || "Started work item",
-      status: "running",
-      at: now,
-    };
-  }
-  if (normalizedMethod === "item/completed") {
-    return {
-      event_id: `app_server:${now}:item_completed:${hashDiagnosticValue(itemLabel).slice(0, 12)}`,
-      kind: "item_completed",
-      item_type: itemType,
-      label: itemLabel || "Completed work item",
-      status: "completed",
-      at: now,
-    };
-  }
-  if (normalizedMethod === "thread/status/changed") {
-    return {
-      event_id: `app_server:${now}:thread_status`,
-      kind: "thread_status",
-      label: extractAppServerString(object, ["status", "threadStatusType"]) || "Thread status changed",
-      status: extractAppServerString(object, ["status", "threadStatusType"]),
-      at: now,
-    };
-  }
-  return null;
+  return itemLabel
+    ? {
+        event_id: `app_server:${now}:agent_message:${hashDiagnosticValue(itemLabel).slice(0, 12)}`,
+        kind: "item_completed",
+        item_type: itemType || "agent_message",
+        label: itemLabel,
+        status: "completed",
+        at: now,
+      }
+    : null;
 }
 
 function incrementCount(map, key) {
@@ -6366,13 +6308,6 @@ async function runCodexAppServer({
     const pendingRequests = new Map();
     const progressReporter = createAppServerProgressReporter(appServerContext || {});
     let controlPoller = null;
-    progressReporter.enqueue({
-      event_id: `app_server:${Date.now()}:transport_started`,
-      kind: "transport_started",
-      label: "Starting Codex",
-      status: "running",
-      at: Date.now(),
-    });
 
     const child = spawn(codexPath, ["app-server", "--listen", "stdio://"], {
       cwd: workspacePath,
@@ -6531,13 +6466,6 @@ async function runCodexAppServer({
           describeAppServerNotificationTrace(normalizedMethod, params),
         );
       }
-      const progressEvent = summarizeAppServerProgressNotification({
-        method: normalizedMethod,
-        params,
-      });
-      if (progressEvent) {
-        progressReporter.enqueue(progressEvent);
-      }
       if (normalizedMethod === "turn/started") {
         activeTurnId = extractAppServerTurnId(params) || activeTurnId;
       }
@@ -6549,6 +6477,14 @@ async function runCodexAppServer({
       }
       if (normalizedMethod === "item/completed" && isAppServerAgentMessageItem(params)) {
         completeAgentMessage(params);
+        const progressEvent = summarizeAppServerProgressNotification({
+          method: normalizedMethod,
+          params,
+          label: getAssistantOutput(),
+        });
+        if (progressEvent) {
+          progressReporter.enqueue(progressEvent);
+        }
       }
       if (normalizedMethod === "turn/completed") {
         const status = extractAppServerTurnStatus(params);

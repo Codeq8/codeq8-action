@@ -299,7 +299,12 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
       "  if (message.method === 'turn/start') {",
       "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
       "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: 'npm test' } } });",
-      "    send({ method: 'item/agentMessage/delta', params: { delta: 'done' } });",
+      "    for (let index = 1; index <= 10; index += 1) {",
+      "      const text = `Progress update ${index}.`;",
+      "      send({ method: 'item/started', params: { item: { id: `msg_${index}`, type: 'agent_message' } } });",
+      "      send({ method: 'item/agentMessage/delta', params: { item_id: `msg_${index}`, delta: text } });",
+      "      send({ method: 'item/completed', params: { item: { id: `msg_${index}`, type: 'agent_message', text } } });",
+      "    }",
       "    send({ method: 'item/completed', params: { item: { type: 'command_execution', command: 'npm test' } } });",
       "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
       "  }",
@@ -342,13 +347,23 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   });
 
   assert.equal(result.ok, true);
-  assert.equal(result.output, "done");
+  assert.equal(result.output, "Progress update 10.");
   const args = JSON.parse(await fs.readFile(argsOutputPath, "utf8"));
   assert.deepEqual(args, ["app-server", "--listen", "stdio://"]);
-  assert(
-    fetchCalls.some((call) =>
-      String(call.url).endsWith("/api/chat/runs/app-server/events"),
-    ),
+  const progressEventBodies = fetchCalls
+    .filter((call) => String(call.url).endsWith("/api/chat/runs/app-server/events"))
+    .map((call) => JSON.parse(String(call.init.body || "{}")));
+  const progressEvents = progressEventBodies.flatMap((body) =>
+    Array.isArray(body.events) ? body.events : [],
+  );
+  assert.equal(progressEvents.length, 8);
+  assert.deepEqual(
+    progressEvents.map((event) => event.label),
+    Array.from({ length: 8 }, (_, index) => `Progress update ${index + 1}.`),
+  );
+  assert.equal(
+    progressEvents.some((event) => String(event.item_type || "").includes("command")),
+    false,
   );
 });
 
@@ -625,7 +640,9 @@ test("runCodex completes while an AppServer progress flush is active", async (t)
       "  if (message.method === 'turn/start') {",
       "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
       "    send({ method: 'item/started', params: { item: { type: 'reasoning', text: 'thinking' } } });",
-      "    send({ method: 'item/agentMessage/delta', params: { delta: 'done' } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_done', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_done', delta: 'done' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_done', type: 'agent_message', text: 'done' } } });",
       "    setTimeout(() => {",
       "      send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
       "    }, 3500);",
@@ -1537,8 +1554,10 @@ async function writeFakeCodexAppServer(
       "  if (message.method === 'turn/start') {",
       "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
       "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: commandLabel } } });",
-      "    for (const delta of agentMessages) send({ method: 'item/agentMessage/delta', params: { delta } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_fake', type: 'agent_message' } } });",
+      "    for (const delta of agentMessages) send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_fake', delta } });",
       "    const completeTurn = () => {",
+      "      send({ method: 'item/completed', params: { item: { id: 'msg_fake', type: 'agent_message', text: agentMessages.join('') } } });",
       "      send({ method: 'item/completed', params: { item: { type: 'command_execution', command: commandLabel } } });",
       "      send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
       "    };",
