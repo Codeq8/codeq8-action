@@ -139,3 +139,69 @@ test("runner codeq8 helper materializes attachments through worker route", async
   assert.equal(payload.path, path.join(tempDir, "attachments/log.txt"));
   assert.equal(await fs.readFile(payload.path, "utf8"), "hello");
 });
+
+test("runner codeq8 helper downloads GitHub issue attachments through backend contract", async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-runner-cli-"));
+  t.after(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: [
+      "github",
+      "issue",
+      "attachments",
+      "1711",
+      "--comments",
+      "--output-dir",
+      "github-issue-1711",
+    ],
+    env: testEnv(),
+    stdout: output.stream,
+    cwd: tempDir,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        issue: {
+          repository: "Codeq8/Codeq8",
+          number: 1711,
+          title: "Screenshot issue",
+          url: "https://github.com/Codeq8/Codeq8/issues/1711",
+        },
+        attachments: [
+          {
+            name: "image",
+            content_type: "image/png",
+            size_bytes: 5,
+            source: { issue_number: 1711, ordinal: 1 },
+            file_contents_base64url: Buffer.from("image").toString("base64url"),
+          },
+        ],
+        skipped: [],
+      });
+    },
+  });
+
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.origin, "https://codeq8.example");
+  assert.equal(url.pathname, "/api/chat/runs/github/issue-attachments");
+  assert.equal(url.searchParams.get("workspace_repository"), "Codeq8/Codeq8");
+  assert.equal(url.searchParams.get("thread_id"), "wct_parent");
+  assert.equal(url.searchParams.get("run_id"), "wcr_parent");
+  assert.equal(url.searchParams.get("issue"), "1711");
+  assert.equal(url.searchParams.get("repository"), "Codeq8/Codeq8");
+  assert.equal(url.searchParams.get("comments"), "1");
+  assert.equal(calls[0]?.init?.headers?.Authorization, "Bearer header.payload.signature");
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+
+  const payload = output.readJson();
+  assert.equal(payload.attachments.length, 1);
+  assert.equal(
+    payload.attachments[0].path,
+    path.join(tempDir, "github-issue-1711", "image.png"),
+  );
+  assert.equal(await fs.readFile(payload.attachments[0].path, "utf8"), "image");
+  assert.equal(JSON.stringify(payload).includes("file_contents_base64url"), false);
+});
