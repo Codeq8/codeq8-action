@@ -58,9 +58,8 @@ const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 8;
 const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
-const APP_SERVER_CONTROL_DEFAULT_POLL_INTERVAL_MS = 5000;
-const APP_SERVER_CONTROL_MIN_POLL_INTERVAL_MS = 1000;
-const APP_SERVER_CONTROL_MAX_POLL_INTERVAL_MS = 30000;
+const APP_SERVER_FIRESTORE_SESSION_PATH =
+  "/api/chat/runs/app-server/firebase-session";
 const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
   "codex_app_server_attachment_turn_control";
 const APP_SERVER_CONTROL_CAPABILITIES = Object.freeze([
@@ -5953,18 +5952,46 @@ function buildAppServerRouteUrl({ publicBaseUrl, path: routePath, query = null }
   return url.toString();
 }
 
-function normalizeAppServerControlPollIntervalMs(value) {
-  const parsed = parsePositiveInteger(
-    value,
-    APP_SERVER_CONTROL_DEFAULT_POLL_INTERVAL_MS,
-  );
-  return Math.max(
-    APP_SERVER_CONTROL_MIN_POLL_INTERVAL_MS,
-    Math.min(APP_SERVER_CONTROL_MAX_POLL_INTERVAL_MS, parsed),
-  );
+function createNoopAppServerProgressReporter() {
+  return {
+    enqueue: () => {},
+    flush: async () => {},
+  };
 }
 
-function createAppServerProgressReporter({
+function normalizeFirebasePublicConfig(value) {
+  const normalized = normalizeObject(value);
+  return {
+    apiKey: normalizeText(normalized.apiKey),
+    appId: normalizeText(normalized.appId),
+    authDomain: normalizeText(normalized.authDomain),
+    messagingSenderId: normalizeText(normalized.messagingSenderId),
+    projectId: normalizeText(normalized.projectId),
+    storageBucket: normalizeText(normalized.storageBucket),
+  };
+}
+
+function normalizeAppServerFirestoreChannel(value) {
+  const normalized = normalizeObject(value);
+  const pathValue = Array.isArray(normalized.repository_live_status_path)
+    ? normalized.repository_live_status_path
+    : [];
+  const collectionId =
+    normalizeText(normalized.collection_id || pathValue[0]) ||
+    "chat_repository_live_status";
+  const documentId = normalizeText(normalized.document_id || pathValue[1]);
+  return {
+    collectionId,
+    documentId,
+    runId: normalizeRunId(normalized.run_id || normalized.runId),
+    threadId: normalizeThreadId(normalized.thread_id || normalized.threadId),
+    workspaceRepository: normalizeRepository(
+      normalized.workspace_repository || normalized.workspaceRepository,
+    ),
+  };
+}
+
+async function fetchAppServerFirestoreSession({
   publicBaseUrl,
   webChatRunToken,
   workspaceRepository,
@@ -5985,16 +6012,79 @@ function createAppServerProgressReporter({
     !normalizedRunId ||
     typeof fetchImpl !== "function"
   ) {
-    return {
-      enqueue: () => {},
-      flush: async () => {},
-    };
+    return null;
+  }
+
+  const response = await fetchImpl(
+    buildAppServerRouteUrl({
+      publicBaseUrl: normalizedPublicBaseUrl,
+      path: APP_SERVER_FIRESTORE_SESSION_PATH,
+    }),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${normalizedToken}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        workspace_repository: normalizedRepository,
+        thread_id: normalizedThreadId,
+        run_id: normalizedRunId,
+      }),
+    },
+  );
+  if (!response?.ok) {
+    return null;
+  }
+  const payload = normalizeObject(await response.json().catch(() => null));
+  const firebaseAuth = normalizeObject(payload.firebase_auth || payload.firebaseAuth);
+  const firebaseConfig = normalizeFirebasePublicConfig(
+    payload.firebase_config || payload.firebaseConfig,
+  );
+  const channel = normalizeAppServerFirestoreChannel(payload.channel);
+  if (
+    payload.ok !== true ||
+    firebaseAuth.ok !== true ||
+    !normalizeText(firebaseAuth.firebase_custom_token || firebaseAuth.firebaseCustomToken) ||
+    !firebaseConfig.apiKey ||
+    !firebaseConfig.projectId ||
+    !channel.collectionId ||
+    !channel.documentId ||
+    !channel.threadId ||
+    !channel.runId
+  ) {
+    return null;
+  }
+  return {
+    channel,
+    firebaseAuth,
+    firebaseConfig,
+  };
+}
+
+function createAppServerFirestoreProgressReporter({
+  FieldPathImpl,
+  channel,
+  docRef,
+  updateDocImpl,
+}) {
+  const normalizedThreadId = normalizeThreadId(channel?.threadId);
+  const normalizedRunId = normalizeRunId(channel?.runId);
+  if (
+    !normalizedThreadId ||
+    !normalizedRunId ||
+    typeof FieldPathImpl !== "function" ||
+    typeof updateDocImpl !== "function" ||
+    !docRef
+  ) {
+    return createNoopAppServerProgressReporter();
   }
 
   let queued = [];
   let timer = null;
   let flushing = false;
   let flushWaiters = [];
+  let progressEvents = [];
   let reportedEventCount = 0;
 
   const waitForActiveFlush = () =>
@@ -6018,24 +6108,23 @@ function createAppServerProgressReporter({
     const batch = queued.slice(0, APP_SERVER_PROGRESS_MAX_BATCH_SIZE);
     queued = queued.slice(APP_SERVER_PROGRESS_MAX_BATCH_SIZE);
     try {
-      await fetchImpl(
-        buildAppServerRouteUrl({
-          publicBaseUrl: normalizedPublicBaseUrl,
-          path: "/api/chat/runs/app-server/events",
-        }),
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${normalizedToken}`,
-            "Content-Type": "application/json; charset=utf-8",
-          },
-          body: JSON.stringify({
-            workspace_repository: normalizedRepository,
-            thread_id: normalizedThreadId,
-            run_id: normalizedRunId,
-            events: batch,
-          }),
-        },
+      progressEvents = [...progressEvents, ...batch]
+        .map((event) => normalizeObject(event))
+        .filter((event) => normalizeText(event.kind))
+        .slice(-APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN);
+      const now = Date.now();
+      await updateDocImpl(
+        docRef,
+        new FieldPathImpl("threads", normalizedThreadId, "appServerProgressEvents"),
+        progressEvents,
+        new FieldPathImpl("threads", normalizedThreadId, "appServerProgressRevision"),
+        `${normalizedRunId}:${now}`,
+        new FieldPathImpl("threads", normalizedThreadId, "updatedAt"),
+        now,
+        "revision",
+        String(now),
+        "updatedAt",
+        now,
       ).catch(() => null);
     } finally {
       flushing = false;
@@ -6135,37 +6224,119 @@ function buildAppServerSteerInputText({
   ].join("\n");
 }
 
-function createAppServerControlPoller({
-  publicBaseUrl,
-  webChatRunToken,
-  workspaceRepository,
-  threadId,
-  runId,
+function readAppServerLiveStatusThread(data, threadId, runId) {
+  const threads = normalizeObject(normalizeObject(data).threads);
+  const threadStatus = normalizeObject(threads[threadId]);
+  const latestRunId = normalizeRunId(threadStatus.latestRunId || threadStatus.latest_run_id);
+  if (latestRunId && latestRunId !== runId) {
+    return {};
+  }
+  return threadStatus;
+}
+
+function readAppServerLiveStatusControlRequests(data, threadId, runId) {
+  const threadStatus = readAppServerLiveStatusThread(data, threadId, runId);
+  const requests = Array.isArray(threadStatus.appServerControlRequests)
+    ? threadStatus.appServerControlRequests
+    : [];
+  return requests
+    .map((request) => {
+      const normalizedRequest = normalizeObject(request);
+      const requestId = normalizeText(normalizedRequest.request_id || normalizedRequest.requestId);
+      const kind = normalizeText(normalizedRequest.kind).toLowerCase();
+      const status = normalizeText(normalizedRequest.status || "pending").toLowerCase();
+      const sequence = Number(normalizedRequest.sequence || 0) || 0;
+      if (!requestId || (kind !== "steer" && kind !== "interrupt")) {
+        return null;
+      }
+      return {
+        ...normalizedRequest,
+        kind,
+        request_id: requestId,
+        sequence,
+        status,
+      };
+    })
+    .filter(Boolean);
+}
+
+function applyAppServerControlAcknowledgementsToRequests({
+  acknowledgements,
+  requests,
+}) {
+  const acknowledgementById = new Map(
+    (Array.isArray(acknowledgements) ? acknowledgements : [])
+      .map((acknowledgement) => normalizeObject(acknowledgement))
+      .map((acknowledgement) => [
+        normalizeText(acknowledgement.request_id || acknowledgement.requestId),
+        {
+          error: truncate(extractErrorMessage(acknowledgement.error), 500),
+          status: normalizeText(acknowledgement.status).toLowerCase(),
+        },
+      ])
+      .filter(([requestId, acknowledgement]) =>
+        Boolean(
+          requestId &&
+            (acknowledgement.status === "accepted" ||
+              acknowledgement.status === "failed"),
+        ),
+      ),
+  );
+  if (acknowledgementById.size === 0) {
+    return { changed: false, requests };
+  }
+  let changed = false;
+  const now = Date.now();
+  const nextRequests = requests.map((request) => {
+    const normalizedRequest = normalizeObject(request);
+    const requestId = normalizeText(normalizedRequest.request_id || normalizedRequest.requestId);
+    const acknowledgement = acknowledgementById.get(requestId);
+    const status = normalizeText(normalizedRequest.status || "pending").toLowerCase();
+    if (!acknowledgement || status !== "pending") {
+      return normalizedRequest;
+    }
+    changed = true;
+    return {
+      ...normalizedRequest,
+      acknowledged_at: now,
+      error: acknowledgement.error,
+      status: acknowledgement.status,
+    };
+  });
+  return { changed, requests: nextRequests };
+}
+
+function createAppServerFirestoreControlListener({
+  FieldPathImpl,
+  channel,
+  commandEnv = process.env,
+  docRef,
+  firestore,
+  onSnapshotImpl,
+  runTransactionImpl,
   workerUrl = "",
   adminToken = "",
   attachmentRootPath = "",
-  commandEnv = process.env,
-  fetchImpl = globalThis.fetch,
   materializeWebChatAttachmentsImpl = materializeWebChatAttachments,
   sendRequest,
   getAppServerThreadId,
   getAppServerTurnId,
 }) {
-  const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
-  const normalizedToken = normalizeText(webChatRunToken);
-  const normalizedRepository = normalizeRepository(workspaceRepository);
-  const normalizedThreadId = normalizeThreadId(threadId);
-  const normalizedRunId = normalizeRunId(runId);
+  const normalizedRepository = normalizeRepository(channel?.workspaceRepository);
+  const normalizedThreadId = normalizeThreadId(channel?.threadId);
+  const normalizedRunId = normalizeRunId(channel?.runId);
   const normalizedWorkerUrl = normalizeBaseUrl(workerUrl);
-  const normalizedAdminToken = normalizeText(adminToken) || normalizedToken;
+  const normalizedAdminToken = normalizeText(adminToken);
   const normalizedAttachmentRootPath = normalizeText(attachmentRootPath);
   if (
-    !normalizedPublicBaseUrl ||
-    !normalizedToken ||
     !normalizedRepository ||
     !normalizedThreadId ||
     !normalizedRunId ||
-    typeof fetchImpl !== "function" ||
+    !docRef ||
+    !firestore ||
+    typeof FieldPathImpl !== "function" ||
+    typeof onSnapshotImpl !== "function" ||
+    typeof runTransactionImpl !== "function" ||
     typeof sendRequest !== "function" ||
     typeof getAppServerThreadId !== "function" ||
     typeof getAppServerTurnId !== "function"
@@ -6176,173 +6347,241 @@ function createAppServerControlPoller({
     };
   }
 
-  let timer = null;
   let stopped = false;
-  let polling = false;
-  let lastSequence = 0;
-  let nextPollIntervalMs = APP_SERVER_CONTROL_DEFAULT_POLL_INTERVAL_MS;
-
-  const scheduleNextPoll = () => {
-    if (stopped || timer) {
-      return;
-    }
-    timer = setTimeout(() => {
-      timer = null;
-      void poll();
-    }, nextPollIntervalMs);
-    timer.unref?.();
-  };
+  let unsubscribe = () => {};
+  const processingRequestIds = new Set();
+  const processingPromises = new Set();
 
   const acknowledge = async (acknowledgements) => {
     if (!Array.isArray(acknowledgements) || acknowledgements.length === 0) {
       return;
     }
-    await fetchImpl(
-      buildAppServerRouteUrl({
-        publicBaseUrl: normalizedPublicBaseUrl,
-        path: "/api/chat/runs/app-server/control",
-      }),
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${normalizedToken}`,
-          "Content-Type": "application/json; charset=utf-8",
-        },
-        body: JSON.stringify({
-          workspace_repository: normalizedRepository,
-          thread_id: normalizedThreadId,
-          run_id: normalizedRunId,
-          acknowledgements,
-        }),
-      },
-    ).catch(() => null);
-  };
-
-  const poll = async () => {
-    if (stopped || polling) {
-      return;
-    }
-    polling = true;
-    try {
-      const query = new URLSearchParams({
-        workspace_repository: normalizedRepository,
-        thread_id: normalizedThreadId,
-        run_id: normalizedRunId,
-        after_sequence: String(lastSequence),
-      });
-      const response = await fetchImpl(
-        buildAppServerRouteUrl({
-          publicBaseUrl: normalizedPublicBaseUrl,
-          path: "/api/chat/runs/app-server/control",
-          query,
-        }),
-        {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${normalizedToken}`,
-            Accept: "application/json",
-          },
-        },
+    await runTransactionImpl(firestore, async (transaction) => {
+      const snapshot = await transaction.get(docRef);
+      const data = snapshot.exists() ? snapshot.data() : {};
+      const currentRequests = readAppServerLiveStatusControlRequests(
+        data,
+        normalizedThreadId,
+        normalizedRunId,
       );
-      if (!response?.ok) {
+      const acknowledged = applyAppServerControlAcknowledgementsToRequests({
+        acknowledgements,
+        requests: currentRequests,
+      });
+      if (!acknowledged.changed) {
         return;
       }
-      const payload = normalizeObject(await response.json().catch(() => null));
-      nextPollIntervalMs = normalizeAppServerControlPollIntervalMs(
-        payload.poll_after_ms || payload.pollAfterMs,
+      const now = Date.now();
+      transaction.update(
+        docRef,
+        new FieldPathImpl("threads", normalizedThreadId, "appServerControlRequests"),
+        acknowledged.requests,
+        new FieldPathImpl("threads", normalizedThreadId, "appServerControlRevision"),
+        `${normalizedRunId}:${now}`,
+        new FieldPathImpl("threads", normalizedThreadId, "updatedAt"),
+        now,
+        "revision",
+        String(now),
+        "updatedAt",
+        now,
       );
-      const requests = Array.isArray(payload.requests) ? payload.requests : [];
-      const acknowledgements = [];
-      for (const rawRequest of requests) {
-        const request = normalizeObject(rawRequest);
-        const requestId = normalizeText(request.request_id || request.requestId);
-        const kind = normalizeText(request.kind).toLowerCase();
-        const sequence = Number(request.sequence || 0) || 0;
-        const appServerThreadId = getAppServerThreadId();
-        if (!requestId || !appServerThreadId) {
-          continue;
-        }
-        if (kind !== "steer" && kind !== "interrupt") {
-          lastSequence = Math.max(lastSequence, sequence);
-          continue;
-        }
-        try {
-          const appServerTurnId = getAppServerTurnId();
-          if (!appServerTurnId) {
-            continue;
-          }
-          if (kind === "steer") {
-            const content = normalizeText(request.content);
-            const attachments = parseAttachmentList(request.attachments);
-            const materializedAttachments = attachments.length > 0
-              ? await materializeWebChatAttachmentsImpl({
-                  attachments,
-                  attachmentRootPath: path.join(
-                    normalizedAttachmentRootPath || os.tmpdir(),
-                    normalizeText(requestId).replace(/[^A-Za-z0-9._:-]/g, "-"),
-                  ),
-                  workerUrl: normalizedWorkerUrl,
-                  adminToken: normalizedAdminToken,
-                  threadId: normalizedThreadId,
-                  commandEnv,
-                })
-              : [];
-            const inputText = buildAppServerSteerInputText({
-              content,
-              attachments: materializedAttachments,
-            });
-            if (!inputText) {
-              throw new Error("Steer content is empty.");
-            }
-            await sendRequest("turn/steer", {
-              threadId: appServerThreadId,
-              expectedTurnId: appServerTurnId,
-              input: [{ type: "text", text: inputText }],
-            });
-            acknowledgements.push({ request_id: requestId, status: "accepted" });
-          } else {
-            await sendRequest("turn/interrupt", {
-              threadId: appServerThreadId,
-              turnId: appServerTurnId,
-            });
-            acknowledgements.push({ request_id: requestId, status: "accepted" });
-          }
-        } catch (error) {
-          acknowledgements.push({
-            request_id: requestId,
-            status: "failed",
-            error: extractErrorMessage(error),
-          });
-        }
-        lastSequence = Math.max(lastSequence, sequence);
+    }).catch(() => null);
+  };
+
+  const processRequest = async (rawRequest) => {
+    const request = normalizeObject(rawRequest);
+    const requestId = normalizeText(request.request_id || request.requestId);
+    const kind = normalizeText(request.kind).toLowerCase();
+    const appServerThreadId = getAppServerThreadId();
+    if (!requestId || !appServerThreadId || stopped) {
+      return;
+    }
+    const acknowledgements = [];
+    try {
+      if (kind !== "steer" && kind !== "interrupt") {
+        return;
       }
-      await acknowledge(acknowledgements);
-    } catch {
-      // Control polling is best-effort; final run status still comes from Codex.
+      const appServerTurnId = getAppServerTurnId();
+      if (!appServerTurnId) {
+        return;
+      }
+      if (kind === "steer") {
+        const content = normalizeText(request.content);
+        const attachments = parseAttachmentList(request.attachments);
+        const materializedAttachments = attachments.length > 0
+          ? await materializeWebChatAttachmentsImpl({
+              attachments,
+              attachmentRootPath: path.join(
+                normalizedAttachmentRootPath || os.tmpdir(),
+                requestId.replace(/[^A-Za-z0-9._:-]/g, "-"),
+              ),
+              workerUrl: normalizedWorkerUrl,
+              adminToken: normalizedAdminToken,
+              threadId: normalizedThreadId,
+              commandEnv,
+            })
+          : [];
+        const inputText = buildAppServerSteerInputText({
+          content,
+          attachments: materializedAttachments,
+        });
+        if (!inputText) {
+          throw new Error("Steer content is empty.");
+        }
+        await sendRequest("turn/steer", {
+          threadId: appServerThreadId,
+          expectedTurnId: appServerTurnId,
+          input: [{ type: "text", text: inputText }],
+        });
+      } else {
+        await sendRequest("turn/interrupt", {
+          threadId: appServerThreadId,
+          turnId: appServerTurnId,
+        });
+      }
+      acknowledgements.push({ request_id: requestId, status: "accepted" });
+    } catch (error) {
+      acknowledgements.push({
+        request_id: requestId,
+        status: "failed",
+        error: extractErrorMessage(error),
+      });
     } finally {
-      polling = false;
-      scheduleNextPoll();
+      await acknowledge(acknowledgements);
+    }
+  };
+
+  const enqueueRequest = (request) => {
+    const requestId = normalizeText(request?.request_id || request?.requestId);
+    if (!requestId || processingRequestIds.has(requestId)) {
+      return;
+    }
+    processingRequestIds.add(requestId);
+    const promise = processRequest(request).finally(() => {
+      processingRequestIds.delete(requestId);
+      processingPromises.delete(promise);
+    });
+    processingPromises.add(promise);
+  };
+
+  const handleSnapshotData = (data) => {
+    if (stopped) {
+      return;
+    }
+    const requests = readAppServerLiveStatusControlRequests(
+      data,
+      normalizedThreadId,
+      normalizedRunId,
+    );
+    for (const request of requests) {
+      if (normalizeText(request.status || "pending").toLowerCase() !== "pending") {
+        continue;
+      }
+      enqueueRequest(request);
     }
   };
 
   return {
     start() {
-      if (timer || stopped) {
+      if (stopped) {
         return;
       }
-      void poll();
+      unsubscribe = onSnapshotImpl(
+        docRef,
+        (snapshot) => {
+          if (!snapshot.exists()) {
+            return;
+          }
+          handleSnapshotData(snapshot.data());
+        },
+        (error) => {
+          log(
+            "Codex app-server Firestore control listener failed",
+            extractErrorMessage(error),
+          );
+        },
+      );
     },
     async stop() {
       stopped = true;
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
+      try {
+        unsubscribe();
+      } catch {
+        // ignore listener cleanup failures
       }
-      if (polling) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
+      if (processingPromises.size > 0) {
+        await Promise.allSettled([...processingPromises]);
       }
     },
   };
+}
+
+async function createAppServerFirestoreBridge(appServerContext = {}) {
+  const override = appServerContext?.createAppServerFirestoreBridgeImpl;
+  if (typeof override === "function") {
+    return await override(appServerContext);
+  }
+
+  let session = null;
+  try {
+    session = await fetchAppServerFirestoreSession(appServerContext);
+  } catch (error) {
+    log("Codex app-server Firestore session unavailable", extractErrorMessage(error));
+    return null;
+  }
+  if (!session) {
+    return null;
+  }
+
+  try {
+    const [firebaseApp, firebaseAuth, firebaseFirestore] = await Promise.all([
+      import("firebase/app"),
+      import("firebase/auth"),
+      import("firebase/firestore"),
+    ]);
+    const appName = `codeq8-app-server-${session.channel.runId
+      .replace(/[^A-Za-z0-9_-]/g, "-")
+      .slice(0, 80)}`;
+    const existingApp = firebaseApp.getApps().find((app) => app.name === appName);
+    const app = existingApp || firebaseApp.initializeApp(session.firebaseConfig, appName);
+    const auth = firebaseAuth.getAuth(app);
+    await firebaseAuth.signInWithCustomToken(
+      auth,
+      normalizeText(
+        session.firebaseAuth.firebase_custom_token ||
+          session.firebaseAuth.firebaseCustomToken,
+      ),
+    );
+    const firestore = firebaseFirestore.getFirestore(app);
+    const docRef = firebaseFirestore.doc(
+      firestore,
+      session.channel.collectionId,
+      session.channel.documentId,
+    );
+    return {
+      progressReporter: createAppServerFirestoreProgressReporter({
+        FieldPathImpl: firebaseFirestore.FieldPath,
+        channel: session.channel,
+        docRef,
+        updateDocImpl: firebaseFirestore.updateDoc,
+      }),
+      createControlListener(listenerArgs = {}) {
+        return createAppServerFirestoreControlListener({
+          ...appServerContext,
+          ...listenerArgs,
+          FieldPathImpl: firebaseFirestore.FieldPath,
+          channel: session.channel,
+          docRef,
+          firestore,
+          onSnapshotImpl: firebaseFirestore.onSnapshot,
+          runTransactionImpl: firebaseFirestore.runTransaction,
+        });
+      },
+    };
+  } catch (error) {
+    log("Codex app-server Firestore bridge unavailable", extractErrorMessage(error));
+    return null;
+  }
 }
 
 async function runCodexAppServer({
@@ -6385,6 +6624,8 @@ async function runCodexAppServer({
     };
   }
 
+  const firestoreBridge = await createAppServerFirestoreBridge(appServerContext || {});
+
   return new Promise((resolve) => {
     const startMs = Date.now();
     let stderr = "";
@@ -6400,8 +6641,9 @@ async function runCodexAppServer({
     let appServerTraceCount = 0;
     const appServerNotificationCounts = new Map();
     const pendingRequests = new Map();
-    const progressReporter = createAppServerProgressReporter(appServerContext || {});
-    let controlPoller = null;
+    const progressReporter =
+      firestoreBridge?.progressReporter || createNoopAppServerProgressReporter();
+    let controlListener = null;
 
     const child = spawn(codexPath, ["app-server", "--listen", "stdio://"], {
       cwd: workspacePath,
@@ -6480,7 +6722,7 @@ async function runCodexAppServer({
       }
       settled = true;
       clearTimeout(timeoutHandle);
-      await controlPoller?.stop?.();
+      await controlListener?.stop?.();
       await progressReporter.flush();
       for (const pending of pendingRequests.values()) {
         pending.reject(new Error("Codex app-server closed before the request completed."));
@@ -6725,13 +6967,12 @@ async function runCodexAppServer({
       if (!appServerThreadId) {
         throw new Error("Codex app-server did not return a thread id.");
       }
-      controlPoller = createAppServerControlPoller({
-        ...(appServerContext || {}),
+      controlListener = firestoreBridge?.createControlListener?.({
         sendRequest,
         getAppServerThreadId: () => appServerThreadId,
         getAppServerTurnId: () => activeTurnId,
-      });
-      controlPoller.start();
+      }) || null;
+      controlListener?.start?.();
       const turnResult = await sendRequest("turn/start", {
         threadId: appServerThreadId,
         input: [{ type: "text", text: normalizedTask }],

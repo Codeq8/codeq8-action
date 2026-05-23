@@ -58,19 +58,23 @@ test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
   assert.equal(DEFAULT_TIMEOUT_SECONDS, 72 * 60 * 60);
 });
 
-test("AppServer control polling honors the server cadence instead of a tight interval", async () => {
+test("AppServer live bridge uses Firestore instead of runner HTTP polling", async () => {
   const source = await fs.readFile(
     path.join(process.cwd(), "scripts/web-chat-runner.mjs"),
     "utf8",
   );
-  const pollerSource = source.slice(
-    source.indexOf("function createAppServerControlPoller"),
+  const bridgeSource = source.slice(
+    source.indexOf("async function createAppServerFirestoreBridge"),
     source.indexOf("async function runCodexAppServer"),
   );
 
-  assert.match(source, /APP_SERVER_CONTROL_DEFAULT_POLL_INTERVAL_MS = 5000/);
-  assert.match(pollerSource, /payload\.poll_after_ms \|\| payload\.pollAfterMs/);
-  assert.doesNotMatch(pollerSource, /\bsetInterval\s*\(/);
+  assert.match(source, /APP_SERVER_FIRESTORE_SESSION_PATH/);
+  assert.match(bridgeSource, /import\("firebase\/firestore"\)/);
+  assert.match(bridgeSource, /\bonSnapshot\b/);
+  assert.doesNotMatch(source, /function createAppServerControlPoller/);
+  assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/control/);
+  assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/events/);
+  assert.doesNotMatch(source, /\bsetInterval\s*\(/);
 });
 
 test("web chat run markers prove captured Codex sessions contain the current run", () => {
@@ -393,7 +397,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
     { mode: 0o755 },
   );
 
-  const fetchCalls = [];
+  const progressEvents = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
     model: "gpt-5.5",
@@ -409,19 +413,20 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
       workspaceRepository: "Codeq8/Codeq8",
       threadId: "wct_app",
       runId: "wcr_app",
-      fetchImpl: async (url, init = {}) => {
-        fetchCalls.push({ url: String(url), init });
-        if (String(url).includes("/api/chat/runs/app-server/control")) {
-          return new Response(JSON.stringify({ ok: true, requests: [] }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      },
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue(event) {
+            if (progressEvents.length < 8) {
+              progressEvents.push(event);
+            }
+          },
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+      }),
     },
   });
 
@@ -430,12 +435,6 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   assert.equal(result.sessionId, "thr_app");
   const args = JSON.parse(await fs.readFile(argsOutputPath, "utf8"));
   assert.deepEqual(args, ["app-server", "--listen", "stdio://"]);
-  const progressEventBodies = fetchCalls
-    .filter((call) => String(call.url).endsWith("/api/chat/runs/app-server/events"))
-    .map((call) => JSON.parse(String(call.init.body || "{}")));
-  const progressEvents = progressEventBodies.flatMap((body) =>
-    Array.isArray(body.events) ? body.events : [],
-  );
   assert.equal(progressEvents.length, 8);
   assert.deepEqual(
     progressEvents.map((event) => event.label),
@@ -516,8 +515,6 @@ test("runCodex sends AppServer steer requests with the active expected turn id",
     delayTurnCompletionMs: 2200,
   });
 
-  let controlGetCount = 0;
-  let steerReturned = false;
   const acknowledgementBodies = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
@@ -534,39 +531,36 @@ test("runCodex sends AppServer steer requests with the active expected turn id",
       workspaceRepository: "Codeq8/Codeq8",
       threadId: "wct_app",
       runId: "wcr_app",
-      fetchImpl: async (url, init = {}) => {
-        if (String(url).includes("/api/chat/runs/app-server/control")) {
-          const method = String(init.method || "GET").toUpperCase();
-          if (method === "POST") {
-            acknowledgementBodies.push(JSON.parse(String(init.body || "{}")));
-            return new Response(JSON.stringify({ ok: true }), {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
-            });
-          }
-          controlGetCount += 1;
-          const requests =
-            controlGetCount >= 2 && !steerReturned
-              ? [
-                  {
-                    request_id: "wcasr_steer",
-                    sequence: 1,
-                    kind: "steer",
-                    content: "Actually say awesome.",
-                  },
-                ]
-              : [];
-          steerReturned = steerReturned || requests.length > 0;
-          return new Response(JSON.stringify({ ok: true, poll_after_ms: 1000, requests }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      },
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue: () => {},
+          flush: async () => {},
+        },
+        createControlListener: ({ sendRequest, getAppServerThreadId, getAppServerTurnId }) => {
+          let timer = null;
+          return {
+            start() {
+              timer = setTimeout(async () => {
+                await sendRequest("turn/steer", {
+                  threadId: getAppServerThreadId(),
+                  expectedTurnId: getAppServerTurnId(),
+                  input: [{ type: "text", text: "Actually say awesome." }],
+                });
+                acknowledgementBodies.push({
+                  acknowledgements: [
+                    { request_id: "wcasr_steer", status: "accepted" },
+                  ],
+                });
+              }, 350);
+            },
+            async stop() {
+              if (timer) {
+                clearTimeout(timer);
+              }
+            },
+          };
+        },
+      }),
     },
   });
 
@@ -598,8 +592,6 @@ test("runCodex materializes AppServer steer attachments before forwarding them",
     delayTurnCompletionMs: 2200,
   });
 
-  let controlGetCount = 0;
-  let steerReturned = false;
   const materializeCalls = [];
   const acknowledgementBodies = [];
   const result = await runCodex({
@@ -632,50 +624,72 @@ test("runCodex materializes AppServer steer attachments before forwarding them",
           },
         ];
       },
-      fetchImpl: async (url, init = {}) => {
-        if (String(url).includes("/api/chat/runs/app-server/control")) {
-          const method = String(init.method || "GET").toUpperCase();
-          if (method === "POST") {
-            acknowledgementBodies.push(JSON.parse(String(init.body || "{}")));
-            return new Response(JSON.stringify({ ok: true }), {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
-            });
-          }
-          controlGetCount += 1;
-          const requests =
-            controlGetCount >= 2 && !steerReturned
-              ? [
-                  {
-                    request_id: "wcasr_attachment_steer",
-                    sequence: 1,
-                    kind: "steer",
-                    content: "",
-                    attachments: [
-                      {
-                        attachment_id: "wca_screenshot",
-                        name: "Screenshot.png",
-                        content_type: "image/png",
-                        size_bytes: 12,
-                        storage_backend: "firebase_storage",
-                        storage_bucket: "codeq8.appspot.com",
-                        storage_key: "chat_attachments/wca_screenshot/Screenshot.png",
-                      },
-                    ],
-                  },
-                ]
-              : [];
-          steerReturned = steerReturned || requests.length > 0;
-          return new Response(JSON.stringify({ ok: true, poll_after_ms: 1000, requests }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      },
+      createAppServerFirestoreBridgeImpl: async (context) => ({
+        progressReporter: {
+          enqueue: () => {},
+          flush: async () => {},
+        },
+        createControlListener: ({ sendRequest, getAppServerThreadId, getAppServerTurnId }) => {
+          let timer = null;
+          return {
+            start() {
+              timer = setTimeout(async () => {
+                const materialized = await context.materializeWebChatAttachmentsImpl({
+                  attachments: [
+                    {
+                      attachment_id: "wca_screenshot",
+                      name: "Screenshot.png",
+                      content_type: "image/png",
+                      size_bytes: 12,
+                      storage_backend: "firebase_storage",
+                      storage_bucket: "codeq8.appspot.com",
+                      storage_key: "chat_attachments/wca_screenshot/Screenshot.png",
+                    },
+                  ],
+                  attachmentRootPath: path.join(
+                    context.attachmentRootPath,
+                    "wcasr_attachment_steer",
+                  ),
+                  workerUrl: context.workerUrl,
+                  adminToken: context.adminToken,
+                  threadId: context.threadId,
+                  commandEnv: process.env,
+                });
+                await sendRequest("turn/steer", {
+                  threadId: getAppServerThreadId(),
+                  expectedTurnId: getAppServerTurnId(),
+                  input: [
+                    {
+                      type: "text",
+                      text: [
+                        "The user sent a follow-up while this run was active.",
+                        "",
+                        "Message:",
+                        "(no text)",
+                        "",
+                        "Attachments materialized locally:",
+                        `- Screenshot.png (image/png, 12 bytes, attachment_id=wca_screenshot): ${materialized[0].local_path}`,
+                        "",
+                        "Inspect these files directly if they are relevant to the request. Do not modify or delete the attached files.",
+                      ].join("\n"),
+                    },
+                  ],
+                });
+                acknowledgementBodies.push({
+                  acknowledgements: [
+                    { request_id: "wcasr_attachment_steer", status: "accepted" },
+                  ],
+                });
+              }, 350);
+            },
+            async stop() {
+              if (timer) {
+                clearTimeout(timer);
+              }
+            },
+          };
+        },
+      }),
     },
   });
 
@@ -733,7 +747,7 @@ test("runCodex completes while an AppServer progress flush is active", async (t)
     { mode: 0o755 },
   );
 
-  let eventPostCount = 0;
+  let progressFlushCount = 0;
   const result = await runCodex({
     codexPath: fakeCodexPath,
     model: "gpt-5.5",
@@ -749,26 +763,25 @@ test("runCodex completes while an AppServer progress flush is active", async (t)
       workspaceRepository: "Codeq8/Codeq8",
       threadId: "wct_app",
       runId: "wcr_app",
-      fetchImpl: async (url) => {
-        if (String(url).includes("/api/chat/runs/app-server/events")) {
-          eventPostCount += 1;
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          return new Response(JSON.stringify({ ok: true }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify({ ok: true, requests: [] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      },
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue: () => {},
+          async flush() {
+            progressFlushCount += 1;
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+          },
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+      }),
     },
   });
 
   assert.equal(result.ok, true);
   assert.equal(result.output, "done");
-  assert(eventPostCount >= 1);
+  assert(progressFlushCount >= 1);
 });
 
 test("normalizeAttachmentRecord preserves Firebase Storage metadata for direct reads", () => {
@@ -1166,6 +1179,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/api/chat/runs/callback",
         "/api/chat/runs/runtime-manifest",
         "/api/chat/runs/prompt",
+        "/api/chat/runs/app-server/firebase-session",
         "/api/chat/runs/codeq8-file",
         "/api/chat/runs/codeq8-file/save",
         "/web-chat/attachments/get",
@@ -1178,8 +1192,6 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
       ],
       scoped_authorized_paths: [
         "/api/chat/runs/diagnostic",
-        "/api/chat/runs/app-server/events",
-        "/api/chat/runs/app-server/control",
         "/web-chat/attachments/read-url",
         "/web-chat/codex-session/upload-direct",
       ],
@@ -1226,6 +1238,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts AppServer turn-control man
         "/api/chat/runs/callback",
         "/api/chat/runs/runtime-manifest",
         "/api/chat/runs/prompt",
+        "/api/chat/runs/app-server/firebase-session",
         "/web-chat/attachments/get",
         "/web-chat/codex-session/get",
         "/web-chat/codex-session/upload-prepare",
@@ -1238,8 +1251,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts AppServer turn-control man
       scoped_authorized_paths: [
         "/api/chat/runs/diagnostic",
         "/web-chat/attachments/read-url",
-        "/api/chat/runs/app-server/events",
-        "/api/chat/runs/app-server/control",
+        "/api/chat/runs/app-server/firebase-session",
       ],
     });
 
@@ -1263,8 +1275,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts AppServer turn-control man
           "/api/chat/runs/diagnostic",
           "/api/chat/runs/runtime-manifest",
           "/api/chat/runs/prompt",
-          "/api/chat/runs/app-server/events",
-          "/api/chat/runs/app-server/control",
+          "/api/chat/runs/app-server/firebase-session",
           "/web-chat/attachments/get",
           "/web-chat/attachments/read-url",
           "/web-chat/codex-session/get",
@@ -1282,7 +1293,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts AppServer turn-control man
   }
 });
 
-test("assertWebChatRunnerRuntimeCompatibility fails fast when AppServer turn-control routes are missing", async () => {
+test("assertWebChatRunnerRuntimeCompatibility fails fast when AppServer Firestore session route is missing", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () =>
     Response.json({
@@ -1333,8 +1344,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when AppServer turn-con
             "/api/chat/runs/diagnostic",
             "/api/chat/runs/runtime-manifest",
             "/api/chat/runs/prompt",
-            "/api/chat/runs/app-server/events",
-            "/api/chat/runs/app-server/control",
+            "/api/chat/runs/app-server/firebase-session",
             "/web-chat/attachments/get",
             "/web-chat/attachments/read-url",
             "/web-chat/codex-session/get",
@@ -1346,7 +1356,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when AppServer turn-con
             "/web-chat/threads/get",
           ],
         }),
-      /missing authorized paths: \/api\/chat\/runs\/app-server\/events, \/api\/chat\/runs\/app-server\/control/,
+      /missing authorized paths: \/api\/chat\/runs\/app-server\/firebase-session/,
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -1376,8 +1386,7 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
         "/web-chat/threads/get",
       ],
       scoped_authorized_paths: [
-        "/api/chat/runs/app-server/events",
-        "/api/chat/runs/app-server/control",
+        "/api/chat/runs/app-server/firebase-session",
       ],
     });
 
