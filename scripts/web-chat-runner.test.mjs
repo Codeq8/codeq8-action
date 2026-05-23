@@ -18,6 +18,7 @@ import {
   buildWebChatRunMarker,
   buildWebChatRunnerDiagnosticRequest,
   buildUploadedCodexSessionStoredValue,
+  captureCodexSessionBundle,
   configureWorkspaceGitCredentialHelper,
   configureWorkspacePushPolicy,
   DEFAULT_TIMEOUT_SECONDS,
@@ -87,6 +88,69 @@ test("web chat run markers prove captured Codex sessions contain the current run
     }),
     false,
   );
+});
+
+test("Codex session capture uses the expected App Server session id", async () => {
+  const codexHome = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-capture-"));
+  const expectedSessionId = "019dd643-e3ec-76e1-952c-3dc25053e8c3";
+  const newerWrongSessionId = "019e52e9-de09-7580-9e63-ba6c89381476";
+
+  async function writeSession(sessionId, relativePath, mtime) {
+    const sessionFilePath = path.join(codexHome, relativePath);
+    await fs.mkdir(path.dirname(sessionFilePath), { recursive: true });
+    await fs.writeFile(
+      sessionFilePath,
+      [
+        JSON.stringify({
+          timestamp: "2026-05-02T01:06:49.000Z",
+          type: "session_meta",
+          payload: {
+            id: sessionId,
+            cli_version: "0.133.0",
+            model: "gpt-5.5",
+          },
+        }),
+        `session ${sessionId}`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.utimes(sessionFilePath, mtime, mtime);
+  }
+
+  try {
+    await writeSession(
+      expectedSessionId,
+      `sessions/2026/05/02/rollout-2026-05-02T01-06-49-${expectedSessionId}.jsonl`,
+      new Date("2026-05-02T01:06:49.000Z"),
+    );
+    await writeSession(
+      newerWrongSessionId,
+      `sessions/2026/05/22/rollout-2026-05-22T20-38-39-${newerWrongSessionId}.jsonl`,
+      new Date("2026-05-23T03:42:04.000Z"),
+    );
+
+    const captured = await captureCodexSessionBundle({
+      codexHome,
+      existingSessionState: {},
+      model: "gpt-5.5",
+      expectedSessionId,
+    });
+
+    assert.equal(captured.sessionId, expectedSessionId);
+    assert.match(captured.sessionFileRelativePath, new RegExp(expectedSessionId));
+    await assert.rejects(
+      captureCodexSessionBundle({
+        codexHome,
+        existingSessionState: {},
+        model: "gpt-5.5",
+        expectedSessionId: "019fffffffffffffffffffffffffffff",
+      }),
+      /expected session bundle/i,
+    );
+  } finally {
+    await fs.rm(codexHome, { recursive: true, force: true });
+  }
 });
 
 test("buildCodexRunMetadata advertises AppServer attachment steering support", () => {
@@ -348,6 +412,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
 
   assert.equal(result.ok, true);
   assert.equal(result.output, "Progress update 10.");
+  assert.equal(result.sessionId, "thr_app");
   const args = JSON.parse(await fs.readFile(argsOutputPath, "utf8"));
   assert.deepEqual(args, ["app-server", "--listen", "stdio://"]);
   const progressEventBodies = fetchCalls
