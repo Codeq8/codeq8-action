@@ -58,6 +58,7 @@ const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 8;
 const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
+const APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS = 2500;
 // AppServer live chat transport must not be implemented as recurring runner
 // HTTP calls. The runner gets one Firebase session, then uses Firestore
 // listeners/writes for progress and control.
@@ -1051,6 +1052,42 @@ function log(message, details = "") {
 function sleep(ms) {
   const normalizedMs = Math.max(0, Number(ms) || 0);
   return new Promise((resolve) => setTimeout(resolve, normalizedMs));
+}
+
+function waitWithUnrefTimeout(promise, timeoutMs) {
+  const normalizedTimeoutMs = Math.max(0, Number(timeoutMs) || 0);
+  if (normalizedTimeoutMs <= 0) {
+    return Promise.resolve(promise).then(() => "completed");
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutHandle = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve("timeout");
+    }, normalizedTimeoutMs);
+    timeoutHandle.unref?.();
+    Promise.resolve(promise).then(
+      () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutHandle);
+        resolve("completed");
+      },
+      (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutHandle);
+        reject(error);
+      },
+    );
+  });
 }
 
 async function pathExists(targetPath) {
@@ -6592,6 +6629,20 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
           runTransactionImpl: firebaseFirestore.runTransaction,
         });
       },
+      async close() {
+        // The direct Firestore listener/write path is what prevents recurring
+        // runner HTTP polling, but Firebase SDK handles keep Node alive unless
+        // we close them explicitly after Codex has completed.
+        await firebaseAuth.signOut(auth).catch((error) => {
+          log("Codex app-server Firebase sign-out cleanup failed", extractErrorMessage(error));
+        });
+        await firebaseFirestore.terminate(firestore).catch((error) => {
+          log("Codex app-server Firestore terminate cleanup failed", extractErrorMessage(error));
+        });
+        await firebaseApp.deleteApp(app).catch((error) => {
+          log("Codex app-server Firebase app cleanup failed", extractErrorMessage(error));
+        });
+      },
     };
   } catch (error) {
     log("Codex app-server Firestore bridge unavailable", extractErrorMessage(error));
@@ -6739,6 +6790,22 @@ async function runCodexAppServer({
       clearTimeout(timeoutHandle);
       await controlListener?.stop?.();
       await progressReporter.flush();
+      if (firestoreBridge?.close) {
+        try {
+          const cleanupStatus = await waitWithUnrefTimeout(
+            firestoreBridge.close(),
+            APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS,
+          );
+          if (cleanupStatus === "timeout") {
+            log(
+              "Codex app-server Firestore cleanup timed out",
+              `timeout_ms=${APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS}`,
+            );
+          }
+        } catch (error) {
+          log("Codex app-server Firestore cleanup failed", extractErrorMessage(error));
+        }
+      }
       for (const pending of pendingRequests.values()) {
         pending.reject(new Error("Codex app-server closed before the request completed."));
       }

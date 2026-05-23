@@ -83,6 +83,8 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
   assert.match(source, /APP_SERVER_FIRESTORE_SESSION_PATH/);
   assert.match(bridgeSource, /import\("firebase\/firestore"\)/);
   assert.match(bridgeSource, /\bonSnapshot\b/);
+  assert.match(bridgeSource, /\bterminate\(firestore\)/);
+  assert.match(source, /firestoreBridge\.close\(\)/);
   assert.doesNotMatch(source, /function createAppServerControlPoller/);
   assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/control/);
   assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/events/);
@@ -410,6 +412,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   );
 
   const progressEvents = [];
+  let bridgeCloseCount = 0;
   const result = await runCodex({
     codexPath: fakeCodexPath,
     model: "gpt-5.5",
@@ -438,6 +441,9 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
           start: () => {},
           stop: async () => {},
         }),
+        close: async () => {
+          bridgeCloseCount += 1;
+        },
       }),
     },
   });
@@ -456,6 +462,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
     progressEvents.some((event) => String(event.item_type || "").includes("command")),
     false,
   );
+  assert.equal(bridgeCloseCount, 1);
 });
 
 test("runCodex summarizes AppServer chatter and suppresses successful stderr", async (t) => {
