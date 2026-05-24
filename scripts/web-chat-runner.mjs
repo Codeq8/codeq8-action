@@ -7289,6 +7289,167 @@ async function pushRememberedThreadBranch({
   };
 }
 
+function sanitizeRescueBranchSegment(value) {
+  return normalizeText(value)
+    .replace(/^refs\/heads\//i, "")
+    .replace(/^origin\//i, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function buildWorkspaceRescueBranchName({
+  threadId = "",
+  runId = "",
+} = {}) {
+  const threadSegment = sanitizeRescueBranchSegment(threadId);
+  const runSegment = sanitizeRescueBranchSegment(runId);
+  if (!threadSegment || !runSegment) {
+    return "";
+  }
+  return `codeq8/rescue/${threadSegment}/${runSegment}`;
+}
+
+async function stageWorkspaceChanges({ workspacePath, commandEnv }) {
+  const staged = await runProcessCapture("git", ["add", "-A"], {
+    cwd: workspacePath,
+    env: commandEnv,
+  });
+  if (!staged.ok) {
+    return {
+      ok: false,
+      error: `Unable to stage workspace rescue changes: ${summarizeGitProcessFailure(staged)}`,
+    };
+  }
+
+  const diff = await runProcessCapture("git", ["diff", "--cached", "--quiet"], {
+    cwd: workspacePath,
+    env: commandEnv,
+  });
+  if (!diff.ok && diff.code !== 1) {
+    return {
+      ok: false,
+      error: `Unable to inspect staged workspace rescue changes: ${summarizeGitProcessFailure(diff)}`,
+    };
+  }
+  return {
+    ok: true,
+    hasStagedChanges: diff.code === 1,
+    error: "",
+  };
+}
+
+function buildWorkspaceRescueCommitBody({
+  originalBranch = "",
+  rescueReason = "",
+  threadId = "",
+  runId = "",
+} = {}) {
+  return [
+    `Thread: ${normalizeText(threadId)}`,
+    `Run: ${normalizeText(runId)}`,
+    `Original branch: ${normalizeBranchName(originalBranch) || "<unknown>"}`,
+    `Reason: ${normalizeText(rescueReason) || "workspace changes needed a durable backup branch"}`,
+    "",
+    "This commit was created by Codeq8 to preserve local runner workspace changes.",
+    "Review the branch before turning it into a normal pull request.",
+  ].join("\n");
+}
+
+async function pushWorkspaceRescueBranch({
+  workspacePath,
+  commandEnv,
+  branch,
+  threadId = "",
+  runId = "",
+  rescueReason = "",
+}) {
+  const originalBranch = normalizeBranchName(branch);
+  const rescueBranch = buildWorkspaceRescueBranchName({ threadId, runId });
+  if (!rescueBranch) {
+    return {
+      ok: false,
+      error: "thread_id and run_id are required to create a workspace rescue branch.",
+    };
+  }
+
+  const checkedOut = await runProcessCapture("git", ["checkout", "-b", rescueBranch], {
+    cwd: workspacePath,
+    env: commandEnv,
+  });
+  if (!checkedOut.ok) {
+    return {
+      ok: false,
+      error: `Unable to create workspace rescue branch ${rescueBranch}: ${summarizeGitProcessFailure(checkedOut)}`,
+    };
+  }
+
+  let committedDirtyWork = false;
+  const hasWorkingTreeChanges = await workingTreeHasChanges({
+    workspacePath,
+    commandEnv,
+  }).catch(() => false);
+  if (hasWorkingTreeChanges) {
+    const staged = await stageWorkspaceChanges({ workspacePath, commandEnv });
+    if (!staged.ok) {
+      return staged;
+    }
+    if (staged.hasStagedChanges) {
+      const committed = await runProcessCapture(
+        "git",
+        [
+          "commit",
+          "-m",
+          "Codeq8 rescue workspace changes",
+          "-m",
+          buildWorkspaceRescueCommitBody({
+            originalBranch,
+            rescueReason,
+            threadId,
+            runId,
+          }),
+        ],
+        {
+          cwd: workspacePath,
+          env: commandEnv,
+        },
+      );
+      if (!committed.ok) {
+        return {
+          ok: false,
+          error: `Unable to commit workspace rescue branch ${rescueBranch}: ${summarizeGitProcessFailure(committed)}`,
+        };
+      }
+      committedDirtyWork = true;
+    }
+  }
+
+  const pushed = await runProcessCapture(
+    "git",
+    ["push", "--set-upstream", "origin", `HEAD:refs/heads/${rescueBranch}`],
+    {
+      cwd: workspacePath,
+      env: commandEnv,
+    },
+  );
+  if (!pushed.ok) {
+    return {
+      ok: false,
+      error: `Unable to push workspace rescue branch ${rescueBranch}: ${summarizeGitProcessFailure(pushed)}`,
+    };
+  }
+
+  const commitSha = await readHeadCommitSha({ workspacePath, commandEnv }).catch(() => "");
+  return {
+    ok: true,
+    branch: rescueBranch,
+    originalBranch,
+    committedDirtyWork,
+    commitSha,
+    error: "",
+  };
+}
+
 async function clearGitOperationState({ workspacePath, commandEnv }) {
   const bestEffortAbortCommands = [
     ["rebase", "--abort"],
@@ -7364,13 +7525,21 @@ function isRememberedThreadBranch({
 function describeWorkspacePersistence({
   branch = "",
   pushed = false,
+  rescueBranch = "",
+  rescueOriginalBranch = "",
+  rescuedDirtyWork = false,
   pullRequestUrl = "",
   pendingRemoteSync = "",
   skippedProtectedBranch = "",
 } = {}) {
   const normalizedBranch = normalizeBranchName(branch);
+  const normalizedRescueBranch = normalizeBranchName(rescueBranch);
   const parts = [];
-  if (pushed) {
+  if (normalizedRescueBranch) {
+    parts.push(
+      `Codeq8 saved ${rescuedDirtyWork ? "uncommitted workspace changes" : "local workspace progress"} from ${normalizeBranchName(rescueOriginalBranch) || "the working branch"} to backup branch ${normalizedRescueBranch}. Review that branch before opening or merging a pull request.`,
+    );
+  } else if (pushed) {
     parts.push(`Codeq8 pushed branch ${normalizedBranch || "the working branch"}.`);
   }
   if (normalizeText(pendingRemoteSync)) {
@@ -7385,6 +7554,19 @@ function describeWorkspacePersistence({
     parts.push(`PR: ${normalizeText(pullRequestUrl)}.`);
   }
   return parts.join(" ");
+}
+
+function buildWorkspaceRescueMetadata(result = {}) {
+  const branch = normalizeBranchName(result.rescueBranch);
+  if (!branch) {
+    return null;
+  }
+  return {
+    branch,
+    original_branch: normalizeBranchName(result.rescueOriginalBranch),
+    commit_sha: normalizeText(result.rescueCommitSha),
+    committed_dirty_work: result.rescuedDirtyWork === true,
+  };
 }
 
 async function branchHasCommitsAgainstBase({
@@ -7426,6 +7608,8 @@ async function persistWorkspaceProgress({
   branch,
   writeMode = "",
   repository = "",
+  threadId = "",
+  runId = "",
   headRepository = "",
   baseBranch = "",
   gitToken = "",
@@ -7440,6 +7624,10 @@ async function persistWorkspaceProgress({
     pullRequestTitle: "",
     pendingRemoteSync: "",
     resolvedWriteBranch: "",
+    rescueBranch: "",
+    rescueOriginalBranch: "",
+    rescueCommitSha: "",
+    rescuedDirtyWork: false,
     skippedProtectedBranch: "",
     error: "",
   };
@@ -7478,8 +7666,32 @@ async function persistWorkspaceProgress({
       meaningfulRepoWork &&
       !cleanProtectedBranchRemoteSync
     ) {
-      result.skippedProtectedBranch = normalizedBranch;
-      result.error = `Codex left repo changes on protected branch ${normalizedBranch}. Create and switch to a normal git branch before finishing.`;
+      const rescued = await pushWorkspaceRescueBranch({
+        workspacePath,
+        commandEnv,
+        branch: normalizedBranch,
+        threadId,
+        runId,
+        rescueReason: "protected branch work cannot be pushed to the target branch",
+      });
+      if (!rescued.ok) {
+        result.skippedProtectedBranch = normalizedBranch;
+        result.error =
+          rescued.error ||
+          `Codex left repo changes on protected branch ${normalizedBranch}. Create and switch to a normal git branch before finishing.`;
+        return result;
+      }
+      result.pushed = true;
+      result.rescueBranch = rescued.branch;
+      result.rescueOriginalBranch = rescued.originalBranch;
+      result.rescueCommitSha = rescued.commitSha;
+      result.rescuedDirtyWork = rescued.committedDirtyWork;
+      result.resolvedWriteBranch = rescued.branch;
+      currentState = await readWorkspacePersistenceState({
+        workspacePath,
+        commandEnv,
+        branch: rescued.branch,
+      });
       return result;
     }
 
@@ -7523,6 +7735,38 @@ async function persistWorkspaceProgress({
         workspacePath,
         commandEnv,
         branch: normalizedBranch,
+      });
+    }
+
+    const shouldAttemptBackupBranchRescue =
+      meaningfulRepoWork &&
+      currentState.hasWorkingTreeChanges &&
+      !currentState.hasRemoteBranch &&
+      !hasCommittedBranchProgress;
+    if (shouldAttemptBackupBranchRescue) {
+      const rescued = await pushWorkspaceRescueBranch({
+        workspacePath,
+        commandEnv,
+        branch: normalizedBranch,
+        threadId,
+        runId,
+        rescueReason: "local workspace changes were not committed to a remote branch",
+      });
+      if (!rescued.ok) {
+        result.pendingRemoteSync = rescued.error;
+        result.error = rescued.error;
+        return result;
+      }
+      result.pushed = true;
+      result.rescueBranch = rescued.branch;
+      result.rescueOriginalBranch = rescued.originalBranch;
+      result.rescueCommitSha = rescued.commitSha;
+      result.rescuedDirtyWork = rescued.committedDirtyWork;
+      result.resolvedWriteBranch = rescued.branch;
+      currentState = await readWorkspacePersistenceState({
+        workspacePath,
+        commandEnv,
+        branch: rescued.branch,
       });
     }
 
@@ -8821,6 +9065,9 @@ async function main() {
             preparedWorkspace.durableWriteBranch ||
             finalBranch,
           pushed: persistenceResult.pushed,
+          rescueBranch: persistenceResult.rescueBranch,
+          rescueOriginalBranch: persistenceResult.rescueOriginalBranch,
+          rescuedDirtyWork: persistenceResult.rescuedDirtyWork,
           pullRequestUrl: persistenceResult.pullRequestUrl,
           pendingRemoteSync: persistenceResult.pendingRemoteSync,
           skippedProtectedBranch: persistenceResult.skippedProtectedBranch,
@@ -8828,6 +9075,15 @@ async function main() {
         if (lastPersistenceSummary) {
           log("Workspace persistence summary", lastPersistenceSummary);
         }
+        const workspaceRescueMetadata = buildWorkspaceRescueMetadata(persistenceResult);
+        const callbackFinalWorkspaceState =
+          persistenceResult.pushed || normalizeText(persistenceResult.resolvedWriteBranch)
+            ? await readFinalWorkspaceStateCallbackPayload({
+                workspacePath: preparedWorkspace.workspacePath,
+                commandEnv,
+                branch: persistenceResult.resolvedWriteBranch || finalBranch,
+              }).catch(() => finalWorkspaceState)
+            : finalWorkspaceState;
 
         let resolvedPullRequestNumber = activeBranchContext.pull_request_number || 0;
         let resolvedPullRequestUrl = activeBranchContext.pull_request_url || "";
@@ -8879,12 +9135,17 @@ async function main() {
           );
         }
 
-        assistantMessage = truncate(
-          assistantMessage ||
-            lastPersistenceSummary ||
-            "Codex completed without textual output.",
-          MAX_OUTPUT_CHARS,
-        );
+        assistantMessage = workspaceRescueMetadata && lastPersistenceSummary
+          ? truncate(
+              [assistantMessage, lastPersistenceSummary].filter(Boolean).join("\n\n"),
+              MAX_OUTPUT_CHARS,
+            )
+          : truncate(
+              assistantMessage ||
+                lastPersistenceSummary ||
+                "Codex completed without textual output.",
+              MAX_OUTPUT_CHARS,
+            );
         const completedAt = Date.now();
         await postRunCallback({
           publicBaseUrl,
@@ -8907,7 +9168,7 @@ async function main() {
             resolved_pull_request_url: resolvedPullRequestUrl,
             resolved_pull_request_title: persistenceResult.pullRequestTitle || "",
             assistant_message: assistantMessage,
-            final_workspace_state: finalWorkspaceState || undefined,
+            final_workspace_state: callbackFinalWorkspaceState || undefined,
             assistant_metadata: {
               exit_code: execution.exitCode,
               signal: execution.signal || "",
@@ -8927,6 +9188,11 @@ async function main() {
                       normalizeText(execution.diagnosticOutput) || normalizeText(execution.reason),
                       1000,
                     ),
+                  }
+                : {}),
+              ...(workspaceRescueMetadata
+                ? {
+                    workspace_rescue: workspaceRescueMetadata,
                   }
                 : {}),
               ...(nonFatalCodexSessionLoadWarning
@@ -8964,6 +9230,11 @@ async function main() {
                       ),
                     }
                   : {}),
+                ...(workspaceRescueMetadata
+                  ? {
+                      workspace_rescue: workspaceRescueMetadata,
+                    }
+                  : {}),
                 ...(nonFatalCodexSessionLoadWarning
                   ? {
                       codex_session_load_warning: truncate(
@@ -8997,6 +9268,7 @@ async function main() {
               "",
             resolved_pull_request_number: resolvedPullRequestNumber,
             has_resolved_pull_request_url: Boolean(resolvedPullRequestUrl),
+            workspace_rescue: workspaceRescueMetadata || null,
             thread_target_restart_count: threadTargetRestartCount,
           },
         });
