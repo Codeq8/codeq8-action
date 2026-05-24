@@ -179,6 +179,7 @@ function printHelp(stdout) {
       "  codeq8 threads message <thread-id> --text text",
       "  codeq8 threads state <thread-id> [--limit 50]",
       "  codeq8 attachments get --attachment <attachment-id> [--thread <thread-id>] [--output file]",
+      "  codeq8 github issue attachments <url|number> [--repo owner/repo] [--comments] --output-dir dir",
       "",
       "Authentication is read from the Codeq8 runner environment. Tokens are never printed.",
       "",
@@ -359,6 +360,75 @@ function decodeBase64Url(value) {
   return Buffer.from(normalizeText(value), "base64url");
 }
 
+function sanitizeFileName(value, fallback = "attachment") {
+  const normalized = normalizeText(value || fallback)
+    .replace(/[\\/]+/g, "-")
+    .replace(/[\u0000-\u001f]/g, "")
+    .replace(/^\.+$/, "")
+    .slice(0, 180);
+  return normalized || fallback;
+}
+
+function extensionForContentType(contentType) {
+  const normalized = normalizeText(contentType).toLowerCase();
+  if (normalized === "image/png") return ".png";
+  if (normalized === "image/jpeg" || normalized === "image/jpg") return ".jpg";
+  if (normalized === "image/gif") return ".gif";
+  if (normalized === "image/webp") return ".webp";
+  if (normalized === "image/svg+xml") return ".svg";
+  return "";
+}
+
+function ensureFileNameExtension(name, contentType) {
+  const normalizedName = sanitizeFileName(name);
+  if (path.extname(normalizedName)) {
+    return normalizedName;
+  }
+  return `${normalizedName}${extensionForContentType(contentType)}`;
+}
+
+async function writeGitHubIssueAttachmentFiles({
+  attachments,
+  outputDir,
+  cwd,
+}) {
+  const resolvedOutputDir = path.resolve(cwd, outputDir);
+  await fs.mkdir(resolvedOutputDir, { recursive: true });
+  const usedNames = new Set();
+  const materialized = [];
+  for (let index = 0; index < attachments.length; index += 1) {
+    const attachment = attachments[index] || {};
+    const baseName = ensureFileNameExtension(
+      attachment.name || `github-issue-attachment-${index + 1}`,
+      attachment.content_type || attachment.contentType,
+    );
+    let fileName = baseName;
+    let duplicateIndex = 2;
+    while (usedNames.has(fileName.toLowerCase())) {
+      const extension = path.extname(baseName);
+      const stem = extension ? baseName.slice(0, -extension.length) : baseName;
+      fileName = `${stem}-${duplicateIndex}${extension}`;
+      duplicateIndex += 1;
+    }
+    usedNames.add(fileName.toLowerCase());
+    const filePath = path.join(resolvedOutputDir, fileName);
+    await fs.writeFile(
+      filePath,
+      decodeBase64Url(
+        attachment.file_contents_base64url || attachment.fileContentsBase64Url,
+      ),
+    );
+    materialized.push({
+      name: attachment.name || fileName,
+      content_type: attachment.content_type || attachment.contentType || "",
+      size_bytes: Number(attachment.size_bytes || attachment.sizeBytes || 0) || 0,
+      source: attachment.source || {},
+      path: filePath,
+    });
+  }
+  return materialized;
+}
+
 async function handleAttachmentsCommand({ args, context, fetchImpl, stdout, cwd }) {
   const [command, ...rest] = args;
   if (!command || command === "--help" || command === "help") {
@@ -410,6 +480,71 @@ async function handleAttachmentsCommand({ args, context, fetchImpl, stdout, cwd 
   return 0;
 }
 
+async function handleGitHubCommand({ args, context, fetchImpl, stdout, cwd }) {
+  const [resource, command, ...rest] = args;
+  if (!resource || resource === "--help" || resource === "help") {
+    printHelp(stdout);
+    return 0;
+  }
+  if (resource !== "issue") {
+    throw new Error(`Unknown github resource: ${resource}.`);
+  }
+  if (!command || command === "--help" || command === "help") {
+    printHelp(stdout);
+    return 0;
+  }
+  if (command !== "attachments" && command !== "attachment") {
+    throw new Error(`Unknown github issue command: ${command}.`);
+  }
+
+  const positional = removeFlags(
+    rest,
+    ["--repo", "--repository", "--output-dir", "--output"],
+    ["--comments"],
+  );
+  const issueReference = normalizeText(positional[0]);
+  const repository = readFlag(
+    rest,
+    ["--repo", "--repository"],
+    context.workspaceRepository,
+  );
+  const outputDir = readFlag(rest, ["--output-dir", "--output"]);
+  const includeComments = hasFlag(rest, ["--comments"]);
+  if (!issueReference) {
+    throw new Error("github issue attachments requires <url|number>.");
+  }
+  if (!outputDir) {
+    throw new Error("github issue attachments requires --output-dir <dir>.");
+  }
+
+  const query = new URLSearchParams();
+  appendParentQuery(query, context);
+  query.set("issue", issueReference);
+  query.set("repository", repository);
+  query.set("comments", includeComments ? "1" : "");
+  const payload = await requestJson({
+    context,
+    fetchImpl,
+    routeBase: "public",
+    path: "/api/chat/runs/github/issue-attachments",
+    query,
+  });
+  const attachments = Array.isArray(payload.attachments) ? payload.attachments : [];
+  const materialized = await writeGitHubIssueAttachmentFiles({
+    attachments,
+    outputDir,
+    cwd,
+  });
+  writeJson(stdout, {
+    ok: true,
+    issue: payload.issue || {},
+    attachments: materialized,
+    skipped: Array.isArray(payload.skipped) ? payload.skipped : [],
+    output_dir: path.resolve(cwd, outputDir),
+  });
+  return 0;
+}
+
 export async function handleRunnerCodeq8Cli({
   argv = process.argv.slice(2),
   env = process.env,
@@ -435,6 +570,9 @@ export async function handleRunnerCodeq8Cli({
   }
   if (group === "attachments" || group === "attachment") {
     return await handleAttachmentsCommand({ args: rest, context, fetchImpl, stdout, cwd });
+  }
+  if (group === "github") {
+    return await handleGitHubCommand({ args: rest, context, fetchImpl, stdout, cwd });
   }
 
   throw new Error(`Unknown codeq8 command group: ${group}.`);

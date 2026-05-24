@@ -58,6 +58,7 @@ const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 8;
 const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 12000;
+const APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS = 2500;
 // AppServer live chat transport must not be implemented as recurring runner
 // HTTP calls. The runner gets one Firebase session, then uses Firestore
 // listeners/writes for progress and control.
@@ -1065,6 +1066,42 @@ function log(message, details = "") {
 function sleep(ms) {
   const normalizedMs = Math.max(0, Number(ms) || 0);
   return new Promise((resolve) => setTimeout(resolve, normalizedMs));
+}
+
+function waitWithUnrefTimeout(promise, timeoutMs) {
+  const normalizedTimeoutMs = Math.max(0, Number(timeoutMs) || 0);
+  if (normalizedTimeoutMs <= 0) {
+    return Promise.resolve(promise).then(() => "completed");
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutHandle = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve("timeout");
+    }, normalizedTimeoutMs);
+    timeoutHandle.unref?.();
+    Promise.resolve(promise).then(
+      () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutHandle);
+        resolve("completed");
+      },
+      (error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutHandle);
+        reject(error);
+      },
+    );
+  });
 }
 
 async function pathExists(targetPath) {
@@ -5969,6 +6006,25 @@ function buildAppServerRouteUrl({ publicBaseUrl, path: routePath, query = null }
   return url.toString();
 }
 
+async function reportAppServerFirestoreDiagnostic(
+  reportRunnerDiagnostic,
+  {
+    event,
+    failureClass = "",
+    severity = "error",
+    ok = false,
+    details = {},
+  } = {},
+) {
+  await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+    event,
+    failureClass: failureClass || event,
+    severity,
+    ok,
+    details,
+  }).catch(() => null);
+}
+
 function createNoopAppServerProgressReporter() {
   return {
     enqueue: () => {},
@@ -6086,6 +6142,7 @@ function createAppServerFirestoreProgressReporter({
   FieldPathImpl,
   channel,
   docRef,
+  reportRunnerDiagnostic,
   updateDocImpl,
 }) {
   // Batching here reduces Firestore writes. This timer is not a polling loop:
@@ -6148,7 +6205,22 @@ function createAppServerFirestoreProgressReporter({
         String(now),
         "updatedAt",
         now,
-      ).catch(() => null);
+      );
+    } catch (error) {
+      const reason = extractErrorMessage(error);
+      log("Codex app-server Firestore progress write failed", reason);
+      await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+        event: "app_server_firestore_progress_write_failed",
+        failureClass: "app_server_firestore_progress_write_failed",
+        details: {
+          reason,
+          collection_id: normalizeText(channel?.collectionId),
+          document_id_hash: hashDiagnosticValue(channel?.documentId),
+          thread_id: normalizedThreadId,
+          run_id: normalizedRunId,
+          batch_size: batch.length,
+        },
+      });
     } finally {
       flushing = false;
       resolveFlushWaiters();
@@ -6336,6 +6408,7 @@ function createAppServerFirestoreControlListener({
   docRef,
   firestore,
   onSnapshotImpl,
+  reportRunnerDiagnostic,
   runTransactionImpl,
   workerUrl = "",
   adminToken = "",
@@ -6411,7 +6484,22 @@ function createAppServerFirestoreControlListener({
         "updatedAt",
         now,
       );
-    }).catch(() => null);
+    }).catch(async (error) => {
+      const reason = extractErrorMessage(error);
+      log("Codex app-server Firestore control acknowledgement failed", reason);
+      await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+        event: "app_server_firestore_control_acknowledgement_failed",
+        failureClass: "app_server_firestore_control_acknowledgement_failed",
+        details: {
+          reason,
+          collection_id: normalizeText(channel?.collectionId),
+          document_id_hash: hashDiagnosticValue(channel?.documentId),
+          thread_id: normalizedThreadId,
+          run_id: normalizedRunId,
+          acknowledgement_count: acknowledgements.length,
+        },
+      });
+    });
   };
 
   const processRequest = async (rawRequest) => {
@@ -6521,10 +6609,22 @@ function createAppServerFirestoreControlListener({
           handleSnapshotData(snapshot.data());
         },
         (error) => {
+          const reason = extractErrorMessage(error);
           log(
             "Codex app-server Firestore control listener failed",
-            extractErrorMessage(error),
+            reason,
           );
+          void reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+            event: "app_server_firestore_control_listener_failed",
+            failureClass: "app_server_firestore_control_listener_failed",
+            details: {
+              reason,
+              collection_id: normalizeText(channel?.collectionId),
+              document_id_hash: hashDiagnosticValue(channel?.documentId),
+              thread_id: normalizedThreadId,
+              run_id: normalizedRunId,
+            },
+          });
         },
       );
     },
@@ -6552,13 +6652,25 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
   }
 
   let session = null;
+  const reportRunnerDiagnostic = appServerContext?.reportRunnerDiagnostic;
   try {
     session = await fetchAppServerFirestoreSession(appServerContext);
   } catch (error) {
-    log("Codex app-server Firestore session unavailable", extractErrorMessage(error));
+    const reason = extractErrorMessage(error);
+    log("Codex app-server Firestore session unavailable", reason);
+    await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+      event: "app_server_firestore_session_unavailable",
+      failureClass: "app_server_firestore_session_unavailable",
+      details: { reason },
+    });
     return null;
   }
   if (!session) {
+    await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+      event: "app_server_firestore_session_unavailable",
+      failureClass: "app_server_firestore_session_unavailable",
+      details: { reason: "session_bootstrap_returned_empty" },
+    });
     return null;
   }
 
@@ -6592,6 +6704,7 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
         FieldPathImpl: firebaseFirestore.FieldPath,
         channel: session.channel,
         docRef,
+        reportRunnerDiagnostic,
         updateDocImpl: firebaseFirestore.updateDoc,
       }),
       createControlListener(listenerArgs = {}) {
@@ -6603,12 +6716,33 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
           docRef,
           firestore,
           onSnapshotImpl: firebaseFirestore.onSnapshot,
+          reportRunnerDiagnostic,
           runTransactionImpl: firebaseFirestore.runTransaction,
+        });
+      },
+      async close() {
+        // The direct Firestore listener/write path is what prevents recurring
+        // runner HTTP polling, but Firebase SDK handles keep Node alive unless
+        // we close them explicitly after Codex has completed.
+        await firebaseAuth.signOut(auth).catch((error) => {
+          log("Codex app-server Firebase sign-out cleanup failed", extractErrorMessage(error));
+        });
+        await firebaseFirestore.terminate(firestore).catch((error) => {
+          log("Codex app-server Firestore terminate cleanup failed", extractErrorMessage(error));
+        });
+        await firebaseApp.deleteApp(app).catch((error) => {
+          log("Codex app-server Firebase app cleanup failed", extractErrorMessage(error));
         });
       },
     };
   } catch (error) {
-    log("Codex app-server Firestore bridge unavailable", extractErrorMessage(error));
+    const reason = extractErrorMessage(error);
+    log("Codex app-server Firestore bridge unavailable", reason);
+    await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+      event: "app_server_firestore_bridge_unavailable",
+      failureClass: "app_server_firestore_bridge_unavailable",
+      details: { reason },
+    });
     return null;
   }
 }
@@ -6753,6 +6887,22 @@ async function runCodexAppServer({
       clearTimeout(timeoutHandle);
       await controlListener?.stop?.();
       await progressReporter.flush();
+      if (firestoreBridge?.close) {
+        try {
+          const cleanupStatus = await waitWithUnrefTimeout(
+            firestoreBridge.close(),
+            APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS,
+          );
+          if (cleanupStatus === "timeout") {
+            log(
+              "Codex app-server Firestore cleanup timed out",
+              `timeout_ms=${APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS}`,
+            );
+          }
+        } catch (error) {
+          log("Codex app-server Firestore cleanup failed", extractErrorMessage(error));
+        }
+      }
       for (const pending of pendingRequests.values()) {
         pending.reject(new Error("Codex app-server closed before the request completed."));
       }
@@ -7153,6 +7303,167 @@ async function pushRememberedThreadBranch({
   };
 }
 
+function sanitizeRescueBranchSegment(value) {
+  return normalizeText(value)
+    .replace(/^refs\/heads\//i, "")
+    .replace(/^origin\//i, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function buildWorkspaceRescueBranchName({
+  threadId = "",
+  runId = "",
+} = {}) {
+  const threadSegment = sanitizeRescueBranchSegment(threadId);
+  const runSegment = sanitizeRescueBranchSegment(runId);
+  if (!threadSegment || !runSegment) {
+    return "";
+  }
+  return `codeq8/rescue/${threadSegment}/${runSegment}`;
+}
+
+async function stageWorkspaceChanges({ workspacePath, commandEnv }) {
+  const staged = await runProcessCapture("git", ["add", "-A"], {
+    cwd: workspacePath,
+    env: commandEnv,
+  });
+  if (!staged.ok) {
+    return {
+      ok: false,
+      error: `Unable to stage workspace rescue changes: ${summarizeGitProcessFailure(staged)}`,
+    };
+  }
+
+  const diff = await runProcessCapture("git", ["diff", "--cached", "--quiet"], {
+    cwd: workspacePath,
+    env: commandEnv,
+  });
+  if (!diff.ok && diff.code !== 1) {
+    return {
+      ok: false,
+      error: `Unable to inspect staged workspace rescue changes: ${summarizeGitProcessFailure(diff)}`,
+    };
+  }
+  return {
+    ok: true,
+    hasStagedChanges: diff.code === 1,
+    error: "",
+  };
+}
+
+function buildWorkspaceRescueCommitBody({
+  originalBranch = "",
+  rescueReason = "",
+  threadId = "",
+  runId = "",
+} = {}) {
+  return [
+    `Thread: ${normalizeText(threadId)}`,
+    `Run: ${normalizeText(runId)}`,
+    `Original branch: ${normalizeBranchName(originalBranch) || "<unknown>"}`,
+    `Reason: ${normalizeText(rescueReason) || "workspace changes needed a durable backup branch"}`,
+    "",
+    "This commit was created by Codeq8 to preserve local runner workspace changes.",
+    "Review the branch before turning it into a normal pull request.",
+  ].join("\n");
+}
+
+async function pushWorkspaceRescueBranch({
+  workspacePath,
+  commandEnv,
+  branch,
+  threadId = "",
+  runId = "",
+  rescueReason = "",
+}) {
+  const originalBranch = normalizeBranchName(branch);
+  const rescueBranch = buildWorkspaceRescueBranchName({ threadId, runId });
+  if (!rescueBranch) {
+    return {
+      ok: false,
+      error: "thread_id and run_id are required to create a workspace rescue branch.",
+    };
+  }
+
+  const checkedOut = await runProcessCapture("git", ["checkout", "-b", rescueBranch], {
+    cwd: workspacePath,
+    env: commandEnv,
+  });
+  if (!checkedOut.ok) {
+    return {
+      ok: false,
+      error: `Unable to create workspace rescue branch ${rescueBranch}: ${summarizeGitProcessFailure(checkedOut)}`,
+    };
+  }
+
+  let committedDirtyWork = false;
+  const hasWorkingTreeChanges = await workingTreeHasChanges({
+    workspacePath,
+    commandEnv,
+  }).catch(() => false);
+  if (hasWorkingTreeChanges) {
+    const staged = await stageWorkspaceChanges({ workspacePath, commandEnv });
+    if (!staged.ok) {
+      return staged;
+    }
+    if (staged.hasStagedChanges) {
+      const committed = await runProcessCapture(
+        "git",
+        [
+          "commit",
+          "-m",
+          "Codeq8 rescue workspace changes",
+          "-m",
+          buildWorkspaceRescueCommitBody({
+            originalBranch,
+            rescueReason,
+            threadId,
+            runId,
+          }),
+        ],
+        {
+          cwd: workspacePath,
+          env: commandEnv,
+        },
+      );
+      if (!committed.ok) {
+        return {
+          ok: false,
+          error: `Unable to commit workspace rescue branch ${rescueBranch}: ${summarizeGitProcessFailure(committed)}`,
+        };
+      }
+      committedDirtyWork = true;
+    }
+  }
+
+  const pushed = await runProcessCapture(
+    "git",
+    ["push", "--set-upstream", "origin", `HEAD:refs/heads/${rescueBranch}`],
+    {
+      cwd: workspacePath,
+      env: commandEnv,
+    },
+  );
+  if (!pushed.ok) {
+    return {
+      ok: false,
+      error: `Unable to push workspace rescue branch ${rescueBranch}: ${summarizeGitProcessFailure(pushed)}`,
+    };
+  }
+
+  const commitSha = await readHeadCommitSha({ workspacePath, commandEnv }).catch(() => "");
+  return {
+    ok: true,
+    branch: rescueBranch,
+    originalBranch,
+    committedDirtyWork,
+    commitSha,
+    error: "",
+  };
+}
+
 async function clearGitOperationState({ workspacePath, commandEnv }) {
   const bestEffortAbortCommands = [
     ["rebase", "--abort"],
@@ -7228,13 +7539,21 @@ function isRememberedThreadBranch({
 function describeWorkspacePersistence({
   branch = "",
   pushed = false,
+  rescueBranch = "",
+  rescueOriginalBranch = "",
+  rescuedDirtyWork = false,
   pullRequestUrl = "",
   pendingRemoteSync = "",
   skippedProtectedBranch = "",
 } = {}) {
   const normalizedBranch = normalizeBranchName(branch);
+  const normalizedRescueBranch = normalizeBranchName(rescueBranch);
   const parts = [];
-  if (pushed) {
+  if (normalizedRescueBranch) {
+    parts.push(
+      `Codeq8 saved ${rescuedDirtyWork ? "uncommitted workspace changes" : "local workspace progress"} from ${normalizeBranchName(rescueOriginalBranch) || "the working branch"} to backup branch ${normalizedRescueBranch}. Review that branch before opening or merging a pull request.`,
+    );
+  } else if (pushed) {
     parts.push(`Codeq8 pushed branch ${normalizedBranch || "the working branch"}.`);
   }
   if (normalizeText(pendingRemoteSync)) {
@@ -7249,6 +7568,19 @@ function describeWorkspacePersistence({
     parts.push(`PR: ${normalizeText(pullRequestUrl)}.`);
   }
   return parts.join(" ");
+}
+
+function buildWorkspaceRescueMetadata(result = {}) {
+  const branch = normalizeBranchName(result.rescueBranch);
+  if (!branch) {
+    return null;
+  }
+  return {
+    branch,
+    original_branch: normalizeBranchName(result.rescueOriginalBranch),
+    commit_sha: normalizeText(result.rescueCommitSha),
+    committed_dirty_work: result.rescuedDirtyWork === true,
+  };
 }
 
 async function branchHasCommitsAgainstBase({
@@ -7290,6 +7622,8 @@ async function persistWorkspaceProgress({
   branch,
   writeMode = "",
   repository = "",
+  threadId = "",
+  runId = "",
   headRepository = "",
   baseBranch = "",
   gitToken = "",
@@ -7304,6 +7638,10 @@ async function persistWorkspaceProgress({
     pullRequestTitle: "",
     pendingRemoteSync: "",
     resolvedWriteBranch: "",
+    rescueBranch: "",
+    rescueOriginalBranch: "",
+    rescueCommitSha: "",
+    rescuedDirtyWork: false,
     skippedProtectedBranch: "",
     error: "",
   };
@@ -7342,8 +7680,32 @@ async function persistWorkspaceProgress({
       meaningfulRepoWork &&
       !cleanProtectedBranchRemoteSync
     ) {
-      result.skippedProtectedBranch = normalizedBranch;
-      result.error = `Codex left repo changes on protected branch ${normalizedBranch}. Create and switch to a normal git branch before finishing.`;
+      const rescued = await pushWorkspaceRescueBranch({
+        workspacePath,
+        commandEnv,
+        branch: normalizedBranch,
+        threadId,
+        runId,
+        rescueReason: "protected branch work cannot be pushed to the target branch",
+      });
+      if (!rescued.ok) {
+        result.skippedProtectedBranch = normalizedBranch;
+        result.error =
+          rescued.error ||
+          `Codex left repo changes on protected branch ${normalizedBranch}. Create and switch to a normal git branch before finishing.`;
+        return result;
+      }
+      result.pushed = true;
+      result.rescueBranch = rescued.branch;
+      result.rescueOriginalBranch = rescued.originalBranch;
+      result.rescueCommitSha = rescued.commitSha;
+      result.rescuedDirtyWork = rescued.committedDirtyWork;
+      result.resolvedWriteBranch = rescued.branch;
+      currentState = await readWorkspacePersistenceState({
+        workspacePath,
+        commandEnv,
+        branch: rescued.branch,
+      });
       return result;
     }
 
@@ -7387,6 +7749,38 @@ async function persistWorkspaceProgress({
         workspacePath,
         commandEnv,
         branch: normalizedBranch,
+      });
+    }
+
+    const shouldAttemptBackupBranchRescue =
+      meaningfulRepoWork &&
+      currentState.hasWorkingTreeChanges &&
+      !currentState.hasRemoteBranch &&
+      !hasCommittedBranchProgress;
+    if (shouldAttemptBackupBranchRescue) {
+      const rescued = await pushWorkspaceRescueBranch({
+        workspacePath,
+        commandEnv,
+        branch: normalizedBranch,
+        threadId,
+        runId,
+        rescueReason: "local workspace changes were not committed to a remote branch",
+      });
+      if (!rescued.ok) {
+        result.pendingRemoteSync = rescued.error;
+        result.error = rescued.error;
+        return result;
+      }
+      result.pushed = true;
+      result.rescueBranch = rescued.branch;
+      result.rescueOriginalBranch = rescued.originalBranch;
+      result.rescueCommitSha = rescued.commitSha;
+      result.rescuedDirtyWork = rescued.committedDirtyWork;
+      result.resolvedWriteBranch = rescued.branch;
+      currentState = await readWorkspacePersistenceState({
+        workspacePath,
+        commandEnv,
+        branch: rescued.branch,
       });
     }
 
@@ -8320,6 +8714,7 @@ async function main() {
             adminToken,
             attachmentRootPath: path.join(attemptRunRuntime.homePath, "control-attachments"),
             commandEnv: codexCommandEnv,
+            reportRunnerDiagnostic,
           },
         });
         await reportRunnerDiagnostic({
@@ -8684,6 +9079,9 @@ async function main() {
             preparedWorkspace.durableWriteBranch ||
             finalBranch,
           pushed: persistenceResult.pushed,
+          rescueBranch: persistenceResult.rescueBranch,
+          rescueOriginalBranch: persistenceResult.rescueOriginalBranch,
+          rescuedDirtyWork: persistenceResult.rescuedDirtyWork,
           pullRequestUrl: persistenceResult.pullRequestUrl,
           pendingRemoteSync: persistenceResult.pendingRemoteSync,
           skippedProtectedBranch: persistenceResult.skippedProtectedBranch,
@@ -8691,6 +9089,15 @@ async function main() {
         if (lastPersistenceSummary) {
           log("Workspace persistence summary", lastPersistenceSummary);
         }
+        const workspaceRescueMetadata = buildWorkspaceRescueMetadata(persistenceResult);
+        const callbackFinalWorkspaceState =
+          persistenceResult.pushed || normalizeText(persistenceResult.resolvedWriteBranch)
+            ? await readFinalWorkspaceStateCallbackPayload({
+                workspacePath: preparedWorkspace.workspacePath,
+                commandEnv,
+                branch: persistenceResult.resolvedWriteBranch || finalBranch,
+              }).catch(() => finalWorkspaceState)
+            : finalWorkspaceState;
 
         let resolvedPullRequestNumber = activeBranchContext.pull_request_number || 0;
         let resolvedPullRequestUrl = activeBranchContext.pull_request_url || "";
@@ -8742,12 +9149,17 @@ async function main() {
           );
         }
 
-        assistantMessage = truncate(
-          assistantMessage ||
-            lastPersistenceSummary ||
-            "Codex completed without textual output.",
-          MAX_OUTPUT_CHARS,
-        );
+        assistantMessage = workspaceRescueMetadata && lastPersistenceSummary
+          ? truncate(
+              [assistantMessage, lastPersistenceSummary].filter(Boolean).join("\n\n"),
+              MAX_OUTPUT_CHARS,
+            )
+          : truncate(
+              assistantMessage ||
+                lastPersistenceSummary ||
+                "Codex completed without textual output.",
+              MAX_OUTPUT_CHARS,
+            );
         const completedAt = Date.now();
         await postRunCallback({
           publicBaseUrl,
@@ -8770,7 +9182,7 @@ async function main() {
             resolved_pull_request_url: resolvedPullRequestUrl,
             resolved_pull_request_title: persistenceResult.pullRequestTitle || "",
             assistant_message: assistantMessage,
-            final_workspace_state: finalWorkspaceState || undefined,
+            final_workspace_state: callbackFinalWorkspaceState || undefined,
             assistant_metadata: {
               exit_code: execution.exitCode,
               signal: execution.signal || "",
@@ -8790,6 +9202,11 @@ async function main() {
                       normalizeText(execution.diagnosticOutput) || normalizeText(execution.reason),
                       1000,
                     ),
+                  }
+                : {}),
+              ...(workspaceRescueMetadata
+                ? {
+                    workspace_rescue: workspaceRescueMetadata,
                   }
                 : {}),
               ...(nonFatalCodexSessionLoadWarning
@@ -8827,6 +9244,11 @@ async function main() {
                       ),
                     }
                   : {}),
+                ...(workspaceRescueMetadata
+                  ? {
+                      workspace_rescue: workspaceRescueMetadata,
+                    }
+                  : {}),
                 ...(nonFatalCodexSessionLoadWarning
                   ? {
                       codex_session_load_warning: truncate(
@@ -8860,6 +9282,7 @@ async function main() {
               "",
             resolved_pull_request_number: resolvedPullRequestNumber,
             has_resolved_pull_request_url: Boolean(resolvedPullRequestUrl),
+            workspace_rescue: workspaceRescueMetadata || null,
             thread_target_restart_count: threadTargetRestartCount,
           },
         });

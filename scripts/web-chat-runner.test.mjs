@@ -81,8 +81,12 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
   );
   assert.match(source, /The bridge owns the AppServer live-cost boundary/);
   assert.match(source, /APP_SERVER_FIRESTORE_SESSION_PATH/);
+  assert.match(source, /app_server_firestore_control_listener_failed/);
+  assert.match(source, /reportRunnerDiagnostic/);
   assert.match(bridgeSource, /import\("firebase\/firestore"\)/);
   assert.match(bridgeSource, /\bonSnapshot\b/);
+  assert.match(bridgeSource, /\bterminate\(firestore\)/);
+  assert.match(source, /firestoreBridge\.close\(\)/);
   assert.doesNotMatch(source, /function createAppServerControlPoller/);
   assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/control/);
   assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/events/);
@@ -412,6 +416,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   );
 
   const progressEvents = [];
+  let bridgeCloseCount = 0;
   const result = await runCodex({
     codexPath: fakeCodexPath,
     model: "gpt-5.5",
@@ -440,6 +445,9 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
           start: () => {},
           stop: async () => {},
         }),
+        close: async () => {
+          bridgeCloseCount += 1;
+        },
       }),
     },
   });
@@ -462,6 +470,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
     progressEvents.some((event) => String(event.item_type || "").includes("command")),
     false,
   );
+  assert.equal(bridgeCloseCount, 1);
 });
 
 test("runCodex summarizes AppServer chatter and suppresses successful stderr", async (t) => {
@@ -2561,6 +2570,88 @@ test("persistWorkspaceProgress pushes committed new branches when the base ref i
   }
 });
 
+test("persistWorkspaceProgress backs up dirty local-only remembered branches", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-dirty-rescue-"));
+  const remotePath = path.join(tempRoot, "remote.git");
+  const seedPath = path.join(tempRoot, "seed");
+  const workspacePath = path.join(tempRoot, "workspace");
+
+  try {
+    git(tempRoot, ["init", "--bare", remotePath]);
+    await fs.mkdir(seedPath, { recursive: true });
+    git(seedPath, ["init"]);
+    git(seedPath, ["checkout", "-b", "main"]);
+    git(seedPath, ["config", "user.name", "Codeq8 Test"]);
+    git(seedPath, ["config", "user.email", "codeq8@example.com"]);
+    await fs.writeFile(path.join(seedPath, "README.md"), "seed\n");
+    git(seedPath, ["add", "README.md"]);
+    git(seedPath, ["commit", "-m", "Initial commit"]);
+    git(seedPath, ["remote", "add", "origin", remotePath]);
+    git(seedPath, ["push", "-u", "origin", "main"]);
+
+    git(tempRoot, ["clone", remotePath, workspacePath]);
+    git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
+    git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
+    git(workspacePath, ["checkout", "-b", "feature/local-draft", "origin/main"]);
+    const baselineState = {
+      headCommitSha: readHeadCommitSha(workspacePath),
+      statusFingerprint: "",
+    };
+
+    await fs.writeFile(path.join(workspacePath, "draft.txt"), "draft work\n");
+
+    const result = await persistWorkspaceProgress({
+      workspacePath,
+      commandEnv: process.env,
+      sourceType: "default_branch",
+      branch: "feature/local-draft",
+      writeMode: "branch_and_pr",
+      repository: "Codeq8/codeq8-action",
+      headRepository: "Codeq8/codeq8-action",
+      baseBranch: "main",
+      gitToken: "",
+      protectedBranches: ["main"],
+      baselineState,
+      threadId: "wct_dirty",
+      runId: "wcr_dirty",
+    });
+
+    const rescueBranch = "codeq8/rescue/wct_dirty/wcr_dirty";
+    const remoteHeads = execFileSync(
+      "git",
+      ["ls-remote", "--heads", "origin", rescueBranch],
+      { cwd: workspacePath, env: process.env, encoding: "utf8" },
+    );
+
+    assert.equal(result.error, "");
+    assert.equal(result.pendingRemoteSync, "");
+    assert.equal(result.pushed, true);
+    assert.equal(result.rescueBranch, rescueBranch);
+    assert.equal(result.rescueOriginalBranch, "feature/local-draft");
+    assert.equal(result.rescuedDirtyWork, true);
+    assert.equal(result.resolvedWriteBranch, rescueBranch);
+    assert.match(remoteHeads.trim(), new RegExp(`refs/heads/${rescueBranch}$`));
+    assert.equal(
+      execFileSync("git", ["show", `${rescueBranch}:draft.txt`], {
+        cwd: workspacePath,
+        env: process.env,
+        encoding: "utf8",
+      }),
+      "draft work\n",
+    );
+    assert.equal(
+      execFileSync("git", ["status", "--porcelain"], {
+        cwd: workspacePath,
+        env: process.env,
+        encoding: "utf8",
+      }),
+      "",
+    );
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("persistWorkspaceProgress accepts clean protected branch fast-forwards already synced to origin", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-protected-sync-"));
   const remotePath = path.join(tempRoot, "remote.git");
@@ -2617,8 +2708,8 @@ test("persistWorkspaceProgress accepts clean protected branch fast-forwards alre
   }
 });
 
-test("persistWorkspaceProgress still rejects unpushed protected branch commits", async () => {
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-protected-local-"));
+test("persistWorkspaceProgress backs up configured protected branch progress", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-protected-rescue-"));
   const remotePath = path.join(tempRoot, "remote.git");
   const seedPath = path.join(tempRoot, "seed");
   const workspacePath = path.join(tempRoot, "workspace");
@@ -2627,17 +2718,19 @@ test("persistWorkspaceProgress still rejects unpushed protected branch commits",
     git(tempRoot, ["init", "--bare", remotePath]);
     await fs.mkdir(seedPath, { recursive: true });
     git(seedPath, ["init"]);
-    git(seedPath, ["checkout", "-b", "main"]);
+    git(seedPath, ["checkout", "-b", "trunk"]);
     git(seedPath, ["config", "user.name", "Codeq8 Test"]);
     git(seedPath, ["config", "user.email", "codeq8@example.com"]);
     await fs.writeFile(path.join(seedPath, "README.md"), "seed\n");
     git(seedPath, ["add", "README.md"]);
     git(seedPath, ["commit", "-m", "Initial commit"]);
     git(seedPath, ["remote", "add", "origin", remotePath]);
-    git(seedPath, ["push", "-u", "origin", "main"]);
+    git(seedPath, ["push", "-u", "origin", "trunk"]);
+    git(seedPath, ["checkout", "-b", "release"]);
+    git(seedPath, ["push", "-u", "origin", "release"]);
 
     git(tempRoot, ["clone", remotePath, workspacePath]);
-    git(workspacePath, ["checkout", "main"]);
+    git(workspacePath, ["checkout", "release"]);
     git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
     git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
     const baselineState = {
@@ -2653,18 +2746,33 @@ test("persistWorkspaceProgress still rejects unpushed protected branch commits",
       workspacePath,
       commandEnv: process.env,
       sourceType: "default_branch",
-      branch: "main",
+      branch: "release",
       writeMode: "branch_and_pr",
       repository: "Codeq8/codeq8-action",
       headRepository: "Codeq8/codeq8-action",
-      baseBranch: "main",
+      baseBranch: "trunk",
       gitToken: "",
-      protectedBranches: ["main"],
+      protectedBranches: ["release"],
       baselineState,
+      threadId: "wct_release",
+      runId: "wcr_release",
     });
 
-    assert.match(result.error, /protected branch main/);
-    assert.equal(result.skippedProtectedBranch, "main");
+    const rescueBranch = "codeq8/rescue/wct_release/wcr_release";
+    const remoteHeads = execFileSync(
+      "git",
+      ["ls-remote", "--heads", "origin", rescueBranch],
+      { cwd: workspacePath, env: process.env, encoding: "utf8" },
+    );
+
+    assert.equal(result.error, "");
+    assert.equal(result.pendingRemoteSync, "");
+    assert.equal(result.pushed, true);
+    assert.equal(result.rescueBranch, rescueBranch);
+    assert.equal(result.rescueOriginalBranch, "release");
+    assert.equal(result.rescuedDirtyWork, false);
+    assert.equal(result.resolvedWriteBranch, rescueBranch);
+    assert.match(remoteHeads.trim(), new RegExp(`refs/heads/${rescueBranch}$`));
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
