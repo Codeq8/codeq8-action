@@ -6064,6 +6064,84 @@ function normalizeAppServerFirestoreChannel(value) {
   };
 }
 
+function buildAppServerFirestoreSessionBootstrapError(message, details = {}) {
+  const error = new Error(message);
+  error.diagnosticDetails = sanitizeDiagnosticDetails(details);
+  return error;
+}
+
+function readAppServerFirestoreSessionResponseStatus(response) {
+  return Number(response?.status || 0) || 0;
+}
+
+async function readAppServerFirestoreSessionResponsePayload(response) {
+  try {
+    return {
+      parseError: "",
+      payload: normalizeObject(await response.json()),
+    };
+  } catch (error) {
+    return {
+      parseError: extractErrorMessage(error),
+      payload: {},
+    };
+  }
+}
+
+function readAppServerFirestoreSessionResponseError(payload) {
+  return truncateDiagnosticString(
+    normalizeText(payload.error || payload.message || payload.reason),
+  );
+}
+
+function extractAppServerFirestoreSessionMissingFields({
+  channel,
+  firebaseAuth,
+  firebaseConfig,
+  payload,
+}) {
+  const missingFields = [];
+  if (payload.ok !== true) {
+    missingFields.push("ok");
+  }
+  if (firebaseAuth.ok !== true) {
+    missingFields.push("firebase_auth.ok");
+  }
+  if (!normalizeText(firebaseAuth.firebase_custom_token || firebaseAuth.firebaseCustomToken)) {
+    missingFields.push("firebase_auth.firebase_custom_token");
+  }
+  if (!firebaseConfig.apiKey) {
+    missingFields.push("firebase_config.apiKey");
+  }
+  if (!firebaseConfig.projectId) {
+    missingFields.push("firebase_config.projectId");
+  }
+  if (!channel.collectionId) {
+    missingFields.push("channel.collection_id");
+  }
+  if (!channel.documentId) {
+    missingFields.push("channel.document_id");
+  }
+  if (!channel.threadId) {
+    missingFields.push("channel.thread_id");
+  }
+  if (!channel.runId) {
+    missingFields.push("channel.run_id");
+  }
+  return missingFields;
+}
+
+function extractAppServerFirestoreSessionDiagnosticDetails(error, fallbackReason) {
+  const details = normalizeObject(error?.diagnosticDetails);
+  return sanitizeDiagnosticDetails({
+    ...details,
+    reason:
+      normalizeText(details.reason) ||
+      normalizeText(fallbackReason) ||
+      "session_bootstrap_failed",
+  });
+}
+
 async function fetchAppServerFirestoreSession({
   publicBaseUrl,
   webChatRunToken,
@@ -6110,26 +6188,49 @@ async function fetchAppServerFirestoreSession({
     },
   );
   if (!response?.ok) {
-    return null;
+    const { parseError, payload } =
+      await readAppServerFirestoreSessionResponsePayload(response || {});
+    throw buildAppServerFirestoreSessionBootstrapError(
+      "AppServer Firestore session request failed.",
+      {
+        reason: "session_bootstrap_http_failed",
+        status: readAppServerFirestoreSessionResponseStatus(response),
+        response_ok: Boolean(response?.ok),
+        response_error: readAppServerFirestoreSessionResponseError(payload),
+        response_parse_error: parseError,
+        payload_ok: payload.ok === true,
+      },
+    );
   }
-  const payload = normalizeObject(await response.json().catch(() => null));
+  const { parseError, payload } =
+    await readAppServerFirestoreSessionResponsePayload(response);
   const firebaseAuth = normalizeObject(payload.firebase_auth || payload.firebaseAuth);
   const firebaseConfig = normalizeFirebasePublicConfig(
     payload.firebase_config || payload.firebaseConfig,
   );
   const channel = normalizeAppServerFirestoreChannel(payload.channel);
-  if (
-    payload.ok !== true ||
-    firebaseAuth.ok !== true ||
-    !normalizeText(firebaseAuth.firebase_custom_token || firebaseAuth.firebaseCustomToken) ||
-    !firebaseConfig.apiKey ||
-    !firebaseConfig.projectId ||
-    !channel.collectionId ||
-    !channel.documentId ||
-    !channel.threadId ||
-    !channel.runId
-  ) {
-    return null;
+  const missingFields = extractAppServerFirestoreSessionMissingFields({
+    channel,
+    firebaseAuth,
+    firebaseConfig,
+    payload,
+  });
+  if (parseError || missingFields.length > 0) {
+    throw buildAppServerFirestoreSessionBootstrapError(
+      "AppServer Firestore session response is invalid.",
+      {
+        reason: parseError
+          ? "session_bootstrap_invalid_json"
+          : "session_bootstrap_invalid_response",
+        status: readAppServerFirestoreSessionResponseStatus(response),
+        response_ok: Boolean(response?.ok),
+        response_error: readAppServerFirestoreSessionResponseError(payload),
+        response_parse_error: parseError,
+        payload_ok: payload.ok === true,
+        firebase_auth_ok: firebaseAuth.ok === true,
+        missing_fields: missingFields,
+      },
+    );
   }
   return {
     channel,
@@ -6661,7 +6762,7 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
     await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
       event: "app_server_firestore_session_unavailable",
       failureClass: "app_server_firestore_session_unavailable",
-      details: { reason },
+      details: extractAppServerFirestoreSessionDiagnosticDetails(error, reason),
     });
     return null;
   }

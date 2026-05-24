@@ -473,6 +473,138 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   assert.equal(bridgeCloseCount, 1);
 });
 
+test("runCodex reports AppServer Firestore session HTTP failure details", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-session-http-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    agentMessage: "session http degraded",
+  });
+
+  const sessionRequests = [];
+  const diagnostics = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "use app server with degraded session",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      fetchImpl: async (url, init = {}) => {
+        sessionRequests.push({
+          url: String(url),
+          body: init.body ? JSON.parse(String(init.body)) : null,
+        });
+        return Response.json(
+          {
+            ok: false,
+            error: "Run is not using Codex AppServer control.",
+          },
+          { status: 409 },
+        );
+      },
+      reportRunnerDiagnostic: async (diagnostic) => {
+        diagnostics.push(diagnostic);
+        return { ok: true };
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "session http degraded");
+  assert.equal(sessionRequests.length, 1);
+  assert.equal(
+    sessionRequests[0]?.url,
+    "https://codeq8.example/api/chat/runs/app-server/firebase-session",
+  );
+  assert.deepEqual(sessionRequests[0]?.body, {
+    workspace_repository: "Codeq8/Codeq8",
+    thread_id: "wct_app",
+    run_id: "wcr_app",
+  });
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]?.event, "app_server_firestore_session_unavailable");
+  assert.equal(diagnostics[0]?.failureClass, "app_server_firestore_session_unavailable");
+  assert.equal(diagnostics[0]?.details?.reason, "session_bootstrap_http_failed");
+  assert.equal(diagnostics[0]?.details?.status, 409);
+  assert.equal(diagnostics[0]?.details?.response_ok, false);
+  assert.equal(
+    diagnostics[0]?.details?.response_error,
+    "Run is not using Codex AppServer control.",
+  );
+  assert.equal(diagnostics[0]?.details?.payload_ok, false);
+});
+
+test("runCodex reports invalid AppServer Firestore session payload fields", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-session-invalid-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    agentMessage: "session payload degraded",
+  });
+
+  const diagnostics = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "use app server with invalid session payload",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      fetchImpl: async () =>
+        Response.json({
+          ok: true,
+          firebase_auth: {
+            ok: true,
+          },
+          firebase_config: {
+            apiKey: "api-key",
+          },
+          channel: {
+            thread_id: "wct_app",
+            run_id: "wcr_app",
+          },
+        }),
+      reportRunnerDiagnostic: async (diagnostic) => {
+        diagnostics.push(diagnostic);
+        return { ok: true };
+      },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "session payload degraded");
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]?.details?.reason, "session_bootstrap_invalid_response");
+  assert.equal(diagnostics[0]?.details?.status, 200);
+  assert.equal(diagnostics[0]?.details?.response_ok, true);
+  assert.equal(diagnostics[0]?.details?.payload_ok, true);
+  assert.equal(diagnostics[0]?.details?.firebase_auth_ok, true);
+  assert.deepEqual(diagnostics[0]?.details?.missing_fields, [
+    "firebase_auth.firebase_custom_token",
+    "firebase_config.projectId",
+    "channel.document_id",
+  ]);
+});
+
 test("runCodex summarizes AppServer chatter and suppresses successful stderr", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-logs-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
