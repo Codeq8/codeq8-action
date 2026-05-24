@@ -57,7 +57,7 @@ const MAX_RUNNER_DIAGNOSTIC_STRING_CHARS = 2000;
 const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 8;
-const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 280;
+const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 12000;
 const APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS = 2500;
 // AppServer live chat transport must not be implemented as recurring runner
 // HTTP calls. The runner gets one Firebase session, then uses Firestore
@@ -471,6 +471,20 @@ function truncate(value, maxChars = 4000) {
     return text;
   }
   return text.slice(0, maxChars);
+}
+
+function truncateWithEllipsis(value, maxChars = 4000) {
+  const text = String(value || "");
+  if (text.length <= maxChars) {
+    return text;
+  }
+  if (maxChars <= 0) {
+    return "";
+  }
+  if (maxChars <= 3) {
+    return ".".repeat(maxChars);
+  }
+  return `${text.slice(0, maxChars - 3)}...`;
 }
 
 function quoteShellArgument(value) {
@@ -5912,7 +5926,7 @@ function summarizeAppServerProgressNotification({
   if (normalizedMethod !== "item/completed" || !isAppServerAgentMessageItem(params)) {
     return null;
   }
-  const itemLabel = truncate(
+  const itemLabel = truncateWithEllipsis(
     label || extractAppServerCompletedAgentText(params),
     APP_SERVER_PROGRESS_MAX_LABEL_CHARS,
   );

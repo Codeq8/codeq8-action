@@ -378,6 +378,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   const argsOutputPath = path.join(workspacePath, "codex-args.json");
+  const longProgressUpdate = `Progress update 4. ${"Detailed active-run status ".repeat(18)}`.trim();
   t.after(async () => {
     await fs.rm(workspacePath, { recursive: true, force: true });
   });
@@ -389,6 +390,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
       "import fs from 'node:fs/promises';",
       "import readline from 'node:readline';",
       `await fs.writeFile(${JSON.stringify(argsOutputPath)}, JSON.stringify(process.argv.slice(2)), "utf8");`,
+      `const longProgressUpdate = ${JSON.stringify(longProgressUpdate)};`,
       "const rl = readline.createInterface({ input: process.stdin });",
       "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
       "rl.on('line', (line) => {",
@@ -399,7 +401,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
       "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
       "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: 'npm test' } } });",
       "    for (let index = 1; index <= 10; index += 1) {",
-      "      const text = `Progress update ${index}.`;",
+      "      const text = index === 4 ? longProgressUpdate : `Progress update ${index}.`;",
       "      send({ method: 'item/started', params: { item: { id: `msg_${index}`, type: 'agent_message' } } });",
       "      send({ method: 'item/agentMessage/delta', params: { item_id: `msg_${index}`, delta: text } });",
       "      send({ method: 'item/completed', params: { item: { id: `msg_${index}`, type: 'agent_message', text } } });",
@@ -458,8 +460,12 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   assert.equal(progressEvents.length, 8);
   assert.deepEqual(
     progressEvents.map((event) => event.label),
-    Array.from({ length: 8 }, (_, index) => `Progress update ${index + 1}.`),
+    Array.from({ length: 8 }, (_, index) =>
+      index === 3 ? longProgressUpdate : `Progress update ${index + 1}.`,
+    ),
   );
+  assert(longProgressUpdate.length > 280);
+  assert.equal(progressEvents[3]?.label, longProgressUpdate);
   assert.equal(
     progressEvents.some((event) => String(event.item_type || "").includes("command")),
     false,
