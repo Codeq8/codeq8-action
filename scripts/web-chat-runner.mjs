@@ -100,6 +100,7 @@ const WEB_CHAT_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const WEB_CHAT_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const AUXILIARY_REPOSITORY_ACCESS_VALUES = new Set(["read", "write"]);
 const CODEX_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const CODEX_SESSION_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/;
 const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
@@ -214,6 +215,22 @@ function normalizeRepository(value) {
     return "";
   }
   return normalized;
+}
+
+function repositoryOwner(repository) {
+  const normalizedRepository = normalizeRepository(repository);
+  return normalizeText(normalizedRepository.split("/", 1)[0]);
+}
+
+function sameRepositoryOwner(left, right) {
+  const leftOwner = repositoryOwner(left).toLowerCase();
+  const rightOwner = repositoryOwner(right).toLowerCase();
+  return Boolean(leftOwner && rightOwner && leftOwner === rightOwner);
+}
+
+function normalizeAuxiliaryRepositoryAccess(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  return AUXILIARY_REPOSITORY_ACCESS_VALUES.has(normalized) ? normalized : "read";
 }
 
 function normalizeObject(value) {
@@ -887,6 +904,51 @@ function parseAttachmentList(value) {
     .filter(Boolean);
 }
 
+function normalizeAuxiliaryRepositoryRecord(value) {
+  const normalized = normalizeObject(value);
+  const repository = normalizeRepository(
+    normalized.repository || normalized.workspace_repository || normalized.workspaceRepository,
+  );
+  if (!repository) {
+    return null;
+  }
+  return {
+    repository,
+    access: normalizeAuxiliaryRepositoryAccess(normalized.access),
+  };
+}
+
+function parseAuxiliaryRepositoryList(value) {
+  const candidates =
+    typeof value === "string"
+      ? (() => {
+          try {
+            const parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : Array.isArray(value)
+        ? value
+        : [];
+  const seen = new Set();
+  const repositories = [];
+  for (const candidate of candidates) {
+    const normalized = normalizeAuxiliaryRepositoryRecord(candidate);
+    if (!normalized) {
+      continue;
+    }
+    const key = normalized.repository.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    repositories.push(normalized);
+  }
+  return repositories;
+}
+
 function normalizePromptAttachmentRecord(value) {
   const normalized = normalizeObject(value);
   const name = normalizeAttachmentName(
@@ -1512,7 +1574,7 @@ async function requestWorkspaceGitToken({
     (normalizedFallbackToken.split(".").length === 3 ? normalizedFallbackToken : "");
   if (!authorizationToken || authorizationToken.split(".").length !== 3) {
     throw new Error(
-      "A scoped CODE_WEB_CHAT_RUN_TOKEN is required to mint a GitHub write token for repository writes.",
+      "A scoped CODE_WEB_CHAT_RUN_TOKEN is required to mint a GitHub repository token.",
     );
   }
   if (!normalizedWorkspaceRepository) {
@@ -1538,10 +1600,18 @@ async function requestWorkspaceGitToken({
 
     const token = normalizeText(response.payload?.token);
     const tokenSource = normalizeText(response.payload?.token_source);
+    const repositoryAccess = normalizeText(
+      response.payload?.repository_access || response.payload?.repositoryAccess,
+    )
+      ? normalizeAuxiliaryRepositoryAccess(
+          response.payload?.repository_access || response.payload?.repositoryAccess,
+        )
+      : "write";
     if (response.ok && response.payload?.ok !== false && token) {
       return {
         token,
         tokenSource,
+        repositoryAccess,
         gitAuthorName: normalizeText(
           response.payload?.git_author_name || response.payload?.gitAuthorName,
         ),
@@ -2049,6 +2119,7 @@ async function applyWorkspaceGitToken({
   });
   commandEnv.CODEX_GITHUB_WRITE_TOKEN = gitToken.token;
   commandEnv.CODEX_GITHUB_WRITE_TOKEN_SOURCE = gitToken.tokenSource;
+  commandEnv.CODEX_GITHUB_WRITE_TOKEN_ACCESS = gitToken.repositoryAccess || "write";
   if (gitToken.gitAuthorName) {
     commandEnv.CODEX_GIT_AUTHOR_NAME = gitToken.gitAuthorName;
   }
@@ -2093,6 +2164,18 @@ function buildWorkspaceGitTokenHelperScript({
     `const workspaceRepository = ${JSON.stringify(normalizedWorkspaceRepository)};`,
     'function normalizeText(value) { return String(value || "").trim(); }',
     "function normalizeObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }",
+    "function normalizeRepository(value) {",
+    "  const normalized = normalizeText(value).replace(/^\\/+/, '').replace(/\\.git$/i, '');",
+    "  return /^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$/.test(normalized) ? normalized : '';",
+    "}",
+    "function repositoryOwner(repository) {",
+    "  return normalizeText(normalizeRepository(repository).split('/', 1)[0]);",
+    "}",
+    "function sameRepositoryOwner(left, right) {",
+    "  const leftOwner = repositoryOwner(left).toLowerCase();",
+    "  const rightOwner = repositoryOwner(right).toLowerCase();",
+    "  return Boolean(leftOwner && rightOwner && leftOwner === rightOwner);",
+    "}",
     "async function readStdin() {",
     "  const chunks = [];",
     "  for await (const chunk of process.stdin) { chunks.push(String(chunk || '')); }",
@@ -2109,18 +2192,30 @@ function buildWorkspaceGitTokenHelperScript({
     "  }",
     "  return result;",
     "}",
-    "async function fetchGitHubWriteToken() {",
+    "function resolveRequestedRepository(request) {",
+    "  const requestedRepository = normalizeRepository(request.path || '');",
+    "  if (!requestedRepository) { return workspaceRepository; }",
+    "  // Defense in depth for aux repo credentials: the backend run token is the",
+    "  // authority, but the public runner should never intentionally ask for a",
+    "  // different owner than the primary workspace repository.",
+    "  if (!sameRepositoryOwner(workspaceRepository, requestedRepository)) {",
+    "    throw new Error(`Refusing to request a cross-owner GitHub token for ${requestedRepository}.`);",
+    "  }",
+    "  return requestedRepository;",
+    "}",
+    "async function fetchGitHubRepositoryToken(repository) {",
     "  const authorizationToken = normalizeText(process.env.CODE_WEB_CHAT_RUN_TOKEN || '');",
     "  if (!authorizationToken) {",
-    "    throw new Error('CODE_WEB_CHAT_RUN_TOKEN is required to mint a GitHub write token.');",
+    "    throw new Error('CODE_WEB_CHAT_RUN_TOKEN is required to mint a GitHub repository token.');",
     "  }",
+    "  const requestedRepository = normalizeRepository(repository) || workspaceRepository;",
     "  const response = await fetch(new URL('/api/github/workspace-git-token', endpointBaseUrl), {",
     "    method: 'POST',",
     "    headers: {",
     "      Authorization: `Bearer ${authorizationToken}`,",
     "      'Content-Type': 'application/json; charset=utf-8',",
     "    },",
-    "    body: JSON.stringify({ workspace_repository: workspaceRepository }),",
+    "    body: JSON.stringify({ workspace_repository: requestedRepository }),",
     "    cache: 'no-store',",
     "  });",
     "  let payload = {};",
@@ -2135,7 +2230,7 @@ function buildWorkspaceGitTokenHelperScript({
     "async function main() {",
     "  const operation = normalizeText(process.argv[2] || '').toLowerCase();",
     "  if (operation === 'print-token') {",
-    "    process.stdout.write(await fetchGitHubWriteToken());",
+    "    process.stdout.write(await fetchGitHubRepositoryToken(workspaceRepository));",
     "    return;",
     "  }",
     "  if (operation !== 'get') {",
@@ -2146,7 +2241,7 @@ function buildWorkspaceGitTokenHelperScript({
     "  if (host && host !== 'github.com') {",
     "    return;",
     "  }",
-    "  const token = await fetchGitHubWriteToken();",
+    "  const token = await fetchGitHubRepositoryToken(resolveRequestedRepository(request));",
     "  process.stdout.write(`username=x-access-token\\npassword=${token}\\n\\n`);",
     "}",
     "main().catch((error) => {",
@@ -2220,6 +2315,99 @@ async function configureWorkspaceGitCredentialHelper({
 
   commandEnv.CODEX_GITHUB_TOKEN_HELPER_PATH = helperPath;
   return helperPath;
+}
+
+function auxiliaryRepositoryCheckoutName(repository) {
+  return normalizeText(repository)
+    .replace(/[^A-Za-z0-9_.-]+/g, "__")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120);
+}
+
+async function prepareAuxiliaryRepositories({
+  auxiliaryRepositories = [],
+  primaryRepository,
+  runtimeHomePath,
+  commandEnv,
+}) {
+  const normalizedPrimaryRepository = normalizeRepository(primaryRepository);
+  const helperPath = normalizeText(commandEnv?.CODEX_GITHUB_TOKEN_HELPER_PATH);
+  const candidates = Array.isArray(auxiliaryRepositories) ? auxiliaryRepositories : [];
+  if (candidates.length === 0) {
+    return [];
+  }
+  if (!normalizedPrimaryRepository || !helperPath) {
+    throw new Error("Auxiliary repository checkout requires a primary repository and git credential helper.");
+  }
+
+  const checkoutRoot = path.join(path.resolve(runtimeHomePath), "aux-repositories");
+  await ensureDirectory(checkoutRoot);
+  const prepared = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const repository = normalizeRepository(candidate?.repository);
+    if (!repository || repository.toLowerCase() === normalizedPrimaryRepository.toLowerCase()) {
+      continue;
+    }
+    const key = repository.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+
+    // SECURITY: aux repos intentionally stay inside the same GitHub owner as
+    // the primary workspace. The backend run token also enforces this, but the
+    // public action keeps the invariant visible at the checkout boundary so a
+    // future runner change cannot casually turn aux repos into cross-org token
+    // requests.
+    if (!sameRepositoryOwner(normalizedPrimaryRepository, repository)) {
+      throw new Error(
+        `Refusing to checkout cross-owner auxiliary repository ${repository}; aux repositories must share ${repositoryOwner(normalizedPrimaryRepository)}.`,
+      );
+    }
+
+    const access = normalizeAuxiliaryRepositoryAccess(candidate?.access);
+    const checkoutPath = path.join(checkoutRoot, auxiliaryRepositoryCheckoutName(repository));
+    await fs.rm(checkoutPath, { recursive: true, force: true });
+    const cloned = await runProcessCapture(
+      "git",
+      [
+        "-c",
+        `credential.helper=${helperPath}`,
+        "-c",
+        "credential.useHttpPath=true",
+        "clone",
+        "--depth=1",
+        `https://github.com/${encodeRepositoryPath(repository)}.git`,
+        checkoutPath,
+      ],
+      {
+        cwd: checkoutRoot,
+        env: commandEnv,
+      },
+    );
+    if (!cloned.ok) {
+      throw new Error(
+        `Unable to checkout auxiliary repository ${repository}: ${normalizeText(cloned.stderr || cloned.stdout) || `git clone exited ${cloned.code}`}`,
+      );
+    }
+    if (access === "read") {
+      await runProcessCapture(
+        "git",
+        ["remote", "set-url", "--push", "origin", "DISABLED_BY_CODEQ8_READ_ONLY_AUX_REPOSITORY"],
+        {
+          cwd: checkoutPath,
+          env: commandEnv,
+        },
+      );
+    }
+    prepared.push({
+      repository,
+      access,
+      local_path: checkoutPath,
+    });
+  }
+  return prepared;
 }
 
 
@@ -5334,6 +5522,7 @@ async function buildCodexPrompt({
   recentChecksPromptText = "",
   codeq8Cli,
   attachments = [],
+  auxiliaryRepositories = [],
   referencedThreads = [],
   serverOwnedCodeq8FilePath = "",
   runnerDiscordDmCommand = "",
@@ -5357,6 +5546,9 @@ async function buildCodexPrompt({
       recent_user_messages_prompt_text: "",
       recent_checks_prompt_text: normalizeText(recentChecksPromptText),
       attachments: Array.isArray(attachments) ? attachments : [],
+      auxiliary_repositories: Array.isArray(auxiliaryRepositories)
+        ? auxiliaryRepositories
+        : [],
       referenced_threads: Array.isArray(referencedThreads) ? referencedThreads : [],
       codeq8_cli_available: Boolean(codeq8Cli?.available),
       target_shift: false,
@@ -5393,6 +5585,7 @@ async function buildResumePrompt({
   recentChecksPromptText = "",
   codeq8Cli,
   attachments = [],
+  auxiliaryRepositories = [],
   referencedThreads = [],
   targetShift = null,
   serverOwnedCodeq8FilePath = "",
@@ -5417,6 +5610,9 @@ async function buildResumePrompt({
       recent_user_messages_prompt_text: normalizeText(recentUserMessagesPromptText),
       recent_checks_prompt_text: normalizeText(recentChecksPromptText),
       attachments: Array.isArray(attachments) ? attachments : [],
+      auxiliary_repositories: Array.isArray(auxiliaryRepositories)
+        ? auxiliaryRepositories
+        : [],
       referenced_threads: Array.isArray(referencedThreads) ? referencedThreads : [],
       codeq8_cli_available: Boolean(codeq8Cli?.available),
       target_shift: Boolean(targetShift),
@@ -8179,6 +8375,9 @@ async function main() {
   const latestMessageAttachments = parseAttachmentList(
     process.env.CODE_CHAT_ATTACHMENTS_JSON || "[]",
   );
+  const auxiliaryRepositories = parseAuxiliaryRepositoryList(
+    process.env.CODE_CHAT_AUXILIARY_REPOSITORIES_JSON || "[]",
+  );
   const fallbackPullRequestHeadRepository = normalizeText(
     process.env.CODE_CHAT_PULL_REQUEST_HEAD_REPOSITORY,
   );
@@ -8389,7 +8588,7 @@ async function main() {
         normalizeText(requestedWorkspaceGitToken.tokenSource) || "github_app_installation";
       log(
         "Prepared GitHub write credential for web chat run",
-        `repository=${activeWorkspaceRepository} source=${workspaceGitTokenSource}`,
+        `repository=${activeWorkspaceRepository} source=${workspaceGitTokenSource} access=${requestedWorkspaceGitToken.repositoryAccess || "write"}`,
       );
 
       preparedWorkspace = await prepareWorkspace({
@@ -8433,6 +8632,18 @@ async function main() {
         publicBaseUrl,
         runtimeHomePath: attemptRunRuntime.homePath,
       });
+      const preparedAuxiliaryRepositories = await prepareAuxiliaryRepositories({
+        auxiliaryRepositories,
+        primaryRepository: activeWorkspaceRepository,
+        runtimeHomePath: attemptRunRuntime.homePath,
+        commandEnv: codexCommandEnv,
+      });
+      if (preparedAuxiliaryRepositories.length > 0) {
+        log(
+          "Prepared auxiliary repositories",
+          `count=${preparedAuxiliaryRepositories.length}`,
+        );
+      }
       preparedRunnerDiscordDmCli = serverOwnedDiscordDmChatEnabled
         ? await prepareRunnerDiscordDmCli({
             commandEnv: codexCommandEnv,
@@ -8658,6 +8869,7 @@ async function main() {
               recentChecksPromptText,
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
+              auxiliaryRepositories: preparedAuxiliaryRepositories,
               referencedThreads,
               targetShift: resumeTargetShift ? targetBeforeAttempt : null,
               serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
@@ -8681,6 +8893,7 @@ async function main() {
               recentChecksPromptText,
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
+              auxiliaryRepositories: preparedAuxiliaryRepositories,
               referencedThreads,
               serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
               runnerDiscordDmCommand: preparedRunnerDiscordDmCli.commandName,
@@ -8730,6 +8943,7 @@ async function main() {
             prompt_chars: prompt.length,
             marker_hash: hashDiagnosticValue(currentRunMarker),
             attachments_count: materializedAttachments.length,
+            auxiliary_repositories_count: preparedAuxiliaryRepositories.length,
             referenced_threads_count: referencedThreads.length,
             target_shift: resumeTargetShift,
             thread_target_restart_count: threadTargetRestartCount,
@@ -9530,6 +9744,7 @@ export {
   persistWorkspaceProgress,
   postRunCallback,
   prepareCodeq8Cli,
+  prepareAuxiliaryRepositories,
   prepareRunnerDiscordDmCli,
   prepareGitHubCliAuth,
   pushRememberedThreadBranch,

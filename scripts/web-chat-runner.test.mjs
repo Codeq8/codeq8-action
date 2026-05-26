@@ -34,6 +34,7 @@ import {
   postWebChatRunnerDiagnostic,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
+  prepareAuxiliaryRepositories,
   prepareGitHubCliAuth,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
@@ -1332,6 +1333,7 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "codex_app_server_turn_control",
         "codex_app_server_attachment_turn_control",
         "runner_codeq8_cli",
+        "runner_auxiliary_repositories",
       ],
       authorized_paths: [
         "/api/github/workspace-git-token",
@@ -1927,6 +1929,13 @@ test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
       recentChecksPromptText: "Checks: green",
       codeq8Cli: { available: true },
       attachments: [{ attachment_id: "att_123", name: "log.txt", local_path: "/tmp/log.txt" }],
+      auxiliaryRepositories: [
+        {
+          repository: "Codeq8/codeq8-action",
+          access: "write",
+          local_path: "/tmp/aux/Codeq8__codeq8-action",
+        },
+      ],
       referencedThreads: [{ thread_id: "wct_other" }],
     });
 
@@ -1941,6 +1950,13 @@ test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
     assert.equal(calls[0]?.body?.run_id, "wcr_123");
     assert.equal(calls[0]?.body?.message_id, "wcm_123");
     assert.equal(calls[0]?.body?.codeq8_cli_available, true);
+    assert.deepEqual(calls[0]?.body?.auxiliary_repositories, [
+      {
+        repository: "Codeq8/codeq8-action",
+        access: "write",
+        local_path: "/tmp/aux/Codeq8__codeq8-action",
+      },
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2950,8 +2966,33 @@ test("configureWorkspaceGitCredentialHelper clears inherited helpers before addi
 
     const helperScript = await fs.readFile(helperPath, "utf8");
     assert.match(helperScript, /workspace-git-token/);
+    assert.match(helperScript, /resolveRequestedRepository/);
+    assert.match(helperScript, /request\.path/);
+    assert.match(helperScript, /workspace_repository: requestedRepository/);
+    assert.match(helperScript, /Refusing to request a cross-owner GitHub token/);
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("prepareAuxiliaryRepositories rejects cross-owner repositories before checkout", async () => {
+  const runtimeHomePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-aux-"));
+
+  try {
+    await assert.rejects(
+      prepareAuxiliaryRepositories({
+        auxiliaryRepositories: [{ repository: "OtherOrg/private-repo", access: "read" }],
+        primaryRepository: "Codeq8/Codeq8",
+        runtimeHomePath,
+        commandEnv: {
+          ...process.env,
+          CODEX_GITHUB_TOKEN_HELPER_PATH: path.join(runtimeHomePath, "helper.mjs"),
+        },
+      }),
+      /Refusing to checkout cross-owner auxiliary repository OtherOrg\/private-repo/,
+    );
+  } finally {
+    await fs.rm(runtimeHomePath, { recursive: true, force: true });
   }
 });
 

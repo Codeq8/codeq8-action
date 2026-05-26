@@ -6,7 +6,8 @@
     "recoverable_codex_session_errors",
     "codex_app_server_turn_control",
     "codex_app_server_attachment_turn_control",
-    "runner_codeq8_cli"
+    "runner_codeq8_cli",
+    "runner_auxiliary_repositories"
   ],
   "required_paths": [
     "/api/github/workspace-git-token",
