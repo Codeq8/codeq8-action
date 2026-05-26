@@ -35,6 +35,7 @@ import {
   WEB_CHAT_RUNNER_DIAGNOSTIC_PATH,
   supportsServerOwnedCodeq8FileSync,
   supportsServerOwnedDiscordDmChat,
+  supportsAuxiliaryRepositories,
   webChatRunnerCodeq8FileResponseSchema,
   webChatRunnerCodeq8FileSaveResponseSchema,
   webChatRunnerDiagnosticResponseSchema,
@@ -8481,6 +8482,7 @@ async function main() {
   );
   const serverOwnedCodeq8FileSyncEnabled = supportsServerOwnedCodeq8FileSync(runtimeManifest);
   const serverOwnedDiscordDmChatEnabled = supportsServerOwnedDiscordDmChat(runtimeManifest);
+  const auxiliaryRepositoriesEnabled = supportsAuxiliaryRepositories(runtimeManifest);
   log(
     "Resolved runner-owned codeq8.md workspace sync capability",
     serverOwnedCodeq8FileSyncEnabled ? "enabled" : "disabled",
@@ -8488,6 +8490,10 @@ async function main() {
   log(
     "Resolved runner-owned Discord DM capability",
     serverOwnedDiscordDmChatEnabled ? "enabled" : "disabled",
+  );
+  log(
+    "Resolved auxiliary repository checkout capability",
+    auxiliaryRepositoriesEnabled ? "enabled" : "disabled",
   );
 
   const codexPath = await resolveCodexPath(commandEnv);
@@ -8632,12 +8638,19 @@ async function main() {
         publicBaseUrl,
         runtimeHomePath: attemptRunRuntime.homePath,
       });
-      const preparedAuxiliaryRepositories = await prepareAuxiliaryRepositories({
-        auxiliaryRepositories,
-        primaryRepository: activeWorkspaceRepository,
-        runtimeHomePath: attemptRunRuntime.homePath,
-        commandEnv: codexCommandEnv,
-      });
+      if (auxiliaryRepositories.length > 0 && !auxiliaryRepositoriesEnabled) {
+        throw new Error(
+          "Auxiliary repositories were requested, but the Codeq8 runner runtime manifest does not advertise runner_auxiliary_repositories.",
+        );
+      }
+      const preparedAuxiliaryRepositories = auxiliaryRepositoriesEnabled
+        ? await prepareAuxiliaryRepositories({
+            auxiliaryRepositories,
+            primaryRepository: activeWorkspaceRepository,
+            runtimeHomePath: attemptRunRuntime.homePath,
+            commandEnv: codexCommandEnv,
+          })
+        : [];
       if (preparedAuxiliaryRepositories.length > 0) {
         log(
           "Prepared auxiliary repositories",

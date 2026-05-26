@@ -6,7 +6,9 @@
     "recoverable_codex_session_errors",
     "codex_app_server_turn_control",
     "codex_app_server_attachment_turn_control",
-    "runner_codeq8_cli",
+    "runner_codeq8_cli"
+  ],
+  "optional_capabilities": [
     "runner_auxiliary_repositories"
   ],
   "required_paths": [

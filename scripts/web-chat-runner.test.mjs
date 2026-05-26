@@ -7,6 +7,13 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+  REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+} from "../lib/web-chat-runner-runtime-manifest.mjs";
+import {
+  supportsAuxiliaryRepositories,
+} from "../lib/web-chat-runner-runtime-contract.mjs";
+import {
   assertWebChatRunnerRuntimeCompatibility,
   applyCodexNodeOptions,
   appendWebChatRunMarkerToPrompt,
@@ -54,6 +61,43 @@ import {
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
+
+test("auxiliary repositories are negotiated instead of startup-required", () => {
+  assert.equal(
+    REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES.includes(
+      "runner_auxiliary_repositories",
+    ),
+    false,
+  );
+  assert.equal(
+    OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES.includes(
+      "runner_auxiliary_repositories",
+    ),
+    true,
+  );
+  assert.equal(
+    supportsAuxiliaryRepositories({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      capabilities: [],
+      authorized_paths: [],
+      scoped_authorized_paths: [],
+      runner_required_paths: [],
+    }),
+    false,
+  );
+  assert.equal(
+    supportsAuxiliaryRepositories({
+      ok: true,
+      contract_version: CONTRACT_VERSION,
+      capabilities: ["runner_auxiliary_repositories"],
+      authorized_paths: [],
+      scoped_authorized_paths: [],
+      runner_required_paths: [],
+    }),
+    true,
+  );
+});
 
 test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
   assert.equal(DEFAULT_TIMEOUT_SECONDS, 72 * 60 * 60);
