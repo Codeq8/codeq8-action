@@ -8,7 +8,9 @@ import test from "node:test";
 
 import {
   OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+  OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_PATHS,
   REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+  REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
 } from "../lib/web-chat-runner-runtime-manifest.mjs";
 import {
   supportsAuxiliaryRepositories,
@@ -61,20 +63,45 @@ import {
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
+const STARTUP_REQUIRED_RUNTIME_CAPABILITIES = Object.freeze([
+  "server_owned_prompt",
+  "staged_codex_session_upload",
+  "recoverable_codex_session_errors",
+  "codex_app_server_turn_control",
+  "codex_app_server_attachment_turn_control",
+  "runner_codeq8_cli",
+]);
+const STARTUP_REQUIRED_RUNTIME_PATHS = Object.freeze([
+  "/api/github/workspace-git-token",
+  "/api/chat/runs/callback",
+  "/api/chat/runs/diagnostic",
+  "/api/chat/runs/app-server/firebase-session",
+  "/api/chat/runs/runtime-manifest",
+  "/api/chat/runs/prompt",
+  "/web-chat/attachments/get",
+  "/web-chat/attachments/read-url",
+  "/web-chat/codex-session/get",
+  "/web-chat/codex-session/upload-prepare",
+  "/web-chat/codex-session/upload-direct",
+  "/web-chat/codex-session/upload-discard",
+  "/web-chat/codex-session/upsert",
+  "/web-chat/codex-session/invalidate",
+  "/web-chat/threads/get",
+]);
 
 test("auxiliary repositories are negotiated instead of startup-required", () => {
-  assert.equal(
-    REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES.includes(
-      "runner_auxiliary_repositories",
-    ),
-    false,
+  assert.deepEqual(
+    REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
+    STARTUP_REQUIRED_RUNTIME_CAPABILITIES,
   );
-  assert.equal(
-    OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES.includes(
-      "runner_auxiliary_repositories",
-    ),
-    true,
+  assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES, [
+    "runner_auxiliary_repositories",
+  ]);
+  assert.deepEqual(
+    REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
+    STARTUP_REQUIRED_RUNTIME_PATHS,
   );
+  assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_PATHS, []);
   assert.equal(
     supportsAuxiliaryRepositories({
       ok: true,
