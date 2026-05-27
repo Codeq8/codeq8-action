@@ -717,13 +717,26 @@ function isSupersededWebChatRunError(value) {
   );
 }
 
-function isRecoverableCodexSessionErrorState(value) {
+function isTerminalWebChatRunPromptRefusal(value) {
   const normalized = normalizeCodexSessionErrorStateMessage(value);
   if (!normalized) {
     return false;
   }
   return (
     isSupersededWebChatRunError(normalized) ||
+    /run\s+wcr_[A-Za-z0-9._:@-]+\s+is already (?:completed|failed|cancell?ed)/i.test(
+      normalized,
+    )
+  );
+}
+
+function isRecoverableCodexSessionErrorState(value) {
+  const normalized = normalizeCodexSessionErrorStateMessage(value);
+  if (!normalized) {
+    return false;
+  }
+  return (
+    isTerminalWebChatRunPromptRefusal(normalized) ||
     /authorization token path mismatch/i.test(normalized) ||
     /failed to update web chat codex session state/i.test(normalized) ||
     /web chat codex session revision conflict/i.test(normalized) ||
@@ -8914,9 +8927,9 @@ async function main() {
           }
         } catch (sessionError) {
           const sessionMessage = extractErrorMessage(sessionError);
-          if (isSupersededWebChatRunError(sessionMessage)) {
+          if (isTerminalWebChatRunPromptRefusal(sessionMessage)) {
             log(
-              "Web chat run was superseded before Codex prompt construction; exiting without recording a session error",
+              "Web chat run was terminal before Codex prompt construction; exiting without recording a session error",
               `thread_id=${threadId} run_id=${runId}`,
             );
             return;
@@ -9749,6 +9762,7 @@ export {
   isRecoverableCodexResumeFailure,
   isRecoverableCodexSessionErrorState,
   isSupersededWebChatRunError,
+  isTerminalWebChatRunPromptRefusal,
   shouldContinueAfterCodexSessionPersistenceFailure,
   parseCodexSessionBundleContents,
   isRetryableCodexSessionPersistenceError,

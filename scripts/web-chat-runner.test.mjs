@@ -38,6 +38,7 @@ import {
   isRecoverableCodexTransportFailure,
   isRecoverableCodexSessionErrorState,
   isSupersededWebChatRunError,
+  isTerminalWebChatRunPromptRefusal,
   materializeWebChatAttachments,
   normalizeAttachmentRecord,
   postWebChatRunnerDiagnostic,
@@ -3368,6 +3369,22 @@ test("superseded web chat runs do not poison Codex session state", () => {
 
   assert.equal(isSupersededWebChatRunError(cancelledWakeupMessage), true);
   assert.equal(isRecoverableCodexSessionErrorState(cancelledWakeupMessage), true);
+});
+
+test("terminal web chat run prompt refusals do not poison Codex session state", () => {
+  const failedMessage =
+    "Codex session state is in error status: Run wcr_407c1fa7-208b-4e5e-8882-0b1d4cf66566 is already failed.";
+  const completedMessage =
+    "Codex session state is in error status: Run wcr_407c1fa7-208b-4e5e-8882-0b1d4cf66566 is already completed.";
+  const cancelledMessage =
+    "Codex session state is in error status: Run wcr_407c1fa7-208b-4e5e-8882-0b1d4cf66566 is already cancelled.";
+
+  assert.equal(isTerminalWebChatRunPromptRefusal(failedMessage), true);
+  assert.equal(isTerminalWebChatRunPromptRefusal(completedMessage), true);
+  assert.equal(isTerminalWebChatRunPromptRefusal(cancelledMessage), true);
+  assert.equal(isRecoverableCodexSessionErrorState(failedMessage), true);
+  assert.equal(isRecoverableCodexSessionErrorState(completedMessage), true);
+  assert.equal(isRecoverableCodexSessionErrorState(cancelledMessage), true);
 });
 
 test("recoverable Codex session persistence failures do not fail completed runs", () => {
