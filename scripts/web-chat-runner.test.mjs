@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import fs from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1931,6 +1932,30 @@ function git(workspacePath, args) {
   execFileSync("git", args, { cwd: workspacePath, env: process.env });
 }
 
+function runCredentialHelperGet({ helperPath, input, env }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [helperPath, "get"], {
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      resolve({ code, stdout, stderr });
+    });
+    child.stdin.end(input);
+  });
+}
+
 function readAheadCount(workspacePath, branch) {
   const output = execFileSync(
     "git",
@@ -3042,6 +3067,75 @@ test("configureWorkspaceGitCredentialHelper clears inherited helpers before addi
     assert.match(helperScript, /request\.path/);
     assert.match(helperScript, /workspace_repository: requestedRepository/);
     assert.match(helperScript, /Refusing to request a cross-owner GitHub token/);
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("workspace git credential helper preserves aux repository identity with trailing git path slash", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-credential-helper-"));
+  const requests = [];
+  const server = createServer((request, response) => {
+    let rawBody = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      rawBody += chunk;
+    });
+    request.on("end", () => {
+      requests.push({
+        url: request.url,
+        authorization: request.headers.authorization,
+        body: JSON.parse(rawBody || "{}"),
+      });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true, token: "ghs_aux_token" }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  t.after(() => {
+    server.close();
+  });
+
+  try {
+    git(workspacePath, ["init"]);
+    const address = server.address();
+    assert.equal(typeof address, "object");
+    assert.ok(address);
+    const helperPath = await configureWorkspaceGitCredentialHelper({
+      workspacePath,
+      commandEnv: process.env,
+      publicBaseUrl: `http://127.0.0.1:${address.port}`,
+      workspaceRepository: "miniExtensions/monorepo",
+    });
+
+    const result = await runCredentialHelperGet({
+      helperPath,
+      input: [
+        "protocol=https",
+        "host=github.com",
+        "path=miniExtensions/webapp.git/",
+        "",
+      ].join("\n"),
+      env: {
+        ...process.env,
+        CODE_WEB_CHAT_RUN_TOKEN: "scoped-run-token",
+      },
+    });
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /username=x-access-token/);
+    assert.match(result.stdout, /password=ghs_aux_token/);
+    assert.equal(requests[0]?.url, "/api/github/workspace-git-token");
+    assert.equal(requests[0]?.authorization, "Bearer scoped-run-token");
+    assert.deepEqual(requests[0]?.body, {
+      workspace_repository: "miniExtensions/webapp",
+    });
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
