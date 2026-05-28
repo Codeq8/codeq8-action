@@ -34,6 +34,7 @@ import {
   WEB_CHAT_RUNNER_CODEQ8_FILE_SAVE_PATH,
   WEB_CHAT_RUNNER_DIAGNOSTIC_PATH,
   supportsServerOwnedCodeq8FileSync,
+  supportsCodexThreadGoals,
   supportsServerOwnedDiscordDmChat,
   webChatRunnerCodeq8FileResponseSchema,
   webChatRunnerCodeq8FileSaveResponseSchema,
@@ -66,6 +67,8 @@ const APP_SERVER_FIRESTORE_SESSION_PATH =
   "/api/chat/runs/app-server/firebase-session";
 const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
   "codex_app_server_attachment_turn_control";
+const CODEX_GOAL_UPDATE_PATH = "/api/chat/runs/goal";
+const CODEX_GOAL_OBJECTIVE_MAX_CHARS = 4000;
 const APP_SERVER_CONTROL_CAPABILITIES = Object.freeze([
   APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY,
 ]);
@@ -82,6 +85,7 @@ const APP_SERVER_NOTIFICATION_SUMMARY_LABELS = new Map([
   ["mcpServer/startupStatus/updated", "mcp_startup_updates"],
   ["remoteControl/status/changed", "remote_control_status_updates"],
   ["thread/goal/cleared", "thread_goal_clears"],
+  ["thread/goal/updated", "thread_goal_updates"],
   ["thread/status/changed", "thread_status_updates"],
   ["thread/tokenUsage/updated", "token_usage_updates"],
   ["turn/completed", "turn_completed"],
@@ -1066,6 +1070,99 @@ function normalizeCodexSessionState(value) {
   };
 }
 
+const CODEX_GOAL_STATUS_VALUES = new Set([
+  "active",
+  "paused",
+  "blocked",
+  "usageLimited",
+  "budgetLimited",
+  "complete",
+]);
+
+function normalizeCodexGoalStatus(value) {
+  const normalized = normalizeText(value);
+  return CODEX_GOAL_STATUS_VALUES.has(normalized) ? normalized : "";
+}
+
+function normalizeCodexGoalState(value) {
+  const normalized = normalizeObject(value);
+  const objective = truncate(
+    normalizeText(normalized.objective || normalized.goal || normalized.goalObjective),
+    CODEX_GOAL_OBJECTIVE_MAX_CHARS,
+  );
+  const status =
+    normalizeCodexGoalStatus(normalized.status || normalized.goalStatus) ||
+    (objective ? "active" : "");
+  const tokenBudgetCandidate =
+    normalized.token_budget ?? normalized.tokenBudget ?? null;
+  const tokenBudget =
+    tokenBudgetCandidate === null || tokenBudgetCandidate === ""
+      ? null
+      : parsePositiveInteger(tokenBudgetCandidate, 0) || null;
+  return {
+    objective,
+    status,
+    token_budget: tokenBudget,
+    tokens_used: parsePositiveInteger(
+      normalized.tokens_used ?? normalized.tokensUsed ?? 0,
+      0,
+    ),
+    time_used_seconds: parsePositiveInteger(
+      normalized.time_used_seconds ?? normalized.timeUsedSeconds ?? 0,
+      0,
+    ),
+    created_at: parsePositiveInteger(
+      normalized.created_at ?? normalized.createdAt ?? 0,
+      0,
+    ),
+    updated_at: parsePositiveInteger(
+      normalized.updated_at ?? normalized.updatedAt ?? 0,
+      0,
+    ),
+    last_run_id: truncate(normalizeText(normalized.last_run_id || normalized.lastRunId), 255),
+    last_turn_id: truncate(normalizeText(normalized.last_turn_id || normalized.lastTurnId), 255),
+  };
+}
+
+function hasCodexGoalObjective(goalState) {
+  return Boolean(normalizeCodexGoalState(goalState).objective);
+}
+
+function normalizeCodexGoalNotification(params) {
+  const normalized = normalizeObject(params);
+  const rawGoal = normalizeObject(normalized.goal || normalized.threadGoal || params);
+  const goal = normalizeCodexGoalState({
+    ...rawGoal,
+    last_turn_id: normalizeText(
+      normalized.turnId || normalized.turn_id || rawGoal.last_turn_id || rawGoal.lastTurnId,
+    ),
+  });
+  return {
+    threadId: normalizeCodexSessionId(
+      normalized.threadId || normalized.thread_id || rawGoal.threadId || rawGoal.thread_id,
+    ),
+    goal,
+  };
+}
+
+function buildCodexGoalSetParams({
+  appServerThreadId,
+  goalState,
+}) {
+  const goal = normalizeCodexGoalState(goalState);
+  const params = {
+    threadId: normalizeCodexSessionId(appServerThreadId),
+    objective: goal.objective,
+  };
+  if (goal.status) {
+    params.status = goal.status;
+  }
+  if (goal.token_budget !== null) {
+    params.tokenBudget = goal.token_budget;
+  }
+  return params;
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -1642,6 +1739,147 @@ async function requestWebChatRunnerRuntimeJson({
     throw new Error(`${normalizeText(responseLabel) || "Codeq8 runner runtime response"} is invalid.`);
   }
   return parsed.data;
+}
+
+async function postCodexGoalUpdate({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  event,
+  goalState = null,
+}) {
+  return requestWebChatRunnerRuntimeJson({
+    publicBaseUrl,
+    webChatRunToken,
+    path: CODEX_GOAL_UPDATE_PATH,
+    body: {
+      workspace_repository: normalizeRepository(workspaceRepository),
+      thread_id: normalizeText(threadId),
+      run_id: normalizeText(runId),
+      event,
+      ...(goalState ? { goal: normalizeCodexGoalState(goalState) } : {}),
+    },
+    responseLabel: "Codeq8 runner Codex goal response",
+  });
+}
+
+function createCodexGoalReporter({
+  enabled = false,
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  reportRunnerDiagnostic = null,
+}) {
+  if (!enabled) {
+    return {
+      recordUpdated: () => {},
+      recordCleared: () => {},
+      flush: async () => {},
+      latestGoalState: () => normalizeCodexGoalState(null),
+    };
+  }
+
+  let latestGoalState = normalizeCodexGoalState(null);
+  let lastSignature = "";
+  let inFlight = null;
+  let queued = null;
+
+  const eventSignature = (event) => JSON.stringify({
+    event: normalizeText(event?.event),
+    goal: normalizeText(event?.event) === "cleared"
+      ? null
+      : normalizeCodexGoalState(event?.goalState),
+  });
+
+  const persist = async (event) => {
+    const signature = eventSignature(event);
+    if (!signature || signature === lastSignature) {
+      return;
+    }
+    lastSignature = signature;
+    try {
+      await postCodexGoalUpdate({
+        publicBaseUrl,
+        webChatRunToken,
+        workspaceRepository,
+        threadId,
+        runId,
+        event: event.event,
+        goalState: event.goalState,
+      });
+      const goalState = normalizeCodexGoalState(event.goalState);
+      await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+        event: "runner_codex_goal_synced",
+        failureClass: "runner_codex_goal_synced",
+        details: {
+          goal_event: event.event,
+          has_objective: Boolean(goalState.objective),
+          status: goalState.status,
+        },
+      });
+    } catch (error) {
+      await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+        event: "runner_codex_goal_sync_failed",
+        failureClass: "runner_codex_goal_sync_failed",
+        severity: "warning",
+        ok: false,
+        details: {
+          goal_event: event.event,
+          error: extractErrorMessage(error),
+        },
+      });
+      log(
+        "WARN",
+        `Unable to persist Codex goal state: ${extractErrorMessage(error)}`,
+      );
+    }
+  };
+
+  const drain = async () => {
+    while (queued) {
+      const next = queued;
+      queued = null;
+      await persist(next);
+    }
+  };
+
+  const enqueue = (event) => {
+    queued = event;
+    latestGoalState = event.event === "updated"
+      ? normalizeCodexGoalState(event.goalState)
+      : normalizeCodexGoalState(null);
+    if (!inFlight) {
+      inFlight = drain().finally(() => {
+        inFlight = null;
+      });
+    }
+  };
+
+  return {
+    recordUpdated(goalState) {
+      enqueue({ event: "updated", goalState });
+    },
+    recordCleared() {
+      enqueue({ event: "cleared", goalState: null });
+    },
+    async flush() {
+      while (inFlight || queued) {
+        if (!inFlight) {
+          inFlight = drain().finally(() => {
+            inFlight = null;
+          });
+        }
+        await inFlight;
+      }
+    },
+    latestGoalState() {
+      return latestGoalState;
+    },
+  };
 }
 
 function buildWebChatRunnerDiagnosticRequest({
@@ -5359,7 +5597,7 @@ function applyRunnerDiscordDmGuidance({
   ].join("\n");
 }
 
-async function buildCodexPrompt({
+async function buildCodexPromptPayload({
   publicBaseUrl,
   webChatRunToken,
   repository,
@@ -5409,16 +5647,23 @@ async function buildCodexPrompt({
   if (!prompt) {
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
-  return applyRunnerDiscordDmGuidance({
-    prompt: applyServerOwnedCodeq8FileGuidance({
-      prompt,
-      promptFilePath: serverOwnedCodeq8FilePath,
+  return {
+    prompt: applyRunnerDiscordDmGuidance({
+      prompt: applyServerOwnedCodeq8FileGuidance({
+        prompt,
+        promptFilePath: serverOwnedCodeq8FilePath,
+      }),
+      commandName: runnerDiscordDmCommand,
     }),
-    commandName: runnerDiscordDmCommand,
-  });
+    codexGoalState: normalizeCodexGoalState(payload.codex_goal_state),
+  };
 }
 
-async function buildResumePrompt({
+async function buildCodexPrompt(args) {
+  return (await buildCodexPromptPayload(args)).prompt;
+}
+
+async function buildResumePromptPayload({
   publicBaseUrl,
   webChatRunToken,
   repository = "",
@@ -5469,13 +5714,20 @@ async function buildResumePrompt({
   if (!prompt) {
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
-  return applyRunnerDiscordDmGuidance({
-    prompt: applyServerOwnedCodeq8FileGuidance({
-      prompt,
-      promptFilePath: serverOwnedCodeq8FilePath,
+  return {
+    prompt: applyRunnerDiscordDmGuidance({
+      prompt: applyServerOwnedCodeq8FileGuidance({
+        prompt,
+        promptFilePath: serverOwnedCodeq8FilePath,
+      }),
+      commandName: runnerDiscordDmCommand,
     }),
-    commandName: runnerDiscordDmCommand,
-  });
+    codexGoalState: normalizeCodexGoalState(payload.codex_goal_state),
+  };
+}
+
+async function buildResumePrompt(args) {
+  return (await buildResumePromptPayload(args)).prompt;
 }
 
 async function resolveCodexPath(commandEnv) {
@@ -6899,11 +7151,15 @@ async function runCodexAppServer({
   mode = "fresh",
   sessionId = "",
   appServerContext = null,
+  codexGoalState = null,
+  codexThreadGoalsEnabled = false,
 }) {
   const normalizedModel = normalizeText(model) || DEFAULT_CODEX_MODEL;
   const normalizedTask = normalizeText(task);
   const normalizedMode = normalizeText(mode).toLowerCase() === "resume" ? "resume" : "fresh";
   const normalizedSessionId = normalizeCodexSessionId(sessionId);
+  const normalizedCodexGoalState = normalizeCodexGoalState(codexGoalState);
+  const goalsEnabled = Boolean(codexThreadGoalsEnabled);
   if (!normalizedTask) {
     return {
       ok: false,
@@ -6948,6 +7204,15 @@ async function runCodexAppServer({
     const pendingRequests = new Map();
     const progressReporter =
       firestoreBridge?.progressReporter || createNoopAppServerProgressReporter();
+    const goalReporter = createCodexGoalReporter({
+      enabled: goalsEnabled,
+      publicBaseUrl: appServerContext?.publicBaseUrl,
+      webChatRunToken: appServerContext?.webChatRunToken,
+      workspaceRepository: appServerContext?.workspaceRepository,
+      threadId: appServerContext?.threadId,
+      runId: appServerContext?.runId,
+      reportRunnerDiagnostic: appServerContext?.reportRunnerDiagnostic,
+    });
     let controlListener = null;
 
     const child = spawn(codexPath, ["app-server", "--listen", "stdio://"], {
@@ -7029,6 +7294,7 @@ async function runCodexAppServer({
       clearTimeout(timeoutHandle);
       await controlListener?.stop?.();
       await progressReporter.flush();
+      await goalReporter.flush();
       if (firestoreBridge?.close) {
         try {
           const cleanupStatus = await waitWithUnrefTimeout(
@@ -7070,6 +7336,9 @@ async function runCodexAppServer({
       resolve({
         ...result,
         sessionId: normalizeCodexSessionId(result.sessionId || appServerThreadId),
+        codexGoalState: normalizeCodexGoalState(
+          result.codexGoalState || goalReporter.latestGoalState(),
+        ),
         durationMs: Date.now() - startMs,
       });
     };
@@ -7115,6 +7384,95 @@ async function runCodexAppServer({
       child.stdin?.write(`${JSON.stringify({ method, id, params })}\n`);
     });
 
+    const maybeReportGoalSyncFailure = async ({
+      event,
+      error,
+      ok = false,
+      severity = "warning",
+    }) => {
+      await maybeReportRunnerDiagnostic(appServerContext?.reportRunnerDiagnostic, {
+        event,
+        failureClass: event,
+        severity,
+        ok,
+        details: {
+          error: extractErrorMessage(error),
+          has_initial_goal: hasCodexGoalObjective(normalizedCodexGoalState),
+        },
+      });
+    };
+
+    const synchronizeInitialCodexGoal = async () => {
+      if (!goalsEnabled || !appServerThreadId) {
+        return;
+      }
+      try {
+        if (hasCodexGoalObjective(normalizedCodexGoalState)) {
+          await sendRequest(
+            "thread/goal/set",
+            buildCodexGoalSetParams({
+              appServerThreadId,
+              goalState: normalizedCodexGoalState,
+            }),
+          );
+          log("Synchronized Codeq8 Codex goal into AppServer", "action=set");
+          return;
+        }
+        await sendRequest("thread/goal/clear", {
+          threadId: appServerThreadId,
+        });
+        log("Synchronized Codeq8 Codex goal into AppServer", "action=clear");
+      } catch (error) {
+        await maybeReportGoalSyncFailure({
+          event: "runner_codex_goal_initial_sync_failed",
+          error,
+        });
+        if (hasCodexGoalObjective(normalizedCodexGoalState)) {
+          throw error;
+        }
+      }
+    };
+
+    const captureFinalCodexGoalState = async () => {
+      if (!goalsEnabled || !appServerThreadId) {
+        return null;
+      }
+      try {
+        const result = normalizeObject(await sendRequest("thread/goal/get", {
+          threadId: appServerThreadId,
+        }));
+        const goalRecord = normalizeObject(result.goal || result.threadGoal);
+        if (Object.keys(goalRecord).length > 0) {
+          const goalState = normalizeCodexGoalState(goalRecord);
+          if (goalState.objective) {
+            goalReporter.recordUpdated(goalState);
+            return goalState;
+          }
+        }
+        if (
+          hasCodexGoalObjective(normalizedCodexGoalState) ||
+          hasCodexGoalObjective(goalReporter.latestGoalState())
+        ) {
+          goalReporter.recordCleared();
+        }
+        return normalizeCodexGoalState(null);
+      } catch (error) {
+        await maybeReportGoalSyncFailure({
+          event: "runner_codex_goal_final_read_failed",
+          error,
+        });
+        return null;
+      }
+    };
+
+    const finishAfterTurnCompleted = async (result) => {
+      const codexGoalState = await captureFinalCodexGoalState();
+      await finish({
+        ...result,
+        ...(codexGoalState ? { codexGoalState } : {}),
+      });
+    };
+
     const handleNotification = (method, params) => {
       const normalizedMethod = normalizeAppServerMethod(method);
       incrementCount(appServerNotificationCounts, normalizedMethod);
@@ -7126,6 +7484,27 @@ async function runCodexAppServer({
       }
       if (normalizedMethod === "turn/started") {
         activeTurnId = extractAppServerTurnId(params) || activeTurnId;
+      }
+      if (normalizedMethod === "thread/goal/updated") {
+        const notification = normalizeCodexGoalNotification(params);
+        if (
+          !notification.threadId ||
+          notification.threadId === appServerThreadId
+        ) {
+          goalReporter.recordUpdated(notification.goal);
+        }
+      }
+      if (normalizedMethod === "thread/goal/cleared") {
+        const notification = normalizeCodexGoalNotification(params);
+        if (
+          (!notification.threadId || notification.threadId === appServerThreadId) &&
+          (
+            hasCodexGoalObjective(normalizedCodexGoalState) ||
+            hasCodexGoalObjective(goalReporter.latestGoalState())
+          )
+        ) {
+          goalReporter.recordCleared();
+        }
       }
       if (normalizedMethod === "item/started" && isAppServerAgentMessageItem(params)) {
         startAgentMessage(params);
@@ -7147,7 +7526,7 @@ async function runCodexAppServer({
       if (normalizedMethod === "turn/completed") {
         const status = extractAppServerTurnStatus(params);
         const ok = !/failed|error|cancel/i.test(status);
-        void finish({
+        void finishAfterTurnCompleted({
           ok,
           output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
           diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
@@ -7288,6 +7667,7 @@ async function runCodexAppServer({
       if (!appServerThreadId) {
         throw new Error("Codex app-server did not return a thread id.");
       }
+      await synchronizeInitialCodexGoal();
       controlListener = firestoreBridge?.createControlListener?.({
         sendRequest,
         getAppServerThreadId: () => appServerThreadId,
@@ -7330,6 +7710,8 @@ async function runCodex({
   mode = "fresh",
   sessionId = "",
   appServerContext = null,
+  codexGoalState = null,
+  codexThreadGoalsEnabled = false,
 }) {
   const normalizedModel = normalizeText(model) || DEFAULT_CODEX_MODEL;
   const normalizedTask = normalizeText(task);
@@ -7370,6 +7752,8 @@ async function runCodex({
     mode: normalizedMode,
     sessionId: normalizedSessionId,
     appServerContext,
+    codexGoalState,
+    codexThreadGoalsEnabled,
   });
 }
 
@@ -8323,6 +8707,7 @@ async function main() {
   );
   const serverOwnedCodeq8FileSyncEnabled = supportsServerOwnedCodeq8FileSync(runtimeManifest);
   const serverOwnedDiscordDmChatEnabled = supportsServerOwnedDiscordDmChat(runtimeManifest);
+  const codexThreadGoalsEnabled = supportsCodexThreadGoals(runtimeManifest);
   log(
     "Resolved runner-owned codeq8.md workspace sync capability",
     serverOwnedCodeq8FileSyncEnabled ? "enabled" : "disabled",
@@ -8330,6 +8715,10 @@ async function main() {
   log(
     "Resolved runner-owned Discord DM capability",
     serverOwnedDiscordDmChatEnabled ? "enabled" : "disabled",
+  );
+  log(
+    "Resolved Codex thread goals capability",
+    codexThreadGoalsEnabled ? "enabled" : "disabled",
   );
 
   const codexPath = await resolveCodexPath(commandEnv);
@@ -8549,6 +8938,7 @@ async function main() {
         );
 
         let prompt = "";
+        let codexGoalState = normalizeCodexGoalState(null);
         let expectedBundleRevision = 0;
         let resumeAttemptedAt = 0;
         let codexSessionState = normalizeCodexSessionState(thread.codex_session_state || null);
@@ -8683,7 +9073,7 @@ async function main() {
                 session_state: summarizeCodexSessionStateForDiagnostic(codexSessionState),
               },
             });
-            prompt = await buildResumePrompt({
+            const promptPayload = await buildResumePromptPayload({
               publicBaseUrl,
               webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
               repository: activeWorkspaceRepository,
@@ -8704,9 +9094,11 @@ async function main() {
               serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
               runnerDiscordDmCommand: preparedRunnerDiscordDmCli.commandName,
             });
+            prompt = promptPayload.prompt;
+            codexGoalState = promptPayload.codexGoalState;
           } else {
             executionMode = "fresh";
-            prompt = await buildCodexPrompt({
+            const promptPayload = await buildCodexPromptPayload({
               publicBaseUrl,
               webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
               repository: activeWorkspaceRepository,
@@ -8726,6 +9118,8 @@ async function main() {
               serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
               runnerDiscordDmCommand: preparedRunnerDiscordDmCli.commandName,
             });
+            prompt = promptPayload.prompt;
+            codexGoalState = promptPayload.codexGoalState;
           }
         } catch (sessionError) {
           const sessionMessage = extractErrorMessage(sessionError);
@@ -8846,6 +9240,8 @@ async function main() {
           timeoutSeconds,
           mode: executionMode,
           sessionId: codexSessionState.session_id,
+          codexGoalState,
+          codexThreadGoalsEnabled,
           appServerContext: {
             publicBaseUrl,
             webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
@@ -8859,6 +9255,9 @@ async function main() {
             reportRunnerDiagnostic,
           },
         });
+        const executionCodexGoalState = normalizeCodexGoalState(
+          execution.codexGoalState,
+        );
         await reportRunnerDiagnostic({
           event: "runner_codex_command_finished",
           failureClass: execution.ok
@@ -8875,6 +9274,8 @@ async function main() {
             session_id_hash: hashDiagnosticValue(execution.sessionId),
             output_chars: normalizeText(execution.output).length,
             diagnostic_output_chars: normalizeText(execution.diagnosticOutput).length,
+            has_codex_goal: Boolean(executionCodexGoalState.objective),
+            codex_goal_status: executionCodexGoalState.status,
             reason: execution.ok ? "" : execution.reason,
           },
         });
@@ -9336,6 +9737,11 @@ async function main() {
               codex_session_cli_version: persistedCodexSessionState.cli_version,
               codex_session_last_compaction_observed_at:
                 persistedCodexSessionState.last_compaction_observed_at,
+              ...(executionCodexGoalState.objective
+                ? {
+                    codex_goal_state: executionCodexGoalState,
+                  }
+                : {}),
               thread_target_restart_count: threadTargetRestartCount,
               ...(recoveredTransportFailure
                 ? {
@@ -9376,6 +9782,11 @@ async function main() {
                 codex_session_cli_version: persistedCodexSessionState.cli_version,
                 codex_session_last_compaction_observed_at:
                   persistedCodexSessionState.last_compaction_observed_at,
+                ...(executionCodexGoalState.objective
+                  ? {
+                      codex_goal_state: executionCodexGoalState,
+                    }
+                  : {}),
                 thread_target_restart_count: threadTargetRestartCount,
                 ...(recoveredTransportFailure
                   ? {
@@ -9425,6 +9836,8 @@ async function main() {
             resolved_pull_request_number: resolvedPullRequestNumber,
             has_resolved_pull_request_url: Boolean(resolvedPullRequestUrl),
             workspace_rescue: workspaceRescueMetadata || null,
+            has_codex_goal: Boolean(executionCodexGoalState.objective),
+            codex_goal_status: executionCodexGoalState.status,
             thread_target_restart_count: threadTargetRestartCount,
           },
         });

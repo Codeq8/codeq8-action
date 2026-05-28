@@ -92,12 +92,16 @@ test("runtime manifest baseline matches the public startup contract", () => {
     REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
     STARTUP_REQUIRED_RUNTIME_CAPABILITIES,
   );
-  assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES, []);
+  assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES, [
+    "codex_app_server_thread_goals",
+  ]);
   assert.deepEqual(
     REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
     STARTUP_REQUIRED_RUNTIME_PATHS,
   );
-  assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_PATHS, []);
+  assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_PATHS, [
+    "/api/chat/runs/goal",
+  ]);
 });
 
 test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
@@ -781,6 +785,103 @@ test("runCodex sends AppServer steer requests with the active expected turn id",
   assert.deepEqual(acknowledgementBodies.at(-1)?.acknowledgements, [
     { request_id: "wcasr_steer", status: "accepted" },
   ]);
+});
+
+test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-goal-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  const goalUpdates = [];
+  const server = createServer((request, response) => {
+    let rawBody = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      rawBody += chunk;
+    });
+    request.on("end", () => {
+      if (request.url === "/api/chat/runs/goal") {
+        goalUpdates.push({
+          url: request.url,
+          authorization: request.headers.authorization,
+          body: JSON.parse(rawBody || "{}"),
+        });
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true, contract_version: CONTRACT_VERSION }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  t.after(async () => {
+    server.close();
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    requestsOutputPath,
+    agentMessage: "goal ok",
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  assert.ok(address);
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "continue the goal",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+    },
+    timeoutSeconds: 30,
+    codexThreadGoalsEnabled: true,
+    codexGoalState: {
+      objective: "Ship native Codeq8 goal support",
+      status: "active",
+      token_budget: 12345,
+      tokens_used: 8,
+      time_used_seconds: 3,
+      created_at: 900,
+      updated_at: 950,
+    },
+    appServerContext: {
+      publicBaseUrl: `http://127.0.0.1:${address.port}`,
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "goal ok");
+  assert.equal(result.codexGoalState.objective, "Ship native Codeq8 goal support");
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  const goalSet = requests.find((request) => request.method === "thread/goal/set");
+  const turnStartIndex = requests.findIndex((request) => request.method === "turn/start");
+  const goalSetIndex = requests.findIndex((request) => request.method === "thread/goal/set");
+  assert(goalSetIndex >= 0);
+  assert(turnStartIndex > goalSetIndex);
+  assert.deepEqual(goalSet?.params, {
+    threadId: "thr_app",
+    objective: "Ship native Codeq8 goal support",
+    status: "active",
+    tokenBudget: 12345,
+  });
+  assert.equal(
+    requests.some((request) => request.method === "thread/goal/get"),
+    true,
+  );
+  assert.equal(goalUpdates.length, 1);
+  assert.equal(goalUpdates[0]?.url, "/api/chat/runs/goal");
+  assert.equal(goalUpdates[0]?.authorization, "Bearer header.payload.signature");
+  assert.equal(goalUpdates[0]?.body?.event, "updated");
+  assert.equal(goalUpdates[0]?.body?.goal?.objective, "Ship native Codeq8 goal support");
 });
 
 test("runCodex materializes AppServer steer attachments before forwarding them", async (t) => {
@@ -1837,6 +1938,7 @@ async function writeFakeCodexAppServer(
       "};",
       "const rl = readline.createInterface({ input: process.stdin });",
       "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "let goal = null;",
       "rl.on('line', async (line) => {",
       "  const message = JSON.parse(line);",
       "  requests.push({ method: message.method, params: message.params || {} });",
@@ -1845,6 +1947,21 @@ async function writeFakeCodexAppServer(
       "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
       "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
       "  if (message.method === 'thread/resume') send({ id: message.id, result: { thread: { id: message.params?.threadId || 'thr_app' } } });",
+      "  if (message.method === 'thread/goal/set') {",
+      "    goal = {",
+      "      threadId: message.params?.threadId || 'thr_app',",
+      "      objective: message.params?.objective || '',",
+      "      status: message.params?.status || 'active',",
+      "      tokenBudget: message.params?.tokenBudget ?? null,",
+      "      tokensUsed: 0,",
+      "      timeUsedSeconds: 0,",
+      "      createdAt: 1000,",
+      "      updatedAt: 1000,",
+      "    };",
+      "    send({ id: message.id, result: { goal } });",
+      "  }",
+      "  if (message.method === 'thread/goal/get') send({ id: message.id, result: { goal } });",
+      "  if (message.method === 'thread/goal/clear') { goal = null; send({ id: message.id, result: { cleared: true } }); }",
       "  if (message.method === 'turn/start') {",
       "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
       "    send({ method: 'item/started', params: { item: { type: 'command_execution', command: commandLabel } } });",

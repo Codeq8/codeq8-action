@@ -8,7 +8,9 @@
     "codex_app_server_attachment_turn_control",
     "runner_codeq8_cli"
   ],
-  "optional_capabilities": [],
+  "optional_capabilities": [
+    "codex_app_server_thread_goals"
+  ],
   "required_paths": [
     "/api/github/workspace-git-token",
     "/api/chat/runs/callback",
@@ -25,5 +27,8 @@
     "/web-chat/codex-session/upsert",
     "/web-chat/codex-session/invalidate",
     "/web-chat/threads/get"
+  ],
+  "optional_paths": [
+    "/api/chat/runs/goal"
   ]
 }
