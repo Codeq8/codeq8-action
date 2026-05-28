@@ -409,6 +409,69 @@ test("runCodex applies dedicated Node options only to the Codex process env", as
   assert.equal(commandEnv.NODE_OPTIONS, "");
 });
 
+test("runCodex uses bash as the default Codex child shell", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-shell-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const shellOutputPath = path.join(workspacePath, "shell.txt");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    shellOutputPath,
+    agentMessage: "shell ok",
+  });
+
+  const commandEnv = {
+    ...process.env,
+    SHELL: "/bin/zsh",
+  };
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "print shell",
+    workspacePath,
+    commandEnv,
+    timeoutSeconds: 30,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "shell ok");
+  assert.equal(await fs.readFile(shellOutputPath, "utf8"), "/bin/bash");
+  assert.equal(commandEnv.SHELL, "/bin/zsh");
+});
+
+test("runCodex allows an explicit Codex child shell override", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-shell-override-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const shellOutputPath = path.join(workspacePath, "shell.txt");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    shellOutputPath,
+    agentMessage: "shell override ok",
+  });
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "print shell",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+      CODEQ8_CODEX_SHELL: "/custom/shell",
+      SHELL: "/bin/zsh",
+    },
+    timeoutSeconds: 30,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "shell override ok");
+  assert.equal(await fs.readFile(shellOutputPath, "utf8"), "/custom/shell");
+});
+
 test("runCodex allows Git metadata writes without approval prompts", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-sandbox-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
@@ -732,6 +795,57 @@ test("runCodex summarizes AppServer chatter and suppresses successful stderr", a
   assert.match(output.logs, /agent_message_deltas=5/);
   assert.doesNotMatch(output.logs, /item\/agentMessage\/delta=5/);
   assert.match(output.logs, /Codex app-server stderr captured \| chars=\d+/);
+});
+
+test("runCodex includes the last AppServer diagnostic when a turn fails", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-failed-turn-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "console.error('zsh:1: no matches found: app/api/chat/threads/[threadId]/messages/route.ts');",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_fake', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_fake', delta: 'I reached the final status.' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_fake', type: 'agent_message', text: 'I reached the final status.' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'failed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "fail with useful diagnostic",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.output, "I reached the final status.");
+  assert.match(result.reason, /Codex app-server turn completed with status failed\./);
+  assert.match(result.reason, /Last diagnostic: zsh:1: no matches found:/);
+  assert.equal(
+    result.appServerFailureDiagnostic,
+    "zsh:1: no matches found: app/api/chat/threads/[threadId]/messages/route.ts",
+  );
 });
 
 test("runCodex sends AppServer steer requests with the active expected turn id", async (t) => {
@@ -1840,6 +1954,7 @@ async function writeFakeCodexAppServer(
     argsOutputPath = "",
     envOutputPath = "",
     requestsOutputPath = "",
+    shellOutputPath = "",
     agentMessage = "done",
     commandLabel = "npm test",
     delayTurnCompletionMs = 0,
@@ -1854,12 +1969,14 @@ async function writeFakeCodexAppServer(
       `const argsOutputPath = ${JSON.stringify(argsOutputPath)};`,
       `const envOutputPath = ${JSON.stringify(envOutputPath)};`,
       `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
+      `const shellOutputPath = ${JSON.stringify(shellOutputPath)};`,
       `const agentMessage = ${JSON.stringify(agentMessage)};`,
       `const commandLabel = ${JSON.stringify(commandLabel)};`,
       `const delayTurnCompletionMs = ${JSON.stringify(delayTurnCompletionMs)};`,
       "const agentMessages = Array.isArray(agentMessage) ? agentMessage : [agentMessage];",
       "if (argsOutputPath) await fs.writeFile(argsOutputPath, JSON.stringify(process.argv.slice(2)), 'utf8');",
       "if (envOutputPath) await fs.writeFile(envOutputPath, process.env.NODE_OPTIONS || '', 'utf8');",
+      "if (shellOutputPath) await fs.writeFile(shellOutputPath, process.env.SHELL || '', 'utf8');",
       "const requests = [];",
       "const persistRequests = async () => {",
       "  if (requestsOutputPath) await fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",

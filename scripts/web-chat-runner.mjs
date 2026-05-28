@@ -89,6 +89,7 @@ const APP_SERVER_NOTIFICATION_SUMMARY_LABELS = new Map([
   ["turn/started", "turn_started"],
 ]);
 const CODEX_AUTH_PRECHECK_TIMEOUT_SECONDS = 45;
+const DEFAULT_CODEX_CHILD_SHELL = "/bin/bash";
 const WEB_CHAT_RUNNER_DIAGNOSTIC_SOURCE = "web_chat_runner_diagnostic";
 const WEB_CHAT_RUN_MARKER_VERSION = "v1";
 const WEB_CHAT_RUN_MARKER_PREFIX = "codeq8-run-marker";
@@ -6268,6 +6269,59 @@ function extractAppServerTurnStatus(value) {
   return normalizeText(turn.status || object.status || "");
 }
 
+function extractAppServerTurnFailureText(value) {
+  const object = normalizeObject(value);
+  const turn = normalizeObject(object.turn);
+  for (const candidate of [
+    turn.error,
+    turn.message,
+    turn.reason,
+    turn.failure,
+    object.error,
+    object.message,
+    object.reason,
+    object.failure,
+  ]) {
+    const extracted = extractErrorMessage(candidate);
+    if (extracted) {
+      return truncateDiagnosticString(extracted);
+    }
+  }
+  return "";
+}
+
+function normalizeAppServerDiagnosticLine(value) {
+  return normalizeText(String(value || "").replace(/\u001b\[[0-9;]*m/g, ""));
+}
+
+function extractAppServerDiagnosticHeadline(value) {
+  const lines = String(value || "")
+    .split(/\r?\n/g)
+    .map((line) => normalizeAppServerDiagnosticLine(line))
+    .filter(Boolean);
+  for (const line of lines.slice().reverse()) {
+    if (
+      /error|failed|failure|exit code|no matches found|timed out|exception|traceback|panic|denied|not found|apply_patch verification/i.test(
+        line,
+      )
+    ) {
+      return truncateDiagnosticString(line);
+    }
+  }
+  return truncateDiagnosticString(lines.at(-1) || "");
+}
+
+function buildAppServerFailedTurnReason({ status = "", params = {}, stderr = "" } = {}) {
+  const normalizedStatus = normalizeText(status) || "unknown";
+  const diagnostic =
+    extractAppServerTurnFailureText(params) ||
+    extractAppServerDiagnosticHeadline(stderr);
+  return [
+    `Codex app-server turn completed with status ${normalizedStatus}.`,
+    diagnostic ? `Last diagnostic: ${diagnostic}` : "",
+  ].filter(Boolean).join(" ");
+}
+
 function extractAppServerAgentDelta(params) {
   const object = normalizeObject(params);
   const source = Object.prototype.hasOwnProperty.call(object, "delta") ? object.delta : object;
@@ -7311,7 +7365,7 @@ async function runCodexAppServer({
 
     const child = spawn(codexPath, ["app-server", "--listen", "stdio://"], {
       cwd: workspacePath,
-      env: applyCodexNodeOptions({ ...commandEnv }),
+      env: applyCodexChildEnv({ ...commandEnv }),
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
@@ -7506,14 +7560,21 @@ async function runCodexAppServer({
       if (normalizedMethod === "turn/completed") {
         const status = extractAppServerTurnStatus(params);
         const ok = !/failed|error|cancel/i.test(status);
+        const appServerFailureDiagnostic = ok
+          ? ""
+          : extractAppServerTurnFailureText(params) || extractAppServerDiagnosticHeadline(stderr);
         void finish({
           ok,
           output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
           diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
-          reason: ok ? "" : `Codex app-server turn completed with status ${status || "unknown"}.`,
+          reason: ok
+            ? ""
+            : buildAppServerFailedTurnReason({ status, params, stderr }),
           exitCode: ok ? 0 : 1,
           signal: "",
           timedOut: false,
+          appServerTurnStatus: status || "",
+          appServerFailureDiagnostic,
         });
       }
     };
@@ -7738,6 +7799,14 @@ export function applyCodexNodeOptions(commandEnv = {}) {
     commandEnv.NODE_OPTIONS = codexNodeOptions;
   }
   return commandEnv;
+}
+
+function applyCodexChildEnv(commandEnv = {}) {
+  const nextEnv = applyCodexNodeOptions(commandEnv);
+  if (process.platform !== "win32") {
+    nextEnv.SHELL = normalizeText(nextEnv.CODEQ8_CODEX_SHELL) || DEFAULT_CODEX_CHILD_SHELL;
+  }
+  return nextEnv;
 }
 
 async function workingTreeHasChanges({ workspacePath, commandEnv }) {
@@ -8712,6 +8781,7 @@ async function main() {
   let threadTargetRestartCount = 0;
   let codexResumeRecoveryCount = 0;
   let lastPersistenceSummary = "";
+  let lastCodexExecutionFailure = null;
   try {
     while (true) {
       assistantMessage = "";
@@ -9248,6 +9318,18 @@ async function main() {
             reportRunnerDiagnostic,
           },
         });
+        lastCodexExecutionFailure = execution.ok
+          ? null
+          : sanitizeDiagnosticDetails({
+              reason: execution.reason,
+              exit_code: execution.exitCode,
+              signal: execution.signal || "",
+              timed_out: execution.timedOut,
+              duration_ms: execution.durationMs,
+              diagnostic_output_chars: normalizeText(execution.diagnosticOutput).length,
+              app_server_turn_status: execution.appServerTurnStatus || "",
+              app_server_failure_diagnostic: execution.appServerFailureDiagnostic || "",
+            });
         await reportRunnerDiagnostic({
           event: "runner_codex_command_finished",
           failureClass: execution.ok
@@ -9265,6 +9347,10 @@ async function main() {
             output_chars: normalizeText(execution.output).length,
             diagnostic_output_chars: normalizeText(execution.diagnosticOutput).length,
             reason: execution.ok ? "" : execution.reason,
+            app_server_turn_status: execution.appServerTurnStatus || "",
+            app_server_failure_diagnostic: execution.ok
+              ? ""
+              : truncateDiagnosticString(execution.appServerFailureDiagnostic || ""),
           },
         });
         if (
@@ -9856,6 +9942,7 @@ async function main() {
         final_workspace_state: failureFinalWorkspaceState || null,
         thread_target_restart_count: threadTargetRestartCount,
         nonfatal_session_warning: nonFatalCodexSessionLoadWarning,
+        codex_execution_failure: lastCodexExecutionFailure,
       },
     });
 
