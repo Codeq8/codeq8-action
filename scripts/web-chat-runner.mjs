@@ -2348,6 +2348,157 @@ function auxiliaryRepositoryCheckoutName(repository) {
     .slice(0, 120);
 }
 
+function buildAuxiliaryRepositoryHelperScript({
+  primaryRepository,
+  credentialHelperPath,
+  checkoutRoot,
+  auxiliaryRepositories,
+}) {
+  const normalizedPrimaryRepository = normalizeRepository(primaryRepository);
+  const repositories = (Array.isArray(auxiliaryRepositories) ? auxiliaryRepositories : [])
+    .map((entry) => ({
+      repository: normalizeRepository(entry?.repository),
+      access: normalizeAuxiliaryRepositoryAccess(entry?.access),
+      suggested_clone_path: normalizeText(entry?.suggested_clone_path),
+    }))
+    .filter((entry) => entry.repository && entry.suggested_clone_path);
+
+  return [
+    "#!/usr/bin/env node",
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    "import { spawnSync } from 'node:child_process';",
+    `const primaryRepository = ${JSON.stringify(normalizedPrimaryRepository)};`,
+    `const credentialHelperPath = ${JSON.stringify(normalizeText(credentialHelperPath))};`,
+    `const checkoutRoot = ${JSON.stringify(path.resolve(checkoutRoot))};`,
+    `const auxiliaryRepositories = ${JSON.stringify(repositories)};`,
+    'function normalizeText(value) { return String(value || "").trim(); }',
+    "function normalizeRepository(value) {",
+    "  const normalized = normalizeText(value)",
+    "    .replace(/^https?:\\/\\/github\\.com\\//i, '')",
+    "    .replace(/^\\/+/, '')",
+    "    .replace(/[?#].*$/, '')",
+    "    .replace(/\\/+$/, '')",
+    "    .replace(/\\.git$/i, '')",
+    "    .replace(/\\/+$/, '');",
+    "  return /^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$/.test(normalized) ? normalized : '';",
+    "}",
+    "function repositoryOwner(repository) {",
+    "  return normalizeText(normalizeRepository(repository).split('/', 1)[0]);",
+    "}",
+    "function sameRepositoryOwner(left, right) {",
+    "  const leftOwner = repositoryOwner(left).toLowerCase();",
+    "  const rightOwner = repositoryOwner(right).toLowerCase();",
+    "  return Boolean(leftOwner && rightOwner && leftOwner === rightOwner);",
+    "}",
+    "function findAuxiliaryRepository(value) {",
+    "  const repository = normalizeRepository(value);",
+    "  if (!repository) { return null; }",
+    "  return auxiliaryRepositories.find((entry) => entry.repository.toLowerCase() === repository.toLowerCase()) || null;",
+    "}",
+    "function runGit(args, options = {}) {",
+    "  const result = spawnSync('git', args, {",
+    "    cwd: options.cwd || process.cwd(),",
+    "    env: process.env,",
+    "    encoding: 'utf8',",
+    "  });",
+    "  if (result.status !== 0) {",
+    "    const output = normalizeText(`${result.stderr || ''}\\n${result.stdout || ''}`);",
+    "    throw new Error(output || `git ${args.join(' ')} exited with ${result.status}`);",
+    "  }",
+    "  return result;",
+    "}",
+    "function isExistingGitCheckout(checkoutPath) {",
+    "  try {",
+    "    const gitPath = path.join(checkoutPath, '.git');",
+    "    return fs.existsSync(gitPath);",
+    "  } catch {",
+    "    return false;",
+    "  }",
+    "}",
+    "function ensureReadOnlyPushDisabled(entry) {",
+    "  if (entry.access !== 'read' || !isExistingGitCheckout(entry.suggested_clone_path)) { return; }",
+    "  runGit(['remote', 'set-url', '--push', 'origin', 'DISABLED_BY_CODEQ8_READ_ONLY_AUX_REPOSITORY'], {",
+    "    cwd: entry.suggested_clone_path,",
+    "  });",
+    "}",
+    "function describeEntry(entry) {",
+    "  return {",
+    "    repository: entry.repository,",
+    "    access: entry.access,",
+    "    suggested_clone_path: entry.suggested_clone_path,",
+    "    cloned: isExistingGitCheckout(entry.suggested_clone_path),",
+    "  };",
+    "}",
+    "function printHelp() {",
+    "  console.log([",
+    "    'Usage: codeq8-aux-repo <command>',",
+    "    '',",
+    "    'Commands:',",
+    "    '  list [--json]          List authorized auxiliary repositories.',",
+    "    '  path <owner/repo>      Print the deterministic checkout path.',",
+    "    '  clone <owner/repo>     Clone one authorized auxiliary repository on demand.',",
+    "  ].join('\\n'));",
+    "}",
+    "async function main() {",
+    "  const command = normalizeText(process.argv[2]).toLowerCase();",
+    "  if (!command || command === 'help' || command === '--help' || command === '-h') {",
+    "    printHelp();",
+    "    return;",
+    "  }",
+    "  if (command === 'list') {",
+    "    const entries = auxiliaryRepositories.map(describeEntry);",
+    "    if (process.argv.includes('--json')) {",
+    "      console.log(JSON.stringify({ ok: true, primary_repository: primaryRepository, auxiliary_repositories: entries }, null, 2));",
+    "      return;",
+    "    }",
+    "    for (const entry of entries) {",
+    "      console.log(`${entry.repository}\\t${entry.access}\\t${entry.cloned ? 'cloned' : 'not-cloned'}\\t${entry.suggested_clone_path}`);",
+    "    }",
+    "    return;",
+    "  }",
+    "  const entry = findAuxiliaryRepository(process.argv[3]);",
+    "  if (!entry) {",
+    "    throw new Error(`Auxiliary repository is not authorized for this run: ${normalizeText(process.argv[3]) || '<missing>'}.`);",
+    "  }",
+    "  if (!sameRepositoryOwner(primaryRepository, entry.repository)) {",
+    "    throw new Error(`Refusing cross-owner auxiliary repository ${entry.repository}.`);",
+    "  }",
+    "  if (command === 'path') {",
+    "    console.log(entry.suggested_clone_path);",
+    "    return;",
+    "  }",
+    "  if (command !== 'clone') {",
+    "    throw new Error(`Unknown codeq8-aux-repo command: ${command}.`);",
+    "  }",
+    "  fs.mkdirSync(checkoutRoot, { recursive: true, mode: 0o700 });",
+    "  if (fs.existsSync(entry.suggested_clone_path) && !isExistingGitCheckout(entry.suggested_clone_path)) {",
+    "    throw new Error(`Auxiliary repository path exists but is not a git checkout: ${entry.suggested_clone_path}`);",
+    "  }",
+    "  if (!isExistingGitCheckout(entry.suggested_clone_path)) {",
+    "    runGit([",
+    "      '-c',",
+    "      `credential.helper=${credentialHelperPath}`,",
+    "      '-c',",
+    "      'credential.useHttpPath=true',",
+    "      'clone',",
+    "      '--depth=1',",
+    "      `https://github.com/${entry.repository}.git`,",
+    "      entry.suggested_clone_path,",
+    "    ], { cwd: checkoutRoot });",
+    "  }",
+    "  ensureReadOnlyPushDisabled(entry);",
+    "  console.log(entry.suggested_clone_path);",
+    "}",
+    "main().catch((error) => {",
+    "  const message = error instanceof Error ? error.message : String(error);",
+    "  if (message) { console.error(message); }",
+    "  process.exit(1);",
+    "});",
+    "",
+  ].join("\n");
+}
+
 async function prepareAuxiliaryRepositories({
   auxiliaryRepositories = [],
   primaryRepository,
@@ -2361,7 +2512,7 @@ async function prepareAuxiliaryRepositories({
     return [];
   }
   if (!normalizedPrimaryRepository || !helperPath) {
-    throw new Error("Auxiliary repository checkout requires a primary repository and git credential helper.");
+    throw new Error("Auxiliary repository access requires a primary repository and git credential helper.");
   }
 
   const checkoutRoot = path.join(path.resolve(runtimeHomePath), "aux-repositories");
@@ -2392,44 +2543,34 @@ async function prepareAuxiliaryRepositories({
 
     const access = normalizeAuxiliaryRepositoryAccess(candidate?.access);
     const checkoutPath = path.join(checkoutRoot, auxiliaryRepositoryCheckoutName(repository));
-    await fs.rm(checkoutPath, { recursive: true, force: true });
-    const cloned = await runProcessCapture(
-      "git",
-      [
-        "-c",
-        `credential.helper=${helperPath}`,
-        "-c",
-        "credential.useHttpPath=true",
-        "clone",
-        "--depth=1",
-        `https://github.com/${encodeRepositoryPath(repository)}.git`,
-        checkoutPath,
-      ],
-      {
-        cwd: checkoutRoot,
-        env: commandEnv,
-      },
-    );
-    if (!cloned.ok) {
-      throw new Error(
-        `Unable to checkout auxiliary repository ${repository}: ${normalizeText(cloned.stderr || cloned.stdout) || `git clone exited ${cloned.code}`}`,
-      );
-    }
-    if (access === "read") {
-      await runProcessCapture(
-        "git",
-        ["remote", "set-url", "--push", "origin", "DISABLED_BY_CODEQ8_READ_ONLY_AUX_REPOSITORY"],
-        {
-          cwd: checkoutPath,
-          env: commandEnv,
-        },
-      );
-    }
     prepared.push({
       repository,
       access,
-      local_path: checkoutPath,
+      local_path: "",
+      suggested_clone_path: checkoutPath,
     });
+  }
+  if (prepared.length > 0) {
+    const helperBinPath = path.join(path.resolve(runtimeHomePath), "bin");
+    const helperCommandPath = path.join(helperBinPath, "codeq8-aux-repo");
+    await ensureDirectory(helperBinPath);
+    await fs.writeFile(
+      helperCommandPath,
+      buildAuxiliaryRepositoryHelperScript({
+        primaryRepository: normalizedPrimaryRepository,
+        credentialHelperPath: helperPath,
+        checkoutRoot,
+        auxiliaryRepositories: prepared,
+      }),
+      {
+        encoding: "utf8",
+        mode: 0o755,
+      },
+    );
+    await fs.chmod(helperCommandPath, 0o755);
+    commandEnv.CODEQ8_AUX_REPOSITORY_HELPER_PATH = helperCommandPath;
+    commandEnv.CODEQ8_AUX_REPOSITORY_ROOT = checkoutRoot;
+    prependCommandPath(commandEnv, helperBinPath);
   }
   return prepared;
 }
@@ -5530,6 +5671,39 @@ function applyRunnerDiscordDmGuidance({
   ].join("\n");
 }
 
+function applyAuxiliaryRepositoryGuidance({
+  prompt,
+  auxiliaryRepositories = [],
+}) {
+  const normalizedPrompt = normalizeText(prompt);
+  const entries = (Array.isArray(auxiliaryRepositories) ? auxiliaryRepositories : [])
+    .map((entry) => ({
+      repository: normalizeRepository(entry?.repository),
+      access: normalizeAuxiliaryRepositoryAccess(entry?.access),
+      suggestedClonePath: normalizeText(entry?.suggested_clone_path || entry?.suggestedClonePath),
+      localPath: normalizeText(entry?.local_path || entry?.localPath),
+    }))
+    .filter((entry) => entry.repository);
+  if (!normalizedPrompt || entries.length === 0) {
+    return normalizedPrompt;
+  }
+
+  return [
+    "Auxiliary repository checkout helper:",
+    "- Authorized auxiliary repositories are not cloned automatically.",
+    "- Run `codeq8-aux-repo list --json` to inspect the repositories available to this run.",
+    "- Run `codeq8-aux-repo clone owner/repo` to clone one authorized auxiliary repository on demand.",
+    "- The helper uses the run-scoped backend token boundary, keeps aux repositories under the run temp directory, and disables pushes for read-only aux repositories.",
+    "- Commit and push to a write aux repository only when the user explicitly asks for changes there.",
+    ...entries.map((entry) => {
+      const location = entry.localPath || entry.suggestedClonePath || "<helper default>";
+      return `- ${entry.repository} (${entry.access}) clone target: ${location}`;
+    }),
+    "",
+    normalizedPrompt,
+  ].join("\n");
+}
+
 async function buildCodexPrompt({
   publicBaseUrl,
   webChatRunToken,
@@ -5585,9 +5759,12 @@ async function buildCodexPrompt({
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
   return applyRunnerDiscordDmGuidance({
-    prompt: applyServerOwnedCodeq8FileGuidance({
-      prompt,
-      promptFilePath: serverOwnedCodeq8FilePath,
+    prompt: applyAuxiliaryRepositoryGuidance({
+      prompt: applyServerOwnedCodeq8FileGuidance({
+        prompt,
+        promptFilePath: serverOwnedCodeq8FilePath,
+      }),
+      auxiliaryRepositories,
     }),
     commandName: runnerDiscordDmCommand,
   });
@@ -5649,9 +5826,12 @@ async function buildResumePrompt({
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
   return applyRunnerDiscordDmGuidance({
-    prompt: applyServerOwnedCodeq8FileGuidance({
-      prompt,
-      promptFilePath: serverOwnedCodeq8FilePath,
+    prompt: applyAuxiliaryRepositoryGuidance({
+      prompt: applyServerOwnedCodeq8FileGuidance({
+        prompt,
+        promptFilePath: serverOwnedCodeq8FilePath,
+      }),
+      auxiliaryRepositories,
     }),
     commandName: runnerDiscordDmCommand,
   });
@@ -8676,7 +8856,7 @@ async function main() {
         : [];
       if (preparedAuxiliaryRepositories.length > 0) {
         log(
-          "Prepared auxiliary repositories",
+          "Prepared auxiliary repository access",
           `count=${preparedAuxiliaryRepositories.length}`,
         );
       }

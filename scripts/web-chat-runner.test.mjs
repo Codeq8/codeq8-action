@@ -2036,7 +2036,11 @@ test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
       referencedThreads: [{ thread_id: "wct_other" }],
     });
 
-    assert.equal(prompt, "server-owned fresh prompt");
+    assert.match(prompt, /Auxiliary repository checkout helper:/);
+    assert.match(prompt, /Authorized auxiliary repositories are not cloned automatically/);
+    assert.match(prompt, /codeq8-aux-repo clone owner\/repo/);
+    assert.match(prompt, /Codeq8\/codeq8-action \(write\) clone target: \/tmp\/aux\/Codeq8__codeq8-action/);
+    assert.match(prompt, /server-owned fresh prompt/);
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.url, "https://codeq8.example.com/api/chat/runs/prompt");
     assert.equal(calls[0]?.method, "POST");
@@ -3214,6 +3218,94 @@ test("prepareAuxiliaryRepositories rejects cross-owner repositories before check
       }),
       /Refusing to checkout cross-owner auxiliary repository OtherOrg\/private-repo/,
     );
+  } finally {
+    await fs.rm(runtimeHomePath, { recursive: true, force: true });
+  }
+});
+
+test("prepareAuxiliaryRepositories prepares on-demand helper without cloning", async () => {
+  const runtimeHomePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-aux-"));
+  const fakeGitBinPath = path.join(runtimeHomePath, "fake-git-bin");
+  const fakeGitLogPath = path.join(runtimeHomePath, "fake-git.log");
+  const commandEnv = {
+    ...process.env,
+    PATH: `${fakeGitBinPath}${path.delimiter}${process.env.PATH || ""}`,
+    CODEX_GITHUB_TOKEN_HELPER_PATH: path.join(runtimeHomePath, "helper.mjs"),
+    CODEQ8_FAKE_GIT_LOG: fakeGitLogPath,
+  };
+
+  try {
+    await fs.mkdir(fakeGitBinPath, { recursive: true });
+    const fakeGitPath = path.join(fakeGitBinPath, "git");
+    await fs.writeFile(
+      fakeGitPath,
+      [
+        "#!/bin/sh",
+        "set -eu",
+        'printf "%s\\n" "$*" >> "$CODEQ8_FAKE_GIT_LOG"',
+        "last_arg=",
+        'for arg in "$@"; do last_arg="$arg"; done',
+        'case " $* " in',
+        '  *" clone "*) mkdir -p "$last_arg/.git" ;;',
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    await fs.chmod(fakeGitPath, 0o755);
+
+    const prepared = await prepareAuxiliaryRepositories({
+      auxiliaryRepositories: [
+        { repository: "Codeq8/codeq8-action", access: "write" },
+        { repository: "Codeq8/codeq8-utils", access: "read" },
+      ],
+      primaryRepository: "Codeq8/Codeq8",
+      runtimeHomePath,
+      commandEnv,
+    });
+
+    assert.equal(prepared.length, 2);
+    assert.equal(prepared[0]?.local_path, "");
+    assert.match(prepared[0]?.suggested_clone_path || "", /Codeq8__codeq8-action$/);
+    assert.equal(commandEnv.CODEQ8_AUX_REPOSITORY_ROOT, path.join(runtimeHomePath, "aux-repositories"));
+    assert.ok(commandEnv.CODEQ8_AUX_REPOSITORY_HELPER_PATH);
+    await assert.rejects(
+      fs.stat(prepared[0]?.suggested_clone_path || ""),
+      /ENOENT/,
+    );
+    await assert.rejects(
+      fs.stat(fakeGitLogPath),
+      /ENOENT/,
+    );
+
+    const listOutput = execFileSync(
+      commandEnv.CODEQ8_AUX_REPOSITORY_HELPER_PATH,
+      ["list", "--json"],
+      { env: commandEnv, encoding: "utf8" },
+    );
+    const listed = JSON.parse(listOutput);
+    assert.deepEqual(
+      listed.auxiliary_repositories.map((entry) => ({
+        repository: entry.repository,
+        access: entry.access,
+        cloned: entry.cloned,
+      })),
+      [
+        { repository: "Codeq8/codeq8-action", access: "write", cloned: false },
+        { repository: "Codeq8/codeq8-utils", access: "read", cloned: false },
+      ],
+    );
+
+    const clonedPath = execFileSync(
+      commandEnv.CODEQ8_AUX_REPOSITORY_HELPER_PATH,
+      ["clone", "Codeq8/codeq8-utils"],
+      { env: commandEnv, encoding: "utf8" },
+    ).trim();
+    assert.equal(clonedPath, prepared[1]?.suggested_clone_path);
+    assert.ok(await fs.stat(path.join(clonedPath, ".git")));
+    const fakeGitLog = await fs.readFile(fakeGitLogPath, "utf8");
+    assert.match(fakeGitLog, /clone --depth=1 https:\/\/github\.com\/Codeq8\/codeq8-utils\.git/);
+    assert.match(fakeGitLog, /remote set-url --push origin DISABLED_BY_CODEQ8_READ_ONLY_AUX_REPOSITORY/);
   } finally {
     await fs.rm(runtimeHomePath, { recursive: true, force: true });
   }
