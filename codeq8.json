@@ -7,6 +7,14 @@
   "bootstrap": {
     "install": ["npm ci"]
   },
+  "auxiliary_access": {
+    "allow_from": [
+      {
+        "repository": "Codeq8/Codeq8",
+        "access": "write"
+      }
+    ]
+  },
   "ci": {
     "default_branch": "main",
     "node_version": "22",
