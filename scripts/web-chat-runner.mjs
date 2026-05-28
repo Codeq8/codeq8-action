@@ -35,7 +35,6 @@ import {
   WEB_CHAT_RUNNER_DIAGNOSTIC_PATH,
   supportsServerOwnedCodeq8FileSync,
   supportsServerOwnedDiscordDmChat,
-  supportsAuxiliaryRepositories,
   webChatRunnerCodeq8FileResponseSchema,
   webChatRunnerCodeq8FileSaveResponseSchema,
   webChatRunnerDiagnosticResponseSchema,
@@ -101,7 +100,6 @@ const WEB_CHAT_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const WEB_CHAT_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const AUXILIARY_REPOSITORY_ACCESS_VALUES = new Set(["read", "write"]);
 const CODEX_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const CODEX_SESSION_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/;
 const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
@@ -216,22 +214,6 @@ function normalizeRepository(value) {
     return "";
   }
   return normalized;
-}
-
-function repositoryOwner(repository) {
-  const normalizedRepository = normalizeRepository(repository);
-  return normalizeText(normalizedRepository.split("/", 1)[0]);
-}
-
-function sameRepositoryOwner(left, right) {
-  const leftOwner = repositoryOwner(left).toLowerCase();
-  const rightOwner = repositoryOwner(right).toLowerCase();
-  return Boolean(leftOwner && rightOwner && leftOwner === rightOwner);
-}
-
-function normalizeAuxiliaryRepositoryAccess(value) {
-  const normalized = normalizeText(value).toLowerCase();
-  return AUXILIARY_REPOSITORY_ACCESS_VALUES.has(normalized) ? normalized : "read";
 }
 
 function normalizeObject(value) {
@@ -918,51 +900,6 @@ function parseAttachmentList(value) {
     .filter(Boolean);
 }
 
-function normalizeAuxiliaryRepositoryRecord(value) {
-  const normalized = normalizeObject(value);
-  const repository = normalizeRepository(
-    normalized.repository || normalized.workspace_repository || normalized.workspaceRepository,
-  );
-  if (!repository) {
-    return null;
-  }
-  return {
-    repository,
-    access: normalizeAuxiliaryRepositoryAccess(normalized.access),
-  };
-}
-
-function parseAuxiliaryRepositoryList(value) {
-  const candidates =
-    typeof value === "string"
-      ? (() => {
-          try {
-            const parsed = JSON.parse(value);
-            return Array.isArray(parsed) ? parsed : [];
-          } catch {
-            return [];
-          }
-        })()
-      : Array.isArray(value)
-        ? value
-        : [];
-  const seen = new Set();
-  const repositories = [];
-  for (const candidate of candidates) {
-    const normalized = normalizeAuxiliaryRepositoryRecord(candidate);
-    if (!normalized) {
-      continue;
-    }
-    const key = normalized.repository.toLowerCase();
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    repositories.push(normalized);
-  }
-  return repositories;
-}
-
 function normalizePromptAttachmentRecord(value) {
   const normalized = normalizeObject(value);
   const name = normalizeAttachmentName(
@@ -1614,13 +1551,10 @@ async function requestWorkspaceGitToken({
 
     const token = normalizeText(response.payload?.token);
     const tokenSource = normalizeText(response.payload?.token_source);
-    const repositoryAccess = normalizeText(
+    const normalizedRepositoryAccess = normalizeText(
       response.payload?.repository_access || response.payload?.repositoryAccess,
-    )
-      ? normalizeAuxiliaryRepositoryAccess(
-          response.payload?.repository_access || response.payload?.repositoryAccess,
-        )
-      : "write";
+    ).toLowerCase();
+    const repositoryAccess = normalizedRepositoryAccess === "read" ? "read" : "write";
     if (response.ok && response.payload?.ok !== false && token) {
       return {
         token,
@@ -2188,14 +2122,6 @@ function buildWorkspaceGitTokenHelperScript({
     "    .replace(/\\/+$/, '');",
     "  return /^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$/.test(normalized) ? normalized : '';",
     "}",
-    "function repositoryOwner(repository) {",
-    "  return normalizeText(normalizeRepository(repository).split('/', 1)[0]);",
-    "}",
-    "function sameRepositoryOwner(left, right) {",
-    "  const leftOwner = repositoryOwner(left).toLowerCase();",
-    "  const rightOwner = repositoryOwner(right).toLowerCase();",
-    "  return Boolean(leftOwner && rightOwner && leftOwner === rightOwner);",
-    "}",
     "async function readStdin() {",
     "  const chunks = [];",
     "  for await (const chunk of process.stdin) { chunks.push(String(chunk || '')); }",
@@ -2219,13 +2145,10 @@ function buildWorkspaceGitTokenHelperScript({
     "  if (!requestedRepository) {",
     "    throw new Error(`Refusing to request a GitHub token for unrecognized repository path ${requestedPath}.`);",
     "  }",
-    "  // Defense in depth for aux repo credentials: the backend run token is the",
-    "  // authority, but the public runner should never intentionally ask for a",
-    "  // different owner than the primary workspace repository.",
-    "  if (!sameRepositoryOwner(workspaceRepository, requestedRepository)) {",
-    "    throw new Error(`Refusing to request a cross-owner GitHub token for ${requestedRepository}.`);",
+    "  if (requestedRepository.toLowerCase() !== workspaceRepository.toLowerCase()) {",
+    "    throw new Error(`Refusing to request a GitHub token for non-workspace repository ${requestedRepository}.`);",
     "  }",
-    "  return requestedRepository;",
+    "  return workspaceRepository;",
     "}",
     "async function fetchGitHubRepositoryToken(repository) {",
     "  const authorizationToken = normalizeText(process.env.CODE_WEB_CHAT_RUN_TOKEN || '');",
@@ -2340,241 +2263,6 @@ async function configureWorkspaceGitCredentialHelper({
   commandEnv.CODEX_GITHUB_TOKEN_HELPER_PATH = helperPath;
   return helperPath;
 }
-
-function auxiliaryRepositoryCheckoutName(repository) {
-  return normalizeText(repository)
-    .replace(/[^A-Za-z0-9_.-]+/g, "__")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 120);
-}
-
-function buildAuxiliaryRepositoryHelperScript({
-  primaryRepository,
-  credentialHelperPath,
-  checkoutRoot,
-  auxiliaryRepositories,
-}) {
-  const normalizedPrimaryRepository = normalizeRepository(primaryRepository);
-  const repositories = (Array.isArray(auxiliaryRepositories) ? auxiliaryRepositories : [])
-    .map((entry) => ({
-      repository: normalizeRepository(entry?.repository),
-      access: normalizeAuxiliaryRepositoryAccess(entry?.access),
-      suggested_clone_path: normalizeText(entry?.suggested_clone_path),
-    }))
-    .filter((entry) => entry.repository && entry.suggested_clone_path);
-
-  return [
-    "#!/usr/bin/env node",
-    "import fs from 'node:fs';",
-    "import path from 'node:path';",
-    "import { spawnSync } from 'node:child_process';",
-    `const primaryRepository = ${JSON.stringify(normalizedPrimaryRepository)};`,
-    `const credentialHelperPath = ${JSON.stringify(normalizeText(credentialHelperPath))};`,
-    `const checkoutRoot = ${JSON.stringify(path.resolve(checkoutRoot))};`,
-    `const auxiliaryRepositories = ${JSON.stringify(repositories)};`,
-    'function normalizeText(value) { return String(value || "").trim(); }',
-    "function normalizeRepository(value) {",
-    "  const normalized = normalizeText(value)",
-    "    .replace(/^https?:\\/\\/github\\.com\\//i, '')",
-    "    .replace(/^\\/+/, '')",
-    "    .replace(/[?#].*$/, '')",
-    "    .replace(/\\/+$/, '')",
-    "    .replace(/\\.git$/i, '')",
-    "    .replace(/\\/+$/, '');",
-    "  return /^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$/.test(normalized) ? normalized : '';",
-    "}",
-    "function repositoryOwner(repository) {",
-    "  return normalizeText(normalizeRepository(repository).split('/', 1)[0]);",
-    "}",
-    "function sameRepositoryOwner(left, right) {",
-    "  const leftOwner = repositoryOwner(left).toLowerCase();",
-    "  const rightOwner = repositoryOwner(right).toLowerCase();",
-    "  return Boolean(leftOwner && rightOwner && leftOwner === rightOwner);",
-    "}",
-    "function findAuxiliaryRepository(value) {",
-    "  const repository = normalizeRepository(value);",
-    "  if (!repository) { return null; }",
-    "  return auxiliaryRepositories.find((entry) => entry.repository.toLowerCase() === repository.toLowerCase()) || null;",
-    "}",
-    "function runGit(args, options = {}) {",
-    "  const result = spawnSync('git', args, {",
-    "    cwd: options.cwd || process.cwd(),",
-    "    env: process.env,",
-    "    encoding: 'utf8',",
-    "  });",
-    "  if (result.status !== 0) {",
-    "    const output = normalizeText(`${result.stderr || ''}\\n${result.stdout || ''}`);",
-    "    throw new Error(output || `git ${args.join(' ')} exited with ${result.status}`);",
-    "  }",
-    "  return result;",
-    "}",
-    "function isExistingGitCheckout(checkoutPath) {",
-    "  try {",
-    "    const gitPath = path.join(checkoutPath, '.git');",
-    "    return fs.existsSync(gitPath);",
-    "  } catch {",
-    "    return false;",
-    "  }",
-    "}",
-    "function ensureReadOnlyPushDisabled(entry) {",
-    "  if (entry.access !== 'read' || !isExistingGitCheckout(entry.suggested_clone_path)) { return; }",
-    "  runGit(['remote', 'set-url', '--push', 'origin', 'DISABLED_BY_CODEQ8_READ_ONLY_AUX_REPOSITORY'], {",
-    "    cwd: entry.suggested_clone_path,",
-    "  });",
-    "}",
-    "function describeEntry(entry) {",
-    "  return {",
-    "    repository: entry.repository,",
-    "    access: entry.access,",
-    "    suggested_clone_path: entry.suggested_clone_path,",
-    "    cloned: isExistingGitCheckout(entry.suggested_clone_path),",
-    "  };",
-    "}",
-    "function printHelp() {",
-    "  console.log([",
-    "    'Usage: codeq8-aux-repo <command>',",
-    "    '',",
-    "    'Commands:',",
-    "    '  list [--json]          List authorized auxiliary repositories.',",
-    "    '  path <owner/repo>      Print the deterministic checkout path.',",
-    "    '  clone <owner/repo>     Clone one authorized auxiliary repository on demand.',",
-    "  ].join('\\n'));",
-    "}",
-    "async function main() {",
-    "  const command = normalizeText(process.argv[2]).toLowerCase();",
-    "  if (!command || command === 'help' || command === '--help' || command === '-h') {",
-    "    printHelp();",
-    "    return;",
-    "  }",
-    "  if (command === 'list') {",
-    "    const entries = auxiliaryRepositories.map(describeEntry);",
-    "    if (process.argv.includes('--json')) {",
-    "      console.log(JSON.stringify({ ok: true, primary_repository: primaryRepository, auxiliary_repositories: entries }, null, 2));",
-    "      return;",
-    "    }",
-    "    for (const entry of entries) {",
-    "      console.log(`${entry.repository}\\t${entry.access}\\t${entry.cloned ? 'cloned' : 'not-cloned'}\\t${entry.suggested_clone_path}`);",
-    "    }",
-    "    return;",
-    "  }",
-    "  const entry = findAuxiliaryRepository(process.argv[3]);",
-    "  if (!entry) {",
-    "    throw new Error(`Auxiliary repository is not authorized for this run: ${normalizeText(process.argv[3]) || '<missing>'}.`);",
-    "  }",
-    "  if (!sameRepositoryOwner(primaryRepository, entry.repository)) {",
-    "    throw new Error(`Refusing cross-owner auxiliary repository ${entry.repository}.`);",
-    "  }",
-    "  if (command === 'path') {",
-    "    console.log(entry.suggested_clone_path);",
-    "    return;",
-    "  }",
-    "  if (command !== 'clone') {",
-    "    throw new Error(`Unknown codeq8-aux-repo command: ${command}.`);",
-    "  }",
-    "  fs.mkdirSync(checkoutRoot, { recursive: true, mode: 0o700 });",
-    "  if (fs.existsSync(entry.suggested_clone_path) && !isExistingGitCheckout(entry.suggested_clone_path)) {",
-    "    throw new Error(`Auxiliary repository path exists but is not a git checkout: ${entry.suggested_clone_path}`);",
-    "  }",
-    "  if (!isExistingGitCheckout(entry.suggested_clone_path)) {",
-    "    runGit([",
-    "      '-c',",
-    "      `credential.helper=${credentialHelperPath}`,",
-    "      '-c',",
-    "      'credential.useHttpPath=true',",
-    "      'clone',",
-    "      '--depth=1',",
-    "      `https://github.com/${entry.repository}.git`,",
-    "      entry.suggested_clone_path,",
-    "    ], { cwd: checkoutRoot });",
-    "  }",
-    "  ensureReadOnlyPushDisabled(entry);",
-    "  console.log(entry.suggested_clone_path);",
-    "}",
-    "main().catch((error) => {",
-    "  const message = error instanceof Error ? error.message : String(error);",
-    "  if (message) { console.error(message); }",
-    "  process.exit(1);",
-    "});",
-    "",
-  ].join("\n");
-}
-
-async function prepareAuxiliaryRepositories({
-  auxiliaryRepositories = [],
-  primaryRepository,
-  runtimeHomePath,
-  commandEnv,
-}) {
-  const normalizedPrimaryRepository = normalizeRepository(primaryRepository);
-  const helperPath = normalizeText(commandEnv?.CODEX_GITHUB_TOKEN_HELPER_PATH);
-  const candidates = Array.isArray(auxiliaryRepositories) ? auxiliaryRepositories : [];
-  if (candidates.length === 0) {
-    return [];
-  }
-  if (!normalizedPrimaryRepository || !helperPath) {
-    throw new Error("Auxiliary repository access requires a primary repository and git credential helper.");
-  }
-
-  const checkoutRoot = path.join(path.resolve(runtimeHomePath), "aux-repositories");
-  await ensureDirectory(checkoutRoot);
-  const prepared = [];
-  const seen = new Set();
-  for (const candidate of candidates) {
-    const repository = normalizeRepository(candidate?.repository);
-    if (!repository || repository.toLowerCase() === normalizedPrimaryRepository.toLowerCase()) {
-      continue;
-    }
-    const key = repository.toLowerCase();
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-
-    // SECURITY: aux repos intentionally stay inside the same GitHub owner as
-    // the primary workspace. The backend run token also enforces this, but the
-    // public action keeps the invariant visible at the checkout boundary so a
-    // future runner change cannot casually turn aux repos into cross-org token
-    // requests.
-    if (!sameRepositoryOwner(normalizedPrimaryRepository, repository)) {
-      throw new Error(
-        `Refusing to checkout cross-owner auxiliary repository ${repository}; aux repositories must share ${repositoryOwner(normalizedPrimaryRepository)}.`,
-      );
-    }
-
-    const access = normalizeAuxiliaryRepositoryAccess(candidate?.access);
-    const checkoutPath = path.join(checkoutRoot, auxiliaryRepositoryCheckoutName(repository));
-    prepared.push({
-      repository,
-      access,
-      local_path: "",
-      suggested_clone_path: checkoutPath,
-    });
-  }
-  if (prepared.length > 0) {
-    const helperBinPath = path.join(path.resolve(runtimeHomePath), "bin");
-    const helperCommandPath = path.join(helperBinPath, "codeq8-aux-repo");
-    await ensureDirectory(helperBinPath);
-    await fs.writeFile(
-      helperCommandPath,
-      buildAuxiliaryRepositoryHelperScript({
-        primaryRepository: normalizedPrimaryRepository,
-        credentialHelperPath: helperPath,
-        checkoutRoot,
-        auxiliaryRepositories: prepared,
-      }),
-      {
-        encoding: "utf8",
-        mode: 0o755,
-      },
-    );
-    await fs.chmod(helperCommandPath, 0o755);
-    commandEnv.CODEQ8_AUX_REPOSITORY_HELPER_PATH = helperCommandPath;
-    commandEnv.CODEQ8_AUX_REPOSITORY_ROOT = checkoutRoot;
-    prependCommandPath(commandEnv, helperBinPath);
-  }
-  return prepared;
-}
-
 
 function buildGitHubActionsControlPlaneUrl(env = process.env) {
   const serverUrl = normalizeBaseUrl(env.GITHUB_SERVER_URL || "");
@@ -5671,39 +5359,6 @@ function applyRunnerDiscordDmGuidance({
   ].join("\n");
 }
 
-function applyAuxiliaryRepositoryGuidance({
-  prompt,
-  auxiliaryRepositories = [],
-}) {
-  const normalizedPrompt = normalizeText(prompt);
-  const entries = (Array.isArray(auxiliaryRepositories) ? auxiliaryRepositories : [])
-    .map((entry) => ({
-      repository: normalizeRepository(entry?.repository),
-      access: normalizeAuxiliaryRepositoryAccess(entry?.access),
-      suggestedClonePath: normalizeText(entry?.suggested_clone_path || entry?.suggestedClonePath),
-      localPath: normalizeText(entry?.local_path || entry?.localPath),
-    }))
-    .filter((entry) => entry.repository);
-  if (!normalizedPrompt || entries.length === 0) {
-    return normalizedPrompt;
-  }
-
-  return [
-    "Auxiliary repository checkout helper:",
-    "- Authorized auxiliary repositories are not cloned automatically.",
-    "- Run `codeq8-aux-repo list --json` to inspect the repositories available to this run.",
-    "- Run `codeq8-aux-repo clone owner/repo` to clone one authorized auxiliary repository on demand.",
-    "- The helper uses the run-scoped backend token boundary, keeps aux repositories under the run temp directory, and disables pushes for read-only aux repositories.",
-    "- Commit and push to a write aux repository only when the user explicitly asks for changes there.",
-    ...entries.map((entry) => {
-      const location = entry.localPath || entry.suggestedClonePath || "<helper default>";
-      return `- ${entry.repository} (${entry.access}) clone target: ${location}`;
-    }),
-    "",
-    normalizedPrompt,
-  ].join("\n");
-}
-
 async function buildCodexPrompt({
   publicBaseUrl,
   webChatRunToken,
@@ -5720,7 +5375,6 @@ async function buildCodexPrompt({
   recentChecksPromptText = "",
   codeq8Cli,
   attachments = [],
-  auxiliaryRepositories = [],
   referencedThreads = [],
   serverOwnedCodeq8FilePath = "",
   runnerDiscordDmCommand = "",
@@ -5744,9 +5398,6 @@ async function buildCodexPrompt({
       recent_user_messages_prompt_text: "",
       recent_checks_prompt_text: normalizeText(recentChecksPromptText),
       attachments: Array.isArray(attachments) ? attachments : [],
-      auxiliary_repositories: Array.isArray(auxiliaryRepositories)
-        ? auxiliaryRepositories
-        : [],
       referenced_threads: Array.isArray(referencedThreads) ? referencedThreads : [],
       codeq8_cli_available: Boolean(codeq8Cli?.available),
       target_shift: false,
@@ -5759,12 +5410,9 @@ async function buildCodexPrompt({
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
   return applyRunnerDiscordDmGuidance({
-    prompt: applyAuxiliaryRepositoryGuidance({
-      prompt: applyServerOwnedCodeq8FileGuidance({
-        prompt,
-        promptFilePath: serverOwnedCodeq8FilePath,
-      }),
-      auxiliaryRepositories,
+    prompt: applyServerOwnedCodeq8FileGuidance({
+      prompt,
+      promptFilePath: serverOwnedCodeq8FilePath,
     }),
     commandName: runnerDiscordDmCommand,
   });
@@ -5786,7 +5434,6 @@ async function buildResumePrompt({
   recentChecksPromptText = "",
   codeq8Cli,
   attachments = [],
-  auxiliaryRepositories = [],
   referencedThreads = [],
   targetShift = null,
   serverOwnedCodeq8FilePath = "",
@@ -5811,9 +5458,6 @@ async function buildResumePrompt({
       recent_user_messages_prompt_text: normalizeText(recentUserMessagesPromptText),
       recent_checks_prompt_text: normalizeText(recentChecksPromptText),
       attachments: Array.isArray(attachments) ? attachments : [],
-      auxiliary_repositories: Array.isArray(auxiliaryRepositories)
-        ? auxiliaryRepositories
-        : [],
       referenced_threads: Array.isArray(referencedThreads) ? referencedThreads : [],
       codeq8_cli_available: Boolean(codeq8Cli?.available),
       target_shift: Boolean(targetShift),
@@ -5826,12 +5470,9 @@ async function buildResumePrompt({
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
   return applyRunnerDiscordDmGuidance({
-    prompt: applyAuxiliaryRepositoryGuidance({
-      prompt: applyServerOwnedCodeq8FileGuidance({
-        prompt,
-        promptFilePath: serverOwnedCodeq8FilePath,
-      }),
-      auxiliaryRepositories,
+    prompt: applyServerOwnedCodeq8FileGuidance({
+      prompt,
+      promptFilePath: serverOwnedCodeq8FilePath,
     }),
     commandName: runnerDiscordDmCommand,
   });
@@ -8579,9 +8220,6 @@ async function main() {
   const latestMessageAttachments = parseAttachmentList(
     process.env.CODE_CHAT_ATTACHMENTS_JSON || "[]",
   );
-  const auxiliaryRepositories = parseAuxiliaryRepositoryList(
-    process.env.CODE_CHAT_AUXILIARY_REPOSITORIES_JSON || "[]",
-  );
   const fallbackPullRequestHeadRepository = normalizeText(
     process.env.CODE_CHAT_PULL_REQUEST_HEAD_REPOSITORY,
   );
@@ -8685,7 +8323,6 @@ async function main() {
   );
   const serverOwnedCodeq8FileSyncEnabled = supportsServerOwnedCodeq8FileSync(runtimeManifest);
   const serverOwnedDiscordDmChatEnabled = supportsServerOwnedDiscordDmChat(runtimeManifest);
-  const auxiliaryRepositoriesEnabled = supportsAuxiliaryRepositories(runtimeManifest);
   log(
     "Resolved runner-owned codeq8.md workspace sync capability",
     serverOwnedCodeq8FileSyncEnabled ? "enabled" : "disabled",
@@ -8693,10 +8330,6 @@ async function main() {
   log(
     "Resolved runner-owned Discord DM capability",
     serverOwnedDiscordDmChatEnabled ? "enabled" : "disabled",
-  );
-  log(
-    "Resolved auxiliary repository checkout capability",
-    auxiliaryRepositoriesEnabled ? "enabled" : "disabled",
   );
 
   const codexPath = await resolveCodexPath(commandEnv);
@@ -8841,25 +8474,6 @@ async function main() {
         publicBaseUrl,
         runtimeHomePath: attemptRunRuntime.homePath,
       });
-      if (auxiliaryRepositories.length > 0 && !auxiliaryRepositoriesEnabled) {
-        throw new Error(
-          "Auxiliary repositories were requested, but the Codeq8 runner runtime manifest does not advertise runner_auxiliary_repositories.",
-        );
-      }
-      const preparedAuxiliaryRepositories = auxiliaryRepositoriesEnabled
-        ? await prepareAuxiliaryRepositories({
-            auxiliaryRepositories,
-            primaryRepository: activeWorkspaceRepository,
-            runtimeHomePath: attemptRunRuntime.homePath,
-            commandEnv: codexCommandEnv,
-          })
-        : [];
-      if (preparedAuxiliaryRepositories.length > 0) {
-        log(
-          "Prepared auxiliary repository access",
-          `count=${preparedAuxiliaryRepositories.length}`,
-        );
-      }
       preparedRunnerDiscordDmCli = serverOwnedDiscordDmChatEnabled
         ? await prepareRunnerDiscordDmCli({
             commandEnv: codexCommandEnv,
@@ -9085,7 +8699,6 @@ async function main() {
               recentChecksPromptText,
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
-              auxiliaryRepositories: preparedAuxiliaryRepositories,
               referencedThreads,
               targetShift: resumeTargetShift ? targetBeforeAttempt : null,
               serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
@@ -9109,7 +8722,6 @@ async function main() {
               recentChecksPromptText,
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
-              auxiliaryRepositories: preparedAuxiliaryRepositories,
               referencedThreads,
               serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
               runnerDiscordDmCommand: preparedRunnerDiscordDmCli.commandName,
@@ -9159,7 +8771,6 @@ async function main() {
             prompt_chars: prompt.length,
             marker_hash: hashDiagnosticValue(currentRunMarker),
             attachments_count: materializedAttachments.length,
-            auxiliary_repositories_count: preparedAuxiliaryRepositories.length,
             referenced_threads_count: referencedThreads.length,
             target_shift: resumeTargetShift,
             thread_target_restart_count: threadTargetRestartCount,
@@ -9961,7 +9572,6 @@ export {
   persistWorkspaceProgress,
   postRunCallback,
   prepareCodeq8Cli,
-  prepareAuxiliaryRepositories,
   prepareRunnerDiscordDmCli,
   prepareGitHubCliAuth,
   pushRememberedThreadBranch,

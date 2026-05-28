@@ -47,33 +47,6 @@ test("normalizeGitHubActionsChatRunPayload preserves referenced threads", () => 
   assert.equal(payload.referenced_threads_json, '[{"thread_id":"wct_other"}]');
 });
 
-test("normalizeGitHubActionsChatRunPayload preserves auxiliary repositories", () => {
-  const payload = normalizeGitHubActionsChatRunPayload({
-    run_id: "wcr_123",
-    thread_id: "wct_123",
-    message_id: "wcm_123",
-    workspace_repository: "Codeq8/Codeq8",
-    worker_url: "main-codeq8.bojamal7.workers.dev/",
-    prompt_text: "Fix it",
-    branch_context: {
-      default_branch: "main",
-      context_branch: "main",
-      write_mode: "branch_and_pr",
-      base_branch: "main",
-    },
-    auxiliary_repositories: [
-      { repository: "Codeq8/codeq8-action", access: "write" },
-      { repository: "Codeq8/codeq8-utils" },
-      { repository: "Codeq8/codeq8-action", access: "read" },
-    ],
-  });
-
-  assert.equal(
-    payload.auxiliary_repositories_json,
-    '[{"repository":"Codeq8/codeq8-action","access":"write"},{"repository":"Codeq8/codeq8-utils","access":"read"}]',
-  );
-});
-
 test("normalizeGitHubActionsChatRunPayload preserves attachment storage metadata", () => {
   const payload = normalizeGitHubActionsChatRunPayload({
     run_id: "wcr_123",
@@ -136,7 +109,6 @@ test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => 
         base_branch: "main",
       },
       referenced_threads: [{ thread_id: "wct_other" }],
-      auxiliary_repositories: [{ repository: "Codeq8/codeq8-action", access: "write" }],
     },
   });
 
@@ -149,9 +121,5 @@ test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => 
     "https://github.com/Codeq8/Codeq8/actions/runs/987654321",
   );
   assert.equal(env.CODE_CHAT_REFERENCED_THREADS_JSON, '[{"thread_id":"wct_other"}]');
-  assert.equal(
-    env.CODE_CHAT_AUXILIARY_REPOSITORIES_JSON,
-    '[{"repository":"Codeq8/codeq8-action","access":"write"}]',
-  );
   assert.equal(env.CODE_CHAT_THREAD_SPEC_TEXT, "Keep diffs narrow.");
 });

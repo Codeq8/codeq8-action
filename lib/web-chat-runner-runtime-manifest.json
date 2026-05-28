@@ -8,9 +8,7 @@
     "codex_app_server_attachment_turn_control",
     "runner_codeq8_cli"
   ],
-  "optional_capabilities": [
-    "runner_auxiliary_repositories"
-  ],
+  "optional_capabilities": [],
   "required_paths": [
     "/api/github/workspace-git-token",
     "/api/chat/runs/callback",

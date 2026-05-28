@@ -14,9 +14,6 @@ import {
   REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
 } from "../lib/web-chat-runner-runtime-manifest.mjs";
 import {
-  supportsAuxiliaryRepositories,
-} from "../lib/web-chat-runner-runtime-contract.mjs";
-import {
   assertWebChatRunnerRuntimeCompatibility,
   applyCodexNodeOptions,
   appendWebChatRunMarkerToPrompt,
@@ -45,7 +42,6 @@ import {
   postWebChatRunnerDiagnostic,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
-  prepareAuxiliaryRepositories,
   prepareGitHubCliAuth,
   prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
@@ -91,41 +87,17 @@ const STARTUP_REQUIRED_RUNTIME_PATHS = Object.freeze([
   "/web-chat/threads/get",
 ]);
 
-test("auxiliary repositories are negotiated instead of startup-required", () => {
+test("runtime manifest baseline matches the public startup contract", () => {
   assert.deepEqual(
     REQUIRED_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES,
     STARTUP_REQUIRED_RUNTIME_CAPABILITIES,
   );
-  assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES, [
-    "runner_auxiliary_repositories",
-  ]);
+  assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES, []);
   assert.deepEqual(
     REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
     STARTUP_REQUIRED_RUNTIME_PATHS,
   );
   assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_PATHS, []);
-  assert.equal(
-    supportsAuxiliaryRepositories({
-      ok: true,
-      contract_version: CONTRACT_VERSION,
-      capabilities: [],
-      authorized_paths: [],
-      scoped_authorized_paths: [],
-      runner_required_paths: [],
-    }),
-    false,
-  );
-  assert.equal(
-    supportsAuxiliaryRepositories({
-      ok: true,
-      contract_version: CONTRACT_VERSION,
-      capabilities: ["runner_auxiliary_repositories"],
-      authorized_paths: [],
-      scoped_authorized_paths: [],
-      runner_required_paths: [],
-    }),
-    true,
-  );
 });
 
 test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
@@ -1406,7 +1378,6 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "codex_app_server_turn_control",
         "codex_app_server_attachment_turn_control",
         "runner_codeq8_cli",
-        "runner_auxiliary_repositories",
       ],
       authorized_paths: [
         "/api/github/workspace-git-token",
@@ -2026,20 +1997,9 @@ test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
       recentChecksPromptText: "Checks: green",
       codeq8Cli: { available: true },
       attachments: [{ attachment_id: "att_123", name: "log.txt", local_path: "/tmp/log.txt" }],
-      auxiliaryRepositories: [
-        {
-          repository: "Codeq8/codeq8-action",
-          access: "write",
-          local_path: "/tmp/aux/Codeq8__codeq8-action",
-        },
-      ],
       referencedThreads: [{ thread_id: "wct_other" }],
     });
 
-    assert.match(prompt, /Auxiliary repository checkout helper:/);
-    assert.match(prompt, /Authorized auxiliary repositories are not cloned automatically/);
-    assert.match(prompt, /codeq8-aux-repo clone owner\/repo/);
-    assert.match(prompt, /Codeq8\/codeq8-action \(write\) clone target: \/tmp\/aux\/Codeq8__codeq8-action/);
     assert.match(prompt, /server-owned fresh prompt/);
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.url, "https://codeq8.example.com/api/chat/runs/prompt");
@@ -2051,13 +2011,6 @@ test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
     assert.equal(calls[0]?.body?.run_id, "wcr_123");
     assert.equal(calls[0]?.body?.message_id, "wcm_123");
     assert.equal(calls[0]?.body?.codeq8_cli_available, true);
-    assert.deepEqual(calls[0]?.body?.auxiliary_repositories, [
-      {
-        repository: "Codeq8/codeq8-action",
-        access: "write",
-        local_path: "/tmp/aux/Codeq8__codeq8-action",
-      },
-    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -3070,13 +3023,13 @@ test("configureWorkspaceGitCredentialHelper clears inherited helpers before addi
     assert.match(helperScript, /resolveRequestedRepository/);
     assert.match(helperScript, /request\.path/);
     assert.match(helperScript, /workspace_repository: requestedRepository/);
-    assert.match(helperScript, /Refusing to request a cross-owner GitHub token/);
+    assert.match(helperScript, /Refusing to request a GitHub token for non-workspace repository/);
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
 });
 
-test("workspace git credential helper preserves aux repository identity with trailing git path slash", async (t) => {
+test("workspace git credential helper rejects non-workspace paths with trailing git path slash", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-credential-helper-"));
   const requests = [];
   const server = createServer((request, response) => {
@@ -3092,7 +3045,7 @@ test("workspace git credential helper preserves aux repository identity with tra
         body: JSON.parse(rawBody || "{}"),
       });
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ ok: true, token: "ghs_aux_token" }));
+      response.end(JSON.stringify({ ok: true, token: "ghs_unexpected_token" }));
     });
   });
   await new Promise((resolve, reject) => {
@@ -3132,14 +3085,13 @@ test("workspace git credential helper preserves aux repository identity with tra
       },
     });
 
-    assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stdout, /username=x-access-token/);
-    assert.match(result.stdout, /password=ghs_aux_token/);
-    assert.equal(requests[0]?.url, "/api/github/workspace-git-token");
-    assert.equal(requests[0]?.authorization, "Bearer scoped-run-token");
-    assert.deepEqual(requests[0]?.body, {
-      workspace_repository: "miniExtensions/webapp",
-    });
+    assert.notEqual(result.code, 0);
+    assert.equal(result.stdout, "");
+    assert.match(
+      result.stderr,
+      /Refusing to request a GitHub token for non-workspace repository miniExtensions\/webapp/,
+    );
+    assert.equal(requests.length, 0);
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
@@ -3199,115 +3151,6 @@ test("workspace git credential helper rejects unrecognized non-empty repository 
     assert.equal(requestCount, 0);
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
-  }
-});
-
-test("prepareAuxiliaryRepositories rejects cross-owner repositories before checkout", async () => {
-  const runtimeHomePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-aux-"));
-
-  try {
-    await assert.rejects(
-      prepareAuxiliaryRepositories({
-        auxiliaryRepositories: [{ repository: "OtherOrg/private-repo", access: "read" }],
-        primaryRepository: "Codeq8/Codeq8",
-        runtimeHomePath,
-        commandEnv: {
-          ...process.env,
-          CODEX_GITHUB_TOKEN_HELPER_PATH: path.join(runtimeHomePath, "helper.mjs"),
-        },
-      }),
-      /Refusing to checkout cross-owner auxiliary repository OtherOrg\/private-repo/,
-    );
-  } finally {
-    await fs.rm(runtimeHomePath, { recursive: true, force: true });
-  }
-});
-
-test("prepareAuxiliaryRepositories prepares on-demand helper without cloning", async () => {
-  const runtimeHomePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-aux-"));
-  const fakeGitBinPath = path.join(runtimeHomePath, "fake-git-bin");
-  const fakeGitLogPath = path.join(runtimeHomePath, "fake-git.log");
-  const commandEnv = {
-    ...process.env,
-    PATH: `${fakeGitBinPath}${path.delimiter}${process.env.PATH || ""}`,
-    CODEX_GITHUB_TOKEN_HELPER_PATH: path.join(runtimeHomePath, "helper.mjs"),
-    CODEQ8_FAKE_GIT_LOG: fakeGitLogPath,
-  };
-
-  try {
-    await fs.mkdir(fakeGitBinPath, { recursive: true });
-    const fakeGitPath = path.join(fakeGitBinPath, "git");
-    await fs.writeFile(
-      fakeGitPath,
-      [
-        "#!/bin/sh",
-        "set -eu",
-        'printf "%s\\n" "$*" >> "$CODEQ8_FAKE_GIT_LOG"',
-        "last_arg=",
-        'for arg in "$@"; do last_arg="$arg"; done',
-        'case " $* " in',
-        '  *" clone "*) mkdir -p "$last_arg/.git" ;;',
-        "esac",
-        "",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
-    await fs.chmod(fakeGitPath, 0o755);
-
-    const prepared = await prepareAuxiliaryRepositories({
-      auxiliaryRepositories: [
-        { repository: "Codeq8/codeq8-action", access: "write" },
-        { repository: "Codeq8/codeq8-utils", access: "read" },
-      ],
-      primaryRepository: "Codeq8/Codeq8",
-      runtimeHomePath,
-      commandEnv,
-    });
-
-    assert.equal(prepared.length, 2);
-    assert.equal(prepared[0]?.local_path, "");
-    assert.match(prepared[0]?.suggested_clone_path || "", /Codeq8__codeq8-action$/);
-    assert.equal(commandEnv.CODEQ8_AUX_REPOSITORY_ROOT, path.join(runtimeHomePath, "aux-repositories"));
-    assert.ok(commandEnv.CODEQ8_AUX_REPOSITORY_HELPER_PATH);
-    await assert.rejects(
-      fs.stat(prepared[0]?.suggested_clone_path || ""),
-      /ENOENT/,
-    );
-    await assert.rejects(
-      fs.stat(fakeGitLogPath),
-      /ENOENT/,
-    );
-
-    const listOutput = execFileSync(
-      commandEnv.CODEQ8_AUX_REPOSITORY_HELPER_PATH,
-      ["list", "--json"],
-      { env: commandEnv, encoding: "utf8" },
-    );
-    const listed = JSON.parse(listOutput);
-    assert.deepEqual(
-      listed.auxiliary_repositories.map((entry) => ({
-        repository: entry.repository,
-        access: entry.access,
-        cloned: entry.cloned,
-      })),
-      [
-        { repository: "Codeq8/codeq8-action", access: "write", cloned: false },
-        { repository: "Codeq8/codeq8-utils", access: "read", cloned: false },
-      ],
-    );
-
-    const clonedPath = execFileSync(
-      commandEnv.CODEQ8_AUX_REPOSITORY_HELPER_PATH,
-      ["clone", "Codeq8/codeq8-utils"],
-      { env: commandEnv, encoding: "utf8" },
-    ).trim();
-    assert.equal(clonedPath, prepared[1]?.suggested_clone_path);
-    assert.ok(await fs.stat(path.join(clonedPath, ".git")));
-    const fakeGitLog = await fs.readFile(fakeGitLogPath, "utf8");
-    assert.match(fakeGitLog, /clone --depth=1 https:\/\/github\.com\/Codeq8\/codeq8-utils\.git/);
-    assert.match(fakeGitLog, /remote set-url --push origin DISABLED_BY_CODEQ8_READ_ONLY_AUX_REPOSITORY/);
-  } finally {
-    await fs.rm(runtimeHomePath, { recursive: true, force: true });
   }
 });
 

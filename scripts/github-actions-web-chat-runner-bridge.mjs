@@ -10,7 +10,6 @@ import { normalizeBaseUrl } from "../lib/code-worker-url.mjs";
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const SOURCE_TYPE_VALUES = new Set(["default_branch", "pull_request", "branch"]);
-const AUXILIARY_REPOSITORY_ACCESS_VALUES = new Set(["read", "write"]);
 const RUNNER_SCRIPT_PATH = fileURLToPath(new URL("./web-chat-runner.mjs", import.meta.url));
 
 function normalizeText(value) {
@@ -32,44 +31,6 @@ function parsePositiveInteger(value, fallback = 0) {
 function normalizeRepository(value) {
   const normalized = normalizeText(value);
   return REPOSITORY_PATTERN.test(normalized) ? normalized : "";
-}
-
-function normalizeAuxiliaryRepositoryAccess(value) {
-  const normalized = normalizeText(value).toLowerCase();
-  return AUXILIARY_REPOSITORY_ACCESS_VALUES.has(normalized) ? normalized : "read";
-}
-
-function normalizeAuxiliaryRepositoryRecord(value) {
-  const normalized = normalizeObject(value);
-  const repository = normalizeRepository(
-    normalized.repository || normalized.workspace_repository || normalized.workspaceRepository,
-  );
-  if (!repository) {
-    return null;
-  }
-  return {
-    repository,
-    access: normalizeAuxiliaryRepositoryAccess(normalized.access),
-  };
-}
-
-function normalizeAuxiliaryRepositoryList(value) {
-  const candidates = Array.isArray(value) ? value : [];
-  const seen = new Set();
-  const repositories = [];
-  for (const candidate of candidates) {
-    const normalized = normalizeAuxiliaryRepositoryRecord(candidate);
-    if (!normalized) {
-      continue;
-    }
-    const key = normalized.repository.toLowerCase();
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    repositories.push(normalized);
-  }
-  return repositories;
 }
 
 function normalizeSourceType(value) {
@@ -171,13 +132,6 @@ export function normalizeGitHubActionsChatRunPayload(value) {
     (normalized.referenced_threads || normalized.referencedThreads).length > 0
       ? normalized.referenced_threads || normalized.referencedThreads
       : [];
-  const auxiliaryRepositories = normalizeAuxiliaryRepositoryList(
-    normalized.auxiliary_repositories ||
-      normalized.auxiliaryRepositories ||
-      normalized.aux_repositories ||
-      normalized.auxRepositories ||
-      [],
-  );
 
   return {
     run_id: normalizeText(normalized.run_id || normalized.runId),
@@ -219,13 +173,6 @@ export function normalizeGitHubActionsChatRunPayload(value) {
       normalizeText(
         normalized.referenced_threads_json || normalized.referencedThreadsJson,
       ) || stringifyJson(referencedThreads),
-    auxiliary_repositories_json:
-      normalizeText(
-        normalized.auxiliary_repositories_json ||
-          normalized.auxiliaryRepositoriesJson ||
-          normalized.aux_repositories_json ||
-          normalized.auxRepositoriesJson,
-      ) || stringifyJson(auxiliaryRepositories),
     workspace_path: normalizeText(
       normalized.workspace_path || normalized.workspacePath,
     ),
@@ -340,8 +287,6 @@ export function buildWebChatRunnerEnv({
       normalizedPayload.recent_checks_prompt_text,
     CODE_CHAT_REFERENCED_THREADS_JSON:
       normalizedPayload.referenced_threads_json,
-    CODE_CHAT_AUXILIARY_REPOSITORIES_JSON:
-      normalizedPayload.auxiliary_repositories_json,
     CODE_CHAT_DEFAULT_BRANCH: normalizedPayload.branch_context.default_branch,
     CODE_CHAT_PROTECTED_BRANCHES: stringifyJson(
       normalizedPayload.branch_context.protected_branches,
