@@ -935,6 +935,93 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
   assert.equal(goalUpdates[0]?.body?.goal?.objective, "Ship native Codeq8 goal support");
 });
 
+test("runCodex preserves the web goal when the final AppServer goal read is empty", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-goal-empty-read-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  const goalUpdates = [];
+  const server = createServer((request, response) => {
+    let rawBody = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      rawBody += chunk;
+    });
+    request.on("end", () => {
+      if (request.url === "/api/chat/runs/goal") {
+        goalUpdates.push({
+          url: request.url,
+          authorization: request.headers.authorization,
+          body: JSON.parse(rawBody || "{}"),
+        });
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true, contract_version: CONTRACT_VERSION }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  t.after(async () => {
+    server.close();
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    requestsOutputPath,
+    agentMessage: "empty goal read ok",
+    goalGetReturnsEmpty: true,
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  assert.ok(address);
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "continue the goal",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+    },
+    timeoutSeconds: 30,
+    codexThreadGoalsEnabled: true,
+    codexGoalState: {
+      objective: "Keep the Codeq8 web goal durable",
+      status: "active",
+      token_budget: null,
+      tokens_used: 0,
+      time_used_seconds: 0,
+      created_at: 900,
+      updated_at: 950,
+    },
+    appServerContext: {
+      publicBaseUrl: `http://127.0.0.1:${address.port}`,
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "empty goal read ok");
+  assert.equal(result.codexGoalState.objective, "Keep the Codeq8 web goal durable");
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  assert.equal(
+    requests.some((request) => request.method === "thread/goal/set"),
+    true,
+  );
+  assert.equal(
+    requests.some((request) => request.method === "thread/goal/get"),
+    true,
+  );
+  assert.equal(goalUpdates.length, 0);
+});
+
 test("runCodex materializes AppServer steer attachments before forwarding them", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-steer-attachments-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
@@ -2001,6 +2088,7 @@ async function writeFakeCodexAppServer(
     agentMessage = "done",
     commandLabel = "npm test",
     delayTurnCompletionMs = 0,
+    goalGetReturnsEmpty = false,
   } = {},
 ) {
   await fs.writeFile(
@@ -2015,6 +2103,7 @@ async function writeFakeCodexAppServer(
       `const agentMessage = ${JSON.stringify(agentMessage)};`,
       `const commandLabel = ${JSON.stringify(commandLabel)};`,
       `const delayTurnCompletionMs = ${JSON.stringify(delayTurnCompletionMs)};`,
+      `const goalGetReturnsEmpty = ${JSON.stringify(goalGetReturnsEmpty)};`,
       "const agentMessages = Array.isArray(agentMessage) ? agentMessage : [agentMessage];",
       "if (argsOutputPath) await fs.writeFile(argsOutputPath, JSON.stringify(process.argv.slice(2)), 'utf8');",
       "if (envOutputPath) await fs.writeFile(envOutputPath, process.env.NODE_OPTIONS || '', 'utf8');",
@@ -2046,7 +2135,7 @@ async function writeFakeCodexAppServer(
       "    };",
       "    send({ id: message.id, result: { goal } });",
       "  }",
-      "  if (message.method === 'thread/goal/get') send({ id: message.id, result: { goal } });",
+      "  if (message.method === 'thread/goal/get') send({ id: message.id, result: goalGetReturnsEmpty ? {} : { goal } });",
       "  if (message.method === 'thread/goal/clear') { goal = null; send({ id: message.id, result: { cleared: true } }); }",
       "  if (message.method === 'turn/start') {",
       "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",

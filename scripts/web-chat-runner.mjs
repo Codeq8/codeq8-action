@@ -1892,10 +1892,12 @@ function createCodexGoalReporter({
       recordCleared: () => {},
       flush: async () => {},
       latestGoalState: () => normalizeCodexGoalState(null),
+      wasCleared: () => false,
     };
   }
 
   let latestGoalState = normalizeCodexGoalState(null);
+  let cleared = false;
   let lastSignature = "";
   let inFlight = null;
   let queued = null;
@@ -1973,9 +1975,11 @@ function createCodexGoalReporter({
 
   return {
     recordUpdated(goalState) {
+      cleared = false;
       enqueue({ event: "updated", goalState });
     },
     recordCleared() {
+      cleared = true;
       enqueue({ event: "cleared", goalState: null });
     },
     async flush() {
@@ -1990,6 +1994,9 @@ function createCodexGoalReporter({
     },
     latestGoalState() {
       return latestGoalState;
+    },
+    wasCleared() {
+      return cleared;
     },
   };
 }
@@ -7989,13 +7996,16 @@ async function runCodexAppServer({
             return goalState;
           }
         }
-        if (
-          hasCodexGoalObjective(normalizedCodexGoalState) ||
-          hasCodexGoalObjective(goalReporter.latestGoalState())
-        ) {
-          goalReporter.recordCleared();
+        if (goalReporter.wasCleared()) {
+          return normalizeCodexGoalState(null);
         }
-        return normalizeCodexGoalState(null);
+        const latestReportedGoalState = goalReporter.latestGoalState();
+        if (hasCodexGoalObjective(latestReportedGoalState)) {
+          return latestReportedGoalState;
+        }
+        return hasCodexGoalObjective(normalizedCodexGoalState)
+          ? normalizedCodexGoalState
+          : normalizeCodexGoalState(null);
       } catch (error) {
         await maybeReportGoalSyncFailure({
           event: "runner_codex_goal_final_read_failed",
