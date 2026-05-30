@@ -6207,17 +6207,79 @@ function isAppServerAgentMessageItem(params) {
   return /agent|assistant/.test(itemType);
 }
 
+function buildAppServerProgressEventId({
+  itemId = "",
+  itemType = "",
+  label = "",
+  now = Date.now(),
+} = {}) {
+  const normalizedItemId = normalizeText(itemId);
+  if (normalizedItemId) {
+    return `app_server:agent_message:${hashDiagnosticValue(normalizedItemId).slice(0, 16)}`;
+  }
+  return `app_server:${now}:agent_message:${hashDiagnosticValue(
+    `${normalizeText(itemType)}:${normalizeText(label)}`,
+  ).slice(0, 12)}`;
+}
+
+function appServerProgressEventDeduplicationKey(event) {
+  const normalized = normalizeObject(event);
+  const eventId = normalizeText(normalized.event_id);
+  if (eventId) {
+    return `id:${eventId}`;
+  }
+  return [
+    "shape",
+    normalizeText(normalized.kind),
+    normalizeText(normalized.item_type),
+    normalizeText(normalized.status),
+    normalizeText(normalized.label),
+  ].join(":");
+}
+
+function compactAppServerProgressEvents(events) {
+  const compacted = [];
+  const seenKeys = new Set();
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = normalizeObject(events[index]);
+    if (!normalizeText(event.kind)) {
+      continue;
+    }
+    const key = appServerProgressEventDeduplicationKey(event);
+    if (seenKeys.has(key)) {
+      continue;
+    }
+    seenKeys.add(key);
+    compacted.push(event);
+  }
+  return compacted.reverse();
+}
+
 function summarizeAppServerProgressNotification({
   method,
   params,
+  itemId = "",
+  itemType = "",
   label = "",
   now = Date.now(),
 }) {
   const normalizedMethod = normalizeAppServerMethod(method);
   const object = normalizeObject(params);
   const item = normalizeObject(object.item);
-  const itemType = normalizeText(item.type || object.type || "").toLowerCase();
-  if (normalizedMethod !== "item/completed" || !isAppServerAgentMessageItem(params)) {
+  const normalizedItemType = normalizeText(
+    itemType ||
+      item.type ||
+      item.kind ||
+      object.type ||
+      object.kind ||
+      object.itemType ||
+      object.item_type ||
+      "agent_message",
+  ).toLowerCase();
+  const isAgentDelta = normalizedMethod === "item/agentMessage/delta";
+  const isAgentCompletion =
+    normalizedMethod === "item/completed" && isAppServerAgentMessageItem(params);
+  if (!isAgentDelta && !isAgentCompletion) {
     return null;
   }
   const itemLabel = truncateWithEllipsis(
@@ -6226,11 +6288,16 @@ function summarizeAppServerProgressNotification({
   );
   return itemLabel
     ? {
-        event_id: `app_server:${now}:agent_message:${hashDiagnosticValue(itemLabel).slice(0, 12)}`,
-        kind: "item_completed",
-        item_type: itemType || "agent_message",
+        event_id: buildAppServerProgressEventId({
+          itemId: itemId || extractAppServerItemId(params),
+          itemType: normalizedItemType,
+          label: itemLabel,
+          now,
+        }),
+        kind: "item",
+        item_type: normalizedItemType || "agent_message",
         label: itemLabel,
-        status: "completed",
+        status: isAgentCompletion ? "completed" : "in_progress",
         at: now,
       }
     : null;
@@ -6560,7 +6627,6 @@ function createAppServerFirestoreProgressReporter({
   let flushing = false;
   let flushWaiters = [];
   let progressEvents = [];
-  let reportedEventCount = 0;
 
   const waitForActiveFlush = () =>
     new Promise((resolve) => {
@@ -6583,10 +6649,10 @@ function createAppServerFirestoreProgressReporter({
     const batch = queued.slice(0, APP_SERVER_PROGRESS_MAX_BATCH_SIZE);
     queued = queued.slice(APP_SERVER_PROGRESS_MAX_BATCH_SIZE);
     try {
-      progressEvents = [...progressEvents, ...batch]
-        .map((event) => normalizeObject(event))
-        .filter((event) => normalizeText(event.kind))
-        .slice(-APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN);
+      progressEvents = compactAppServerProgressEvents([
+        ...progressEvents,
+        ...batch,
+      ]).slice(-APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN);
       const now = Date.now();
       await updateDocImpl(
         docRef,
@@ -6635,10 +6701,6 @@ function createAppServerFirestoreProgressReporter({
       if (!normalizeText(normalizedEvent.kind)) {
         return;
       }
-      if (reportedEventCount >= APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN) {
-        return;
-      }
-      reportedEventCount += 1;
       queued.push(normalizedEvent);
       queued = queued.slice(-50);
       if (!timer) {
@@ -7193,6 +7255,7 @@ async function runCodexAppServer({
     let stderr = "";
     let currentAgentMessageItemId = "";
     let currentAgentMessageOutput = "";
+    let currentAgentMessageProgressItemId = "";
     let lastAgentMessageOutput = "";
     let agentMessageSequence = 0;
     let timedOut = false;
@@ -7239,6 +7302,7 @@ async function runCodexAppServer({
       if (itemId !== currentAgentMessageItemId) {
         currentAgentMessageItemId = itemId;
         currentAgentMessageOutput = "";
+        currentAgentMessageProgressItemId = "";
       }
     };
 
@@ -7260,6 +7324,7 @@ async function runCodexAppServer({
       if (itemId && itemId !== currentAgentMessageItemId) {
         currentAgentMessageItemId = itemId;
         currentAgentMessageOutput = "";
+        currentAgentMessageProgressItemId = "";
       }
       const output = completedText || currentAgentMessageOutput;
       if (output) {
@@ -7512,16 +7577,38 @@ async function runCodexAppServer({
       }
       if (normalizedMethod === "item/agentMessage/delta") {
         appendAgentMessageDelta(params);
-      }
-      if (normalizedMethod === "item/completed" && isAppServerAgentMessageItem(params)) {
-        completeAgentMessage(params);
         const progressEvent = summarizeAppServerProgressNotification({
           method: normalizedMethod,
           params,
-          label: getAssistantOutput(),
+          itemId: currentAgentMessageItemId,
+          itemType: "agent_message",
+          label: currentAgentMessageOutput,
         });
         if (progressEvent) {
+          currentAgentMessageProgressItemId =
+            currentAgentMessageItemId || extractAppServerItemId(params);
           progressReporter.enqueue(progressEvent);
+        }
+      }
+      if (normalizedMethod === "item/completed" && isAppServerAgentMessageItem(params)) {
+        const completedItemId = extractAppServerItemId(params) || currentAgentMessageItemId;
+        const outputBeforeCompletion = currentAgentMessageOutput;
+        const progressAlreadyReported =
+          Boolean(currentAgentMessageProgressItemId) &&
+          currentAgentMessageProgressItemId === completedItemId;
+        const completedText = extractAppServerCompletedAgentText(params);
+        completeAgentMessage(params);
+        if (!progressAlreadyReported || (completedText && completedText !== outputBeforeCompletion)) {
+          const progressEvent = summarizeAppServerProgressNotification({
+            method: normalizedMethod,
+            params,
+            itemId: completedItemId,
+            label: getAssistantOutput(),
+          });
+          if (progressEvent) {
+            currentAgentMessageProgressItemId = completedItemId;
+            progressReporter.enqueue(progressEvent);
+          }
         }
       }
       if (normalizedMethod === "turn/completed") {

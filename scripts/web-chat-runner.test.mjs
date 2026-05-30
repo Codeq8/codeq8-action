@@ -1811,6 +1811,7 @@ test("runCodex preserves AppServer agent delta whitespace", async (t) => {
     ],
   });
 
+  const progressEvents = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
     model: "gpt-5.5",
@@ -1818,10 +1819,32 @@ test("runCodex preserves AppServer agent delta whitespace", async (t) => {
     workspacePath,
     commandEnv: process.env,
     timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "runner_token",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue(event) {
+            progressEvents.push(event);
+          },
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+      }),
+    },
   });
 
   assert.equal(result.ok, true);
   assert.equal(result.output, "Yes, I'm getting it. This run is targeting PR #1698.");
+  assert(progressEvents.length > 1);
+  assert.equal(progressEvents.at(-1)?.label, "Yes, I'm getting it. This run is targeting PR #1698.");
+  assert.equal(new Set(progressEvents.map((event) => event.event_id)).size, 1);
 });
 
 test("runCodex returns only the last AppServer agent message", async (t) => {
