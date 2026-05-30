@@ -2748,6 +2748,175 @@ test("persistWorkspaceProgress explicitly pushes remembered branches that are ah
   }
 });
 
+test("persistWorkspaceProgress rebases and retries remembered branch push after remote branch advances", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-push-rebase-"));
+  const remotePath = path.join(tempRoot, "remote.git");
+  const seedPath = path.join(tempRoot, "seed");
+  const workspacePath = path.join(tempRoot, "workspace");
+  const originalFetch = globalThis.fetch;
+
+  try {
+    globalThis.fetch = async () => Response.json([]);
+    git(tempRoot, ["init", "--bare", remotePath]);
+    await fs.mkdir(seedPath, { recursive: true });
+    git(seedPath, ["init"]);
+    git(seedPath, ["checkout", "-b", "main"]);
+    git(seedPath, ["config", "user.name", "Codeq8 Test"]);
+    git(seedPath, ["config", "user.email", "codeq8@example.com"]);
+    await fs.writeFile(path.join(seedPath, "README.md"), "seed\n");
+    git(seedPath, ["add", "README.md"]);
+    git(seedPath, ["commit", "-m", "Initial commit"]);
+    git(seedPath, ["remote", "add", "origin", remotePath]);
+    git(seedPath, ["push", "-u", "origin", "main"]);
+
+    git(tempRoot, ["clone", remotePath, workspacePath]);
+    git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
+    git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
+    git(workspacePath, ["checkout", "-b", "feature/test", "origin/main"]);
+    await fs.writeFile(path.join(workspacePath, "feature.txt"), "v1\n");
+    git(workspacePath, ["add", "feature.txt"]);
+    git(workspacePath, ["commit", "-m", "Feature start"]);
+    git(workspacePath, ["push", "-u", "origin", "feature/test"]);
+
+    await fs.writeFile(path.join(workspacePath, "feature.txt"), "local\n");
+    git(workspacePath, ["add", "feature.txt"]);
+    git(workspacePath, ["commit", "-m", "Local follow-up"]);
+
+    git(seedPath, ["fetch", "origin", "feature/test:feature/test"]);
+    git(seedPath, ["checkout", "feature/test"]);
+    await fs.writeFile(path.join(seedPath, "remote.txt"), "remote\n");
+    git(seedPath, ["add", "remote.txt"]);
+    git(seedPath, ["commit", "-m", "Remote branch update"]);
+    git(seedPath, ["push", "origin", "feature/test"]);
+
+    const result = await persistWorkspaceProgress({
+      workspacePath,
+      commandEnv: process.env,
+      sourceType: "default_branch",
+      branch: "feature/test",
+      writeMode: "branch_and_pr",
+      repository: "Codeq8/codeq8-action",
+      headRepository: "Codeq8/codeq8-action",
+      baseBranch: "main",
+      gitToken: "github-token",
+      protectedBranches: ["main"],
+      baselineState: null,
+      threadId: "wct_rebase",
+      runId: "wcr_rebase",
+    });
+
+    assert.equal(result.error, "");
+    assert.equal(result.pendingRemoteSync, "");
+    assert.equal(result.pushed, true);
+    assert.equal(result.rescueBranch, "");
+    assert.equal(result.resolvedWriteBranch, "feature/test");
+    assert.equal(readAheadCount(workspacePath, "feature/test"), 0);
+    assert.equal(
+      execFileSync("git", ["show", "feature/test:feature.txt"], {
+        cwd: workspacePath,
+        env: process.env,
+        encoding: "utf8",
+      }),
+      "local\n",
+    );
+    assert.equal(
+      execFileSync("git", ["show", "feature/test:remote.txt"], {
+        cwd: workspacePath,
+        env: process.env,
+        encoding: "utf8",
+      }),
+      "remote\n",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("persistWorkspaceProgress backs up remembered branch when non-fast-forward rebase is unsafe", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-push-rescue-"));
+  const remotePath = path.join(tempRoot, "remote.git");
+  const seedPath = path.join(tempRoot, "seed");
+  const workspacePath = path.join(tempRoot, "workspace");
+
+  try {
+    git(tempRoot, ["init", "--bare", remotePath]);
+    await fs.mkdir(seedPath, { recursive: true });
+    git(seedPath, ["init"]);
+    git(seedPath, ["checkout", "-b", "main"]);
+    git(seedPath, ["config", "user.name", "Codeq8 Test"]);
+    git(seedPath, ["config", "user.email", "codeq8@example.com"]);
+    await fs.writeFile(path.join(seedPath, "README.md"), "seed\n");
+    git(seedPath, ["add", "README.md"]);
+    git(seedPath, ["commit", "-m", "Initial commit"]);
+    git(seedPath, ["remote", "add", "origin", remotePath]);
+    git(seedPath, ["push", "-u", "origin", "main"]);
+
+    git(tempRoot, ["clone", remotePath, workspacePath]);
+    git(workspacePath, ["config", "user.name", "Codeq8 Test"]);
+    git(workspacePath, ["config", "user.email", "codeq8@example.com"]);
+    git(workspacePath, ["checkout", "-b", "feature/test", "origin/main"]);
+    await fs.writeFile(path.join(workspacePath, "feature.txt"), "v1\n");
+    git(workspacePath, ["add", "feature.txt"]);
+    git(workspacePath, ["commit", "-m", "Feature start"]);
+    git(workspacePath, ["push", "-u", "origin", "feature/test"]);
+
+    await fs.writeFile(path.join(workspacePath, "feature.txt"), "local\n");
+    git(workspacePath, ["add", "feature.txt"]);
+    git(workspacePath, ["commit", "-m", "Local follow-up"]);
+    await fs.writeFile(path.join(workspacePath, "dirty.txt"), "dirty\n");
+
+    git(seedPath, ["fetch", "origin", "feature/test:feature/test"]);
+    git(seedPath, ["checkout", "feature/test"]);
+    await fs.writeFile(path.join(seedPath, "remote.txt"), "remote\n");
+    git(seedPath, ["add", "remote.txt"]);
+    git(seedPath, ["commit", "-m", "Remote branch update"]);
+    git(seedPath, ["push", "origin", "feature/test"]);
+
+    const result = await persistWorkspaceProgress({
+      workspacePath,
+      commandEnv: process.env,
+      sourceType: "default_branch",
+      branch: "feature/test",
+      writeMode: "branch_and_pr",
+      repository: "Codeq8/codeq8-action",
+      headRepository: "Codeq8/codeq8-action",
+      baseBranch: "main",
+      gitToken: "github-token",
+      protectedBranches: ["main"],
+      baselineState: null,
+      threadId: "wct_push_rescue",
+      runId: "wcr_push_rescue",
+    });
+
+    const rescueBranch = "codeq8/rescue/wct_push_rescue/wcr_push_rescue";
+    const remoteHeads = execFileSync(
+      "git",
+      ["ls-remote", "--heads", "origin", rescueBranch],
+      { cwd: workspacePath, env: process.env, encoding: "utf8" },
+    );
+
+    assert.equal(result.error, "");
+    assert.equal(result.pendingRemoteSync, "");
+    assert.equal(result.pushed, true);
+    assert.equal(result.rescueBranch, rescueBranch);
+    assert.equal(result.rescueOriginalBranch, "feature/test");
+    assert.equal(result.rescuedDirtyWork, true);
+    assert.equal(result.resolvedWriteBranch, rescueBranch);
+    assert.match(remoteHeads.trim(), new RegExp(`refs/heads/${rescueBranch}$`));
+    assert.equal(
+      execFileSync("git", ["show", `${rescueBranch}:dirty.txt`], {
+        cwd: workspacePath,
+        env: process.env,
+        encoding: "utf8",
+      }),
+      "dirty\n",
+    );
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("persistWorkspaceProgress pushes committed new remembered branches even with dirty artifacts", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-persist-new-dirty-"));
   const remotePath = path.join(tempRoot, "remote.git");

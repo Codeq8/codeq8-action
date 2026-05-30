@@ -7791,6 +7791,94 @@ function summarizeGitProcessFailure(result) {
   return stderr || stdout || `git exited with code ${result?.code ?? -1}`;
 }
 
+function isNonFastForwardPushFailure(result) {
+  const combined = `${normalizeText(result?.stdout)}\n${normalizeText(result?.stderr)}`.toLowerCase();
+  if (!combined) {
+    return false;
+  }
+  return (
+    combined.includes("non-fast-forward") ||
+    combined.includes("(fetch first)") ||
+    combined.includes("fetch first") ||
+    (
+      combined.includes("updates were rejected") &&
+      (
+        combined.includes("remote contains work") ||
+        combined.includes("behind its remote counterpart")
+      )
+    )
+  );
+}
+
+async function rebaseRememberedThreadBranchOnOrigin({
+  workspacePath,
+  commandEnv,
+  branch,
+}) {
+  const normalizedBranch = normalizeBranchName(branch);
+  if (!normalizedBranch) {
+    return {
+      ok: false,
+      error: "Working branch name is empty.",
+    };
+  }
+
+  const hasWorkingTreeChanges = await workingTreeHasChanges({
+    workspacePath,
+    commandEnv,
+  }).catch(() => true);
+  if (hasWorkingTreeChanges) {
+    return {
+      ok: false,
+      error: `Workspace has uncommitted changes; skipping automatic rebase of ${normalizedBranch}.`,
+    };
+  }
+
+  const fetched = await runProcessCapture(
+    "git",
+    [
+      "fetch",
+      "--no-tags",
+      "origin",
+      `+refs/heads/${normalizedBranch}:refs/remotes/origin/${normalizedBranch}`,
+    ],
+    {
+      cwd: workspacePath,
+      env: commandEnv,
+    },
+  );
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      error: `Unable to fetch origin/${normalizedBranch}: ${summarizeGitProcessFailure(fetched)}`,
+    };
+  }
+
+  const rebased = await runProcessCapture(
+    "git",
+    ["rebase", `origin/${normalizedBranch}`],
+    {
+      cwd: workspacePath,
+      env: commandEnv,
+    },
+  );
+  if (!rebased.ok) {
+    await runProcessCapture("git", ["rebase", "--abort"], {
+      cwd: workspacePath,
+      env: commandEnv,
+    }).catch(() => {});
+    return {
+      ok: false,
+      error: `Unable to rebase ${normalizedBranch} on origin/${normalizedBranch}: ${summarizeGitProcessFailure(rebased)}`,
+    };
+  }
+
+  return {
+    ok: true,
+    error: "",
+  };
+}
+
 async function pushRememberedThreadBranch({
   workspacePath,
   commandEnv,
@@ -7805,9 +7893,9 @@ async function pushRememberedThreadBranch({
   }
 
   // Remembered thread branches are the only place where the runner is allowed
-  // to rescue committed work Codex forgot to push. Keep this to one explicit
-  // push on the checked-out branch so AJ does not lose local commits to a
-  // prompt slip, but do not turn it into generic divergence resolution.
+  // to rescue committed work Codex forgot to push. Prefer one explicit push on
+  // the checked-out branch, and only rebase once when Git tells us the remote
+  // advanced first.
   const pushed = await runProcessCapture(
     "git",
     ["push", "--set-upstream", "origin", `HEAD:refs/heads/${normalizedBranch}`],
@@ -7817,9 +7905,47 @@ async function pushRememberedThreadBranch({
     },
   );
   if (!pushed.ok) {
+    if (!isNonFastForwardPushFailure(pushed)) {
+      return {
+        ok: false,
+        error: `Unable to push ${normalizedBranch}: ${summarizeGitProcessFailure(pushed)}`,
+        needsRescue: false,
+      };
+    }
+
+    const rebase = await rebaseRememberedThreadBranchOnOrigin({
+      workspacePath,
+      commandEnv,
+      branch: normalizedBranch,
+    });
+    if (!rebase.ok) {
+      return {
+        ok: false,
+        error: `Unable to push ${normalizedBranch}: ${summarizeGitProcessFailure(pushed)} ${rebase.error}`,
+        needsRescue: true,
+      };
+    }
+
+    const retried = await runProcessCapture(
+      "git",
+      ["push", "--set-upstream", "origin", `HEAD:refs/heads/${normalizedBranch}`],
+      {
+        cwd: workspacePath,
+        env: commandEnv,
+      },
+    );
+    if (!retried.ok) {
+      return {
+        ok: false,
+        error: `Unable to push ${normalizedBranch} after rebasing on origin/${normalizedBranch}: ${summarizeGitProcessFailure(retried)}`,
+        needsRescue: isNonFastForwardPushFailure(retried),
+      };
+    }
+
     return {
-      ok: false,
-      error: `Unable to push ${normalizedBranch}: ${summarizeGitProcessFailure(pushed)}`,
+      ok: true,
+      error: "",
+      rebased: true,
     };
   }
 
@@ -8266,6 +8392,33 @@ async function persistWorkspaceProgress({
         branch: normalizedBranch,
       });
       if (!pushed.ok) {
+        if (pushed.needsRescue) {
+          const rescued = await pushWorkspaceRescueBranch({
+            workspacePath,
+            commandEnv,
+            branch: normalizedBranch,
+            threadId,
+            runId,
+            rescueReason: pushed.error,
+          });
+          if (rescued.ok) {
+            result.pushed = true;
+            result.rescueBranch = rescued.branch;
+            result.rescueOriginalBranch = rescued.originalBranch;
+            result.rescueCommitSha = rescued.commitSha;
+            result.rescuedDirtyWork = rescued.committedDirtyWork;
+            result.resolvedWriteBranch = rescued.branch;
+            currentState = await readWorkspacePersistenceState({
+              workspacePath,
+              commandEnv,
+              branch: rescued.branch,
+            });
+            return result;
+          }
+          result.pendingRemoteSync = `${pushed.error} ${rescued.error}`.trim();
+          result.error = result.pendingRemoteSync;
+          return result;
+        }
         result.pendingRemoteSync = pushed.error;
         result.error = pushed.error;
         return result;
