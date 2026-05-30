@@ -727,6 +727,7 @@ function isRecoverableCodexSessionErrorState(value) {
     /failed to update web chat codex session state/i.test(normalized) ||
     /web chat codex session revision conflict/i.test(normalized) ||
     /codex run finished without creating a session bundle/i.test(normalized) ||
+    /WEB_CHAT_CODEX_SESSION_MASTER_KEY is missing/i.test(normalized) ||
     /web_chat_session_bundles/i.test(normalized) ||
     /unexpected non-whitespace character after JSON at position/i.test(normalized) ||
     /stored codex session bundle is still wrapped in the encrypted storage envelope/i.test(

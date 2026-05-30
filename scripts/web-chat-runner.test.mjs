@@ -3729,6 +3729,25 @@ test("isRecoverableCodexSessionErrorState treats worker fetch failures as recove
   );
 });
 
+test("isRecoverableCodexSessionErrorState treats missing session keys as recoverable stale session state", () => {
+  assert.equal(
+    isRecoverableCodexSessionErrorState("WEB_CHAT_CODEX_SESSION_MASTER_KEY is missing."),
+    true,
+  );
+  assert.equal(
+    isRecoverableCodexSessionErrorState(
+      "Codex session state is in error status: WEB_CHAT_CODEX_SESSION_MASTER_KEY is missing.",
+    ),
+    true,
+  );
+  assert.equal(
+    isRecoverableCodexSessionErrorState(
+      "Codex session state is in error status: Codex session state is in error status: WEB_CHAT_CODEX_SESSION_MASTER_KEY is missing.",
+    ),
+    true,
+  );
+});
+
 test("superseded web chat runs do not poison Codex session state", () => {
   const message =
     "Codex session state is in error status: Run wcr_098550d0-7874-4f2e-856b-433034c63793 was superseded by a newer message.";
