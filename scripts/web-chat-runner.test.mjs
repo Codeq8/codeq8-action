@@ -58,6 +58,7 @@ import {
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
+  fetchJson,
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
@@ -106,6 +107,34 @@ test("runtime manifest baseline matches the public startup contract", () => {
 
 test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
   assert.equal(DEFAULT_TIMEOUT_SECONDS, 72 * 60 * 60);
+});
+
+test("JSON control-plane requests fail fast instead of waiting on platform timeouts", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init = {}) =>
+    new Promise((_resolve, reject) => {
+      const guard = setTimeout(() => reject(new Error("fetch did not abort")), 1000);
+      init.signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(guard);
+          reject(init.signal.reason || new Error("aborted"));
+        },
+        { once: true },
+      );
+    });
+
+  try {
+    await assert.rejects(
+      fetchJson("https://example.test/web-chat/codex-session/get", {
+        method: "GET",
+        timeoutMs: 5,
+      }),
+      /JSON request timed out after 5ms/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("AppServer live bridge uses Firestore instead of runner HTTP polling", async () => {

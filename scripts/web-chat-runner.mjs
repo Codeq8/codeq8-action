@@ -46,6 +46,7 @@ const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
 const DEFAULT_CODEX_MODEL = "gpt-5.5";
 const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
 const DEFAULT_TIMEOUT_SECONDS = 72 * 60 * 60;
+const DEFAULT_FETCH_JSON_TIMEOUT_MS = 15_000;
 const DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT = "1";
 const DEFAULT_GIT_HTTP_LOW_SPEED_TIME = "45";
 const MAX_MESSAGE_CHARS = 2000;
@@ -1308,27 +1309,83 @@ async function runProcessCapture(command, args, { cwd, env, stdinText = "" } = {
   });
 }
 
-async function fetchJson(url, init = {}) {
-  const response = await fetch(url, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      ...(init.headers || {}),
-    },
-    cache: "no-store",
-  });
+function createFetchTimeoutSignal(timeoutMs) {
+  const timeout = parsePositiveInteger(timeoutMs, DEFAULT_FETCH_JSON_TIMEOUT_MS);
+  if (!timeout) {
+    return { controller: null, signal: null, cleanup: () => {} };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`Request timed out after ${timeout}ms.`));
+  }, timeout);
+  timer.unref?.();
+  return {
+    controller,
+    signal: controller.signal,
+    cleanup: () => clearTimeout(timer),
+  };
+}
 
+async function fetchJson(url, init = {}) {
+  const { timeoutMs = DEFAULT_FETCH_JSON_TIMEOUT_MS, signal: providedSignal, ...fetchInit } = init;
+  const timeoutSignal = createFetchTimeoutSignal(timeoutMs);
+  let abortProvidedSignal = () => {};
+  if (providedSignal) {
+    if (providedSignal.aborted) {
+      timeoutSignal.cleanup();
+      throw providedSignal.reason || new Error("Request was aborted.");
+    }
+    abortProvidedSignal = () => {
+      timeoutSignal.controller?.abort(
+        providedSignal.reason || new Error("Request was aborted."),
+      );
+    };
+    providedSignal.addEventListener("abort", abortProvidedSignal, { once: true });
+  }
+
+  let response;
   let payload = {};
   let textBody = "";
   try {
-    payload = await response.json();
-  } catch {
+    response = await fetch(url, {
+      ...fetchInit,
+      headers: {
+        Accept: "application/json",
+        ...(fetchInit.headers || {}),
+      },
+      cache: "no-store",
+      signal: timeoutSignal.signal || providedSignal || undefined,
+    });
+
     try {
-      textBody = await response.text();
-    } catch {
-      textBody = "";
+      payload = await response.json();
+    } catch (jsonError) {
+      if (providedSignal?.aborted || timeoutSignal.signal?.aborted) {
+        throw jsonError;
+      }
+      try {
+        textBody = await response.text();
+      } catch (textError) {
+        if (providedSignal?.aborted || timeoutSignal.signal?.aborted) {
+          throw textError;
+        }
+        textBody = "";
+      }
+      payload = {};
     }
-    payload = {};
+  } catch (error) {
+    if (providedSignal?.aborted) {
+      throw providedSignal.reason || error;
+    }
+    if (timeoutSignal.signal?.aborted) {
+      throw new Error(`JSON request timed out after ${timeoutMs}ms: ${url}`);
+    }
+    throw error;
+  } finally {
+    timeoutSignal.cleanup();
+    if (providedSignal) {
+      providedSignal.removeEventListener("abort", abortProvidedSignal);
+    }
   }
 
   return {
@@ -10266,6 +10323,7 @@ export {
   shouldTreatCodexFailureAsCompleted,
   stripLeadingCodexTransportNoise,
   extractUserVisibleFailureHeadline,
+  fetchJson,
   saveServerOwnedCodeq8File,
   toUserVisibleRunnerFailureMessage,
 };
