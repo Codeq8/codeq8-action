@@ -47,6 +47,7 @@ import {
   prepareWebChatCodexSessionUpload,
   readFirebaseStorageAttachment,
   readFirebaseStorageSignedAttachment,
+  readWebChatCodexSessionState,
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
   runCodex,
@@ -80,6 +81,8 @@ const STARTUP_REQUIRED_RUNTIME_PATHS = Object.freeze([
   "/web-chat/attachments/get",
   "/web-chat/attachments/read-url",
   "/web-chat/codex-session/get",
+  "/web-chat/codex-session/read-url",
+  "/web-chat/codex-session/unwrap-key",
   "/web-chat/codex-session/upload-prepare",
   "/web-chat/codex-session/upload-direct",
   "/web-chat/codex-session/upload-discard",
@@ -1537,6 +1540,8 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/api/chat/runs/codeq8-file/save",
         "/web-chat/attachments/get",
         "/web-chat/codex-session/get",
+        "/web-chat/codex-session/read-url",
+        "/web-chat/codex-session/unwrap-key",
         "/web-chat/codex-session/upload-prepare",
         "/web-chat/codex-session/upload-discard",
         "/web-chat/codex-session/upsert",
@@ -1594,6 +1599,8 @@ test("assertWebChatRunnerRuntimeCompatibility accepts AppServer turn-control man
         "/api/chat/runs/app-server/firebase-session",
         "/web-chat/attachments/get",
         "/web-chat/codex-session/get",
+        "/web-chat/codex-session/read-url",
+        "/web-chat/codex-session/unwrap-key",
         "/web-chat/codex-session/upload-prepare",
         "/web-chat/codex-session/upload-direct",
         "/web-chat/codex-session/upload-discard",
@@ -1632,6 +1639,8 @@ test("assertWebChatRunnerRuntimeCompatibility accepts AppServer turn-control man
           "/web-chat/attachments/get",
           "/web-chat/attachments/read-url",
           "/web-chat/codex-session/get",
+          "/web-chat/codex-session/read-url",
+          "/web-chat/codex-session/unwrap-key",
           "/web-chat/codex-session/upload-prepare",
           "/web-chat/codex-session/upload-direct",
           "/web-chat/codex-session/upload-discard",
@@ -1666,6 +1675,8 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when AppServer Firestor
         "/web-chat/attachments/get",
         "/web-chat/attachments/read-url",
         "/web-chat/codex-session/get",
+        "/web-chat/codex-session/read-url",
+        "/web-chat/codex-session/unwrap-key",
         "/web-chat/codex-session/upload-prepare",
         "/web-chat/codex-session/upload-direct",
         "/web-chat/codex-session/upload-discard",
@@ -1701,6 +1712,8 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when AppServer Firestor
             "/web-chat/attachments/get",
             "/web-chat/attachments/read-url",
             "/web-chat/codex-session/get",
+            "/web-chat/codex-session/read-url",
+            "/web-chat/codex-session/unwrap-key",
             "/web-chat/codex-session/upload-prepare",
             "/web-chat/codex-session/upload-direct",
             "/web-chat/codex-session/upload-discard",
@@ -1734,6 +1747,8 @@ test("assertWebChatRunnerRuntimeCompatibility fails fast when staged upload rout
         "/api/chat/runs/prompt",
         "/web-chat/attachments/get",
         "/web-chat/codex-session/get",
+        "/web-chat/codex-session/read-url",
+        "/web-chat/codex-session/unwrap-key",
         "/web-chat/codex-session/upsert",
         "/web-chat/codex-session/invalidate",
         "/web-chat/threads/get",
@@ -3756,6 +3771,101 @@ test("persistCapturedCodexSessionBundleWithRetries accepts duplicate same-run re
   } finally {
     globalThis.fetch = originalFetch;
     await fs.rm(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("readWebChatCodexSessionState restores session contents through direct storage reads", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const threadId = "wct_123";
+  const storageKey = "web_chat_codex_session_blob:wct_123:163:nonce";
+  const uploadKey = Buffer.from(
+    Uint8Array.from({ length: 32 }, (_value, index) => index + 1),
+  ).toString("base64url");
+  const uploadedBundle = await buildUploadedCodexSessionStoredValue({
+    threadId,
+    storageKey,
+    uploadKey,
+    wrappedKey: "wrapped-key",
+    wrappedKeyIv: "wrapped-key-iv",
+    sessionFileContents: "session line 1\nsession line 2",
+  });
+  const storedValue = uploadedBundle.storedValue;
+
+  globalThis.fetch = async (url, init = {}) => {
+    const parsedUrl = new URL(String(url));
+    calls.push({
+      path: parsedUrl.pathname,
+      query: parsedUrl.search,
+      method: init.method || "GET",
+      body: init.body ? String(init.body) : "",
+    });
+    if (parsedUrl.pathname === "/web-chat/codex-session/read-url") {
+      return Response.json({
+        ok: true,
+        thread: { thread_id: threadId },
+        codex_session_state: {
+          status: "ready",
+          session_id: "019dd643-e3ec-76e1-952c-3dc25053e8c3",
+          session_file_relative_path:
+            "sessions/2026/05/02/rollout-2026-05-02T01-06-49-019dd643-e3ec-76e1-952c-3dc25053e8c3.jsonl",
+          bundle_storage_key: storageKey,
+          storage_bucket: "bucket",
+          storage_backend: "firebase_storage",
+          bundle_size_bytes: 29,
+          bundle_compressed_size_bytes: 42,
+          bundle_revision: 163,
+        },
+        session_bundle_read_url: {
+          download_url: "https://storage.example/session-bundle",
+          expires_at: Date.now() + 60_000,
+          storage_key: storageKey,
+          storage_bucket: "bucket",
+          storage_backend: "firebase_storage",
+        },
+      });
+    }
+    if (parsedUrl.hostname === "storage.example") {
+      return new Response(storedValue, { status: 200 });
+    }
+    if (parsedUrl.pathname === "/web-chat/codex-session/unwrap-key") {
+      const body = JSON.parse(String(init.body || "{}"));
+      assert.equal(body.thread_id, threadId);
+      assert.equal(body.storage_key, storageKey);
+      assert.equal(body.wrapped_key, "wrapped-key");
+      assert.equal(body.wrapped_key_iv, "wrapped-key-iv");
+      return Response.json({ ok: true, session_bundle_key: uploadKey });
+    }
+    throw new Error(`Unexpected request ${parsedUrl.pathname}`);
+  };
+
+  try {
+    const loaded = await readWebChatCodexSessionState({
+      workerUrl: "https://worker.example.com",
+      adminToken: "secret",
+      threadId,
+      includeContents: true,
+    });
+
+    assert.equal(loaded.sessionFileContents, "session line 1\nsession line 2");
+    assert.deepEqual(
+      calls.map((call) => call.path),
+      [
+        "/web-chat/codex-session/read-url",
+        "/session-bundle",
+        "/web-chat/codex-session/unwrap-key",
+      ],
+    );
+    assert.equal(
+      calls.some(
+        (call) =>
+          call.path === "/web-chat/codex-session/get" &&
+          call.query.includes("include_contents"),
+      ),
+      false,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

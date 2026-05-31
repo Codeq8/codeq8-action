@@ -9,7 +9,7 @@ import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import {
   buildControlPlaneRequestAuthorizationHeader,
   resolveControlPlaneRequestAuthSecret,
@@ -109,6 +109,8 @@ const CODEX_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const CODEX_SESSION_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$/;
 const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
 const WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE = "web_chat_codex_session_bundle";
+const WEB_CHAT_CODEX_SESSION_READ_URL_PATH = "/web-chat/codex-session/read-url";
+const WEB_CHAT_CODEX_SESSION_UNWRAP_KEY_PATH = "/web-chat/codex-session/unwrap-key";
 const RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES = new Set([
   408,
   425,
@@ -432,8 +434,23 @@ function fromBase64Url(value) {
   return new Uint8Array(Buffer.from(padded, "base64"));
 }
 
+function toArrayBufferUint8Array(bytes) {
+  if (
+    bytes.buffer instanceof ArrayBuffer &&
+    bytes.byteOffset === 0 &&
+    bytes.byteLength === bytes.buffer.byteLength
+  ) {
+    return bytes;
+  }
+  return bytes.slice();
+}
+
 function gzipUtf8TextBytes(value) {
   return new Uint8Array(gzipSync(Buffer.from(String(value || ""), "utf8")));
+}
+
+function gunzipUtf8TextBytes(bytes) {
+  return gunzipSync(Buffer.from(bytes)).toString("utf8");
 }
 
 function webChatCodexSessionAdditionalData({ threadId, storageKey }) {
@@ -4322,6 +4339,61 @@ async function readFirebaseStorageSignedAttachment({
   );
 }
 
+async function readFirebaseStorageSignedTextObject({
+  downloadUrl,
+  fetchImpl = fetch,
+  retries = 3,
+  retryDelayMs = 750,
+}) {
+  const normalizedDownloadUrl = normalizeText(downloadUrl);
+  if (!normalizedDownloadUrl) {
+    throw new Error("Firebase Storage signed read URL is required.");
+  }
+
+  const attempts = Math.max(1, parsePositiveInteger(retries, 3) || 3);
+  let lastStatus = 0;
+  let lastErrorText = "";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let response = null;
+    try {
+      response = await fetchImpl(normalizedDownloadUrl, {
+        cache: "no-store",
+      });
+    } catch (error) {
+      lastErrorText = extractErrorMessage(error, "Firebase Storage signed URL request failed.");
+    }
+
+    if (response?.ok) {
+      return response.text();
+    }
+
+    if (response) {
+      lastStatus = response.status;
+      try {
+        lastErrorText = normalizeText(await response.text());
+      } catch {
+        lastErrorText = "";
+      }
+    }
+    const retryable =
+      (!response || RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES.has(response.status)) &&
+      attempt < attempts;
+    if (!retryable) {
+      break;
+    }
+    log(
+      "Firebase Storage signed text read failed; retrying",
+      `status=${lastStatus || "fetch_failed"} attempt=${attempt}/${attempts}`,
+    );
+    await sleep(retryDelayMs);
+  }
+
+  throw new Error(
+    normalizeText(lastErrorText) ||
+      `Failed to read Firebase Storage signed text object (${lastStatus || 0}).`,
+  );
+}
+
 async function readWebChatThread({ workerUrl, adminToken, threadId }) {
   const response = await workerJsonRequest({
     workerUrl,
@@ -4380,12 +4452,252 @@ async function loadWebChatThread({
   throw lastError || new Error("Unable to load web chat thread.");
 }
 
+function normalizeCodexSessionEncryptedEnvelope(value) {
+  const normalized = normalizeObject(value);
+  const version = parsePositiveInteger(normalized.version, 0);
+  const scope = normalizeText(normalized.scope);
+  const algorithm = normalizeText(normalized.algorithm);
+  const contentEncoding = normalizeText(
+    normalized.content_encoding || normalized.contentEncoding,
+  ).toLowerCase();
+  const iv = normalizeText(normalized.iv);
+  const ciphertext = normalizeText(normalized.ciphertext);
+  const rawSizeBytes = parsePositiveInteger(
+    normalized.raw_size_bytes || normalized.rawSizeBytes,
+    0,
+  );
+  const compressedSizeBytes = parsePositiveInteger(
+    normalized.compressed_size_bytes || normalized.compressedSizeBytes,
+    0,
+  );
+  const wrappedKey = normalizeText(normalized.wrapped_key || normalized.wrappedKey);
+  const wrappedKeyIv = normalizeText(
+    normalized.wrapped_key_iv || normalized.wrappedKeyIv,
+  );
+  if (
+    version !== 3 ||
+    scope !== WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE ||
+    algorithm !== "AES-GCM-256" ||
+    contentEncoding !== "gzip" ||
+    !iv ||
+    !ciphertext ||
+    !rawSizeBytes ||
+    !compressedSizeBytes ||
+    !wrappedKey ||
+    !wrappedKeyIv
+  ) {
+    return null;
+  }
+  return {
+    version,
+    scope,
+    algorithm,
+    contentEncoding,
+    iv,
+    ciphertext,
+    rawSizeBytes,
+    compressedSizeBytes,
+    wrappedKey,
+    wrappedKeyIv,
+  };
+}
+
+function parseCodexSessionEncryptedEnvelope(storedValue) {
+  try {
+    return normalizeCodexSessionEncryptedEnvelope(JSON.parse(String(storedValue || "")));
+  } catch {
+    return null;
+  }
+}
+
+async function unwrapWebChatCodexSessionBundleKey({
+  workerUrl,
+  adminToken,
+  threadId,
+  storageKey,
+  wrappedKey,
+  wrappedKeyIv,
+}) {
+  const response = await workerJsonRequest({
+    workerUrl,
+    adminToken,
+    path: WEB_CHAT_CODEX_SESSION_UNWRAP_KEY_PATH,
+    method: "POST",
+    body: {
+      thread_id: normalizeText(threadId),
+      storage_key: normalizeText(storageKey),
+      wrapped_key: normalizeText(wrappedKey),
+      wrapped_key_iv: normalizeText(wrappedKeyIv),
+    },
+  });
+  if (!response.ok || response.payload.ok === false) {
+    throw new Error(
+      extractErrorMessage(response.payload.error) ||
+        `Failed to unwrap web chat codex session bundle key (${response.status}).`,
+    );
+  }
+  const bundleKey = normalizeText(
+    response.payload.session_bundle_key || response.payload.sessionBundleKey,
+  );
+  if (!bundleKey) {
+    throw new Error("Codex session unwrap response was missing session_bundle_key.");
+  }
+  return bundleKey;
+}
+
+async function decodeCodexSessionBundleWithKey({
+  storedValue,
+  threadId,
+  storageKey,
+  bundleKey,
+}) {
+  const envelope = parseCodexSessionEncryptedEnvelope(storedValue);
+  if (!envelope) {
+    throw new Error("Codex session direct bundle payload is not a version 3 encrypted envelope.");
+  }
+  const dataKeyBytes = fromBase64Url(bundleKey);
+  if (dataKeyBytes.byteLength !== 32) {
+    throw new Error("Codex session direct bundle key is invalid.");
+  }
+  const dataKey = await webcrypto.subtle.importKey(
+    "raw",
+    toArrayBufferUint8Array(dataKeyBytes),
+    { name: "AES-GCM" },
+    false,
+    ["decrypt"],
+  );
+  const decrypted = new Uint8Array(
+    await webcrypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBufferUint8Array(fromBase64Url(envelope.iv)),
+        additionalData: new TextEncoder().encode(
+          webChatCodexSessionAdditionalData({ threadId, storageKey }),
+        ),
+      },
+      dataKey,
+      toArrayBufferUint8Array(fromBase64Url(envelope.ciphertext)),
+    ),
+  );
+  const sessionFileContents = gunzipUtf8TextBytes(decrypted);
+  if (
+    envelope.rawSizeBytes > 0 &&
+    Buffer.byteLength(sessionFileContents, "utf8") !== envelope.rawSizeBytes
+  ) {
+    throw new Error("Codex session direct bundle size metadata does not match.");
+  }
+  return sessionFileContents;
+}
+
+async function readWebChatCodexSessionStateViaDirectBundle({
+  workerUrl,
+  adminToken,
+  threadId,
+}) {
+  const response = await workerJsonRequest({
+    workerUrl,
+    adminToken,
+    path: WEB_CHAT_CODEX_SESSION_READ_URL_PATH,
+    method: "GET",
+    query: new URLSearchParams({
+      thread_id: normalizeText(threadId),
+      expires_seconds: "60",
+    }),
+  });
+  if (!response.ok || response.payload.ok === false) {
+    const unsupported = response.status === 404 || response.status === 405;
+    return {
+      ok: false,
+      unsupported,
+      error:
+        extractErrorMessage(response.payload.error) ||
+        `Failed to create web chat codex session read URL (${response.status}).`,
+    };
+  }
+
+  const readUrl = normalizeObject(
+    response.payload.session_bundle_read_url || response.payload.sessionBundleReadUrl,
+  );
+  const codexSessionState = normalizeCodexSessionState(
+    response.payload.codex_session_state || response.payload.codexSessionState,
+  );
+  const downloadUrl = normalizeText(readUrl.download_url || readUrl.downloadUrl);
+  const storageKey = normalizeText(
+    readUrl.storage_key || readUrl.storageKey || codexSessionState.bundle_storage_key,
+  );
+  if (!downloadUrl) {
+    return {
+      ok: true,
+      thread: normalizeObject(response.payload.thread),
+      codexSessionState,
+      sessionFileContents: "",
+    };
+  }
+
+  const storedValue = await readFirebaseStorageSignedTextObject({ downloadUrl });
+  const envelope = parseCodexSessionEncryptedEnvelope(storedValue);
+  if (!envelope) {
+    return {
+      ok: false,
+      unsupported: true,
+      error: "Codex session direct bundle payload is not a version 3 encrypted envelope.",
+    };
+  }
+  const bundleKey = await unwrapWebChatCodexSessionBundleKey({
+    workerUrl,
+    adminToken,
+    threadId,
+    storageKey,
+    wrappedKey: envelope.wrappedKey,
+    wrappedKeyIv: envelope.wrappedKeyIv,
+  });
+  const sessionFileContents = await decodeCodexSessionBundleWithKey({
+    storedValue,
+    threadId,
+    storageKey,
+    bundleKey,
+  });
+  return {
+    ok: true,
+    thread: normalizeObject(response.payload.thread),
+    codexSessionState,
+    sessionFileContents,
+  };
+}
+
 async function readWebChatCodexSessionState({
   workerUrl,
   adminToken,
   threadId,
   includeContents = false,
 }) {
+  if (includeContents) {
+    try {
+      const direct = await readWebChatCodexSessionStateViaDirectBundle({
+        workerUrl,
+        adminToken,
+        threadId,
+      });
+      if (direct.ok) {
+        return direct;
+      }
+      if (!direct.unsupported) {
+        throw new Error(direct.error || "Unable to read codex session direct bundle.");
+      }
+      log(
+        "WARN",
+        "Falling back to proxied Codex session contents read",
+        `thread_id=${normalizeText(threadId)} reason=${direct.error}`,
+      );
+    } catch (error) {
+      log(
+        "WARN",
+        "Falling back to proxied Codex session contents read",
+        `thread_id=${normalizeText(threadId)} reason=${extractErrorMessage(error)}`,
+      );
+    }
+  }
+
   const query = new URLSearchParams({
     thread_id: normalizeText(threadId),
   });
@@ -10288,13 +10600,16 @@ export {
   findPullRequestForBranch,
   refreshWorkspaceRemoteRefs,
   buildFirebaseStorageDownloadUrl,
+  decodeCodexSessionBundleWithKey,
   materializeWebChatAttachments,
   normalizeAttachmentRecord,
   postWebChatRunnerDiagnostic,
   readFirebaseStorageAttachment,
   readFirebaseStorageSignedAttachment,
+  readFirebaseStorageSignedTextObject,
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
+  readWebChatCodexSessionState,
   validateRunnerCodexAuth,
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
