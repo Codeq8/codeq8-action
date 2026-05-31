@@ -166,6 +166,11 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
   assert.match(bridgeSource, /\bonSnapshot\b/);
   assert.match(bridgeSource, /\bterminate\(firestore\)/);
   assert.match(source, /firestoreBridge\.close\(\)/);
+  assert.doesNotMatch(source, /APP_SERVER_PROGRESS_MAX_LABEL_CHARS/);
+  assert.doesNotMatch(
+    source,
+    /normalizedMethod\s*===\s*["']item\/agentMessage\/delta["'][\s\S]{0,900}\bprogressReporter\.enqueue\s*\(/,
+  );
   assert.doesNotMatch(source, /function createAppServerControlPoller/);
   assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/control/);
   assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/events/);
@@ -1816,7 +1821,7 @@ test("runCodex treats auth-like agent text as normal output", async (t) => {
   assert.match(result.output, /refresh_token_reused/i);
 });
 
-test("runCodex preserves AppServer agent delta whitespace", async (t) => {
+test("runCodex preserves AppServer agent delta whitespace without streaming partial progress", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-agent-whitespace-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   t.after(async () => {
@@ -1871,7 +1876,7 @@ test("runCodex preserves AppServer agent delta whitespace", async (t) => {
 
   assert.equal(result.ok, true);
   assert.equal(result.output, "Yes, I'm getting it. This run is targeting PR #1698.");
-  assert(progressEvents.length > 1);
+  assert.equal(progressEvents.length, 1);
   assert.equal(progressEvents.at(-1)?.label, "Yes, I'm getting it. This run is targeting PR #1698.");
   assert.equal(new Set(progressEvents.map((event) => event.event_id)).size, 1);
 });

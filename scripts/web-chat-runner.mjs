@@ -59,7 +59,6 @@ const MAX_RUNNER_DIAGNOSTIC_STRING_CHARS = 2000;
 const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 8;
-const APP_SERVER_PROGRESS_MAX_LABEL_CHARS = 12000;
 const APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS = 2500;
 // AppServer live chat transport must not be implemented as recurring runner
 // HTTP calls. The runner gets one Firebase session, then uses Firestore
@@ -6339,9 +6338,8 @@ function summarizeAppServerProgressNotification({
   if (!isAgentDelta && !isAgentCompletion) {
     return null;
   }
-  const itemLabel = truncateWithEllipsis(
+  const itemLabel = normalizeText(
     label || extractAppServerCompletedAgentText(params),
-    APP_SERVER_PROGRESS_MAX_LABEL_CHARS,
   );
   return itemLabel
     ? {
@@ -7634,18 +7632,8 @@ async function runCodexAppServer({
       }
       if (normalizedMethod === "item/agentMessage/delta") {
         appendAgentMessageDelta(params);
-        const progressEvent = summarizeAppServerProgressNotification({
-          method: normalizedMethod,
-          params,
-          itemId: currentAgentMessageItemId,
-          itemType: "agent_message",
-          label: currentAgentMessageOutput,
-        });
-        if (progressEvent) {
-          currentAgentMessageProgressItemId =
-            currentAgentMessageItemId || extractAppServerItemId(params);
-          progressReporter.enqueue(progressEvent);
-        }
+        // Active-run progress should show completed assistant status updates,
+        // not stream partial agent-message deltas into Firestore.
       }
       if (normalizedMethod === "item/completed" && isAppServerAgentMessageItem(params)) {
         const completedItemId = extractAppServerItemId(params) || currentAgentMessageItemId;
