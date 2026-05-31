@@ -137,6 +137,19 @@ test("JSON control-plane requests fail fast instead of waiting on platform timeo
   }
 });
 
+test("Codex session contents reads use a longer bounded JSON timeout", async () => {
+  const source = await fs.readFile(
+    path.join(process.cwd(), "scripts/web-chat-runner.mjs"),
+    "utf8",
+  );
+
+  assert.match(source, /const CODEX_SESSION_CONTENTS_FETCH_JSON_TIMEOUT_MS = 60_000;/);
+  assert.match(
+    source,
+    /timeoutMs:\s*includeContents\s*\?\s*CODEX_SESSION_CONTENTS_FETCH_JSON_TIMEOUT_MS\s*:\s*undefined/,
+  );
+});
+
 test("AppServer live bridge uses Firestore instead of runner HTTP polling", async () => {
   const source = await fs.readFile(
     path.join(process.cwd(), "scripts/web-chat-runner.mjs"),

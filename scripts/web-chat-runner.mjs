@@ -47,6 +47,7 @@ const DEFAULT_CODEX_MODEL = "gpt-5.5";
 const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
 const DEFAULT_TIMEOUT_SECONDS = 72 * 60 * 60;
 const DEFAULT_FETCH_JSON_TIMEOUT_MS = 15_000;
+const CODEX_SESSION_CONTENTS_FETCH_JSON_TIMEOUT_MS = 60_000;
 const DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT = "1";
 const DEFAULT_GIT_HTTP_LOW_SPEED_TIME = "45";
 const MAX_MESSAGE_CHARS = 2000;
@@ -1402,7 +1403,15 @@ function encodeRepositoryPath(repository) {
     .join("/");
 }
 
-async function workerJsonRequest({ workerUrl, adminToken, path, method, query, body }) {
+async function workerJsonRequest({
+  workerUrl,
+  adminToken,
+  path,
+  method,
+  query,
+  body,
+  timeoutMs,
+}) {
   const normalizedWorkerUrl = normalizeBaseUrl(workerUrl);
   const normalizedToken = normalizeText(adminToken);
   if (!normalizedToken) {
@@ -1424,6 +1433,7 @@ async function workerJsonRequest({ workerUrl, adminToken, path, method, query, b
 
   return fetchJson(url.toString(), {
     method,
+    timeoutMs,
     headers: {
       Authorization: authorizationHeader,
       ...(method === "POST" ? { "Content-Type": "application/json; charset=utf-8" } : {}),
@@ -4388,6 +4398,7 @@ async function readWebChatCodexSessionState({
     path: "/web-chat/codex-session/get",
     method: "GET",
     query,
+    timeoutMs: includeContents ? CODEX_SESSION_CONTENTS_FETCH_JSON_TIMEOUT_MS : undefined,
   });
   if (!response.ok || response.payload.ok === false) {
     throw new Error(
