@@ -843,6 +843,7 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
   const goalUpdates = [];
+  const progressEvents = [];
   const server = createServer((request, response) => {
     let rawBody = "";
     request.setEncoding("utf8");
@@ -906,6 +907,19 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
       workspaceRepository: "Codeq8/Codeq8",
       threadId: "wct_app",
       runId: "wcr_app",
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue(event) {
+            progressEvents.push(event);
+          },
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+        close: async () => {},
+      }),
     },
   });
 
@@ -933,6 +947,11 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
   assert.equal(goalUpdates[0]?.authorization, "Bearer header.payload.signature");
   assert.equal(goalUpdates[0]?.body?.event, "updated");
   assert.equal(goalUpdates[0]?.body?.goal?.objective, "Ship native Codeq8 goal support");
+  assert.equal(progressEvents[0]?.kind, "codex_goal");
+  assert.equal(progressEvents[0]?.item_type, "codex_goal");
+  assert.equal(progressEvents[0]?.label, "Goal: Ship native Codeq8 goal support");
+  assert.equal(progressEvents[0]?.status, "completed");
+  assert.match(progressEvents[0]?.event_id, /^app_server:goal:/);
 });
 
 test("runCodex preserves the web goal when the final AppServer goal read is empty", async (t) => {

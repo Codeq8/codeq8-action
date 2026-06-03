@@ -70,6 +70,7 @@ const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
   "codex_app_server_attachment_turn_control";
 const CODEX_GOAL_UPDATE_PATH = "/api/chat/runs/goal";
 const CODEX_GOAL_OBJECTIVE_MAX_CHARS = 4000;
+const CODEX_GOAL_PROGRESS_LABEL_MAX_CHARS = 180;
 const APP_SERVER_CONTROL_CAPABILITIES = Object.freeze([
   APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY,
 ]);
@@ -1181,6 +1182,32 @@ function buildCodexGoalSetParams({
     params.tokenBudget = goal.token_budget;
   }
   return params;
+}
+
+function buildCodexGoalProgressEvent({
+  goalState,
+  appServerThreadId,
+  runId,
+  now = Date.now(),
+}) {
+  const goal = normalizeCodexGoalState(goalState);
+  if (!goal.objective) {
+    return null;
+  }
+  const normalizedThreadId = normalizeCodexSessionId(appServerThreadId);
+  const normalizedRunId = normalizeRunId(runId);
+  const identity = `${normalizedThreadId}:${normalizedRunId}:${goal.objective}`;
+  return {
+    event_id: `app_server:goal:${hashDiagnosticValue(identity).slice(0, 20)}`,
+    kind: "codex_goal",
+    item_type: "codex_goal",
+    label: truncateWithEllipsis(
+      `Goal: ${goal.objective}`,
+      CODEX_GOAL_PROGRESS_LABEL_MAX_CHARS,
+    ),
+    status: "completed",
+    at: now,
+  };
 }
 
 function nowIso() {
@@ -7963,6 +7990,14 @@ async function runCodexAppServer({
             }),
           );
           log("Synchronized Codeq8 Codex goal into AppServer", "action=set");
+          const progressEvent = buildCodexGoalProgressEvent({
+            goalState: normalizedCodexGoalState,
+            appServerThreadId,
+            runId: appServerContext?.runId,
+          });
+          if (progressEvent) {
+            progressReporter.enqueue(progressEvent);
+          }
           return;
         }
         await sendRequest("thread/goal/clear", {
