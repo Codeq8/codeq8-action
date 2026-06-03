@@ -1544,6 +1544,18 @@ async function prepareWebChatCodexSessionUpload({
         uploadPreparation.next_bundle_revision || uploadPreparation.nextBundleRevision || 0,
         0,
       ),
+      directUploadUrl: normalizeText(
+        uploadPreparation.direct_upload_url || uploadPreparation.directUploadUrl,
+      ),
+      directUploadMethod: normalizeText(
+        uploadPreparation.direct_upload_method || uploadPreparation.directUploadMethod || "PUT",
+      ),
+      directUploadExpiresAt: parsePositiveInteger(
+        uploadPreparation.direct_upload_expires_at ||
+          uploadPreparation.directUploadExpiresAt ||
+          0,
+        0,
+      ),
     },
   };
 }
@@ -1556,7 +1568,22 @@ async function uploadPreparedWebChatCodexSessionBundle({
   storageBucket,
   storageBackend,
   storedValue,
+  directUploadUrl = "",
+  directUploadMethod = "PUT",
 }) {
+  if (normalizeText(directUploadUrl)) {
+    await writeFirebaseStorageSignedTextObject({
+      uploadUrl: directUploadUrl,
+      method: directUploadMethod,
+      storedValue,
+    });
+    return {
+      storageKey: normalizeText(storageKey),
+      storageBucket: normalizeText(storageBucket),
+      storageBackend: normalizeText(storageBackend),
+    };
+  }
+
   const query = new URLSearchParams({
     thread_id: normalizeText(threadId),
     storage_key: normalizeText(storageKey),
@@ -4394,6 +4421,72 @@ async function readFirebaseStorageSignedTextObject({
   );
 }
 
+async function writeFirebaseStorageSignedTextObject({
+  uploadUrl,
+  method = "PUT",
+  storedValue,
+  fetchImpl = fetch,
+  retries = 3,
+  retryDelayMs = 750,
+}) {
+  const normalizedUploadUrl = normalizeText(uploadUrl);
+  const normalizedMethod = normalizeText(method).toUpperCase() || "PUT";
+  if (!normalizedUploadUrl) {
+    throw new Error("Firebase Storage signed upload URL is required.");
+  }
+  if (normalizedMethod !== "PUT") {
+    throw new Error("Firebase Storage signed upload method is not supported.");
+  }
+
+  const attempts = Math.max(1, parsePositiveInteger(retries, 3) || 3);
+  let lastStatus = 0;
+  let lastErrorText = "";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let response = null;
+    try {
+      response = await fetchImpl(normalizedUploadUrl, {
+        method: normalizedMethod,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: String(storedValue || ""),
+        cache: "no-store",
+      });
+    } catch (error) {
+      lastErrorText = extractErrorMessage(error, "Firebase Storage signed upload request failed.");
+    }
+
+    if (response?.ok) {
+      return { ok: true };
+    }
+
+    if (response) {
+      lastStatus = response.status;
+      try {
+        lastErrorText = normalizeText(await response.text());
+      } catch {
+        lastErrorText = "";
+      }
+    }
+    const retryable =
+      (!response || RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES.has(response.status)) &&
+      attempt < attempts;
+    if (!retryable) {
+      break;
+    }
+    log(
+      "Firebase Storage signed text upload failed; retrying",
+      `status=${lastStatus || "fetch_failed"} attempt=${attempt}/${attempts}`,
+    );
+    await sleep(retryDelayMs);
+  }
+
+  throw new Error(
+    normalizeText(lastErrorText) ||
+      `Failed to write Firebase Storage signed text object (${lastStatus || 0}).`,
+  );
+}
+
 async function readWebChatThread({ workerUrl, adminToken, threadId }) {
   const response = await workerJsonRequest({
     workerUrl,
@@ -5195,6 +5288,8 @@ async function persistCapturedCodexSessionBundle({
     storageBucket: uploadPreparation.uploadPreparation.storageBucket,
     storageBackend: uploadPreparation.uploadPreparation.storageBackend,
     storedValue: preparedBundle.storedValue,
+    directUploadUrl: uploadPreparation.uploadPreparation.directUploadUrl,
+    directUploadMethod: uploadPreparation.uploadPreparation.directUploadMethod,
   });
   await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
     event: "runner_session_upload_finished",
@@ -10607,6 +10702,7 @@ export {
   readFirebaseStorageAttachment,
   readFirebaseStorageSignedAttachment,
   readFirebaseStorageSignedTextObject,
+  writeFirebaseStorageSignedTextObject,
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
   readWebChatCodexSessionState,

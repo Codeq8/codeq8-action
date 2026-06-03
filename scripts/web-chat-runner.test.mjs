@@ -47,6 +47,7 @@ import {
   prepareWebChatCodexSessionUpload,
   readFirebaseStorageAttachment,
   readFirebaseStorageSignedAttachment,
+  writeFirebaseStorageSignedTextObject,
   readWebChatCodexSessionState,
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
@@ -3658,6 +3659,101 @@ test("prepare/upload/discard codex session bundle calls the staged worker routes
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("prepared codex session bundle upload prefers signed Firebase Storage URLs", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const headers = init?.headers || {};
+    const contentType =
+      typeof headers.get === "function"
+        ? headers.get("Content-Type")
+        : headers["Content-Type"] || headers["content-type"] || "";
+    const bodyText = init?.body ? String(init.body) : "";
+    calls.push({
+      url: String(url),
+      method: init?.method || "GET",
+      contentType: String(contentType || ""),
+      body:
+        bodyText && String(contentType || "").includes("application/json")
+          ? JSON.parse(bodyText)
+          : bodyText || null,
+    });
+    if (String(url).endsWith("/upload-prepare")) {
+      return Response.json({
+        ok: true,
+        upload_preparation: {
+          storage_key: "web_chat_codex_session_blob:wct_123:94:nonce",
+          storage_bucket: "bucket",
+          storage_backend: "firebase_storage",
+          upload_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          wrapped_key: "bbbb",
+          wrapped_key_iv: "cccc",
+          expected_bundle_revision: 93,
+          next_bundle_revision: 94,
+          direct_upload_url:
+            "https://storage.googleapis.com/bucket/web_chat_codex_session_blob%3Awct_123%3A94%3Anonce?X-Goog-Signature=test",
+          direct_upload_method: "PUT",
+          direct_upload_expires_at: 1780452900000,
+        },
+      });
+    }
+    return new Response("", { status: 200 });
+  };
+
+  try {
+    const prepared = await prepareWebChatCodexSessionUpload({
+      workerUrl: "https://worker.example.com",
+      adminToken: "secret",
+      threadId: "wct_123",
+      expectedBundleRevision: 93,
+    });
+    assert.equal(
+      prepared.uploadPreparation.directUploadUrl,
+      "https://storage.googleapis.com/bucket/web_chat_codex_session_blob%3Awct_123%3A94%3Anonce?X-Goog-Signature=test",
+    );
+    assert.equal(prepared.uploadPreparation.directUploadMethod, "PUT");
+    assert.equal(prepared.uploadPreparation.directUploadExpiresAt, 1780452900000);
+
+    await uploadPreparedWebChatCodexSessionBundle({
+      workerUrl: "https://worker.example.com",
+      adminToken: "secret",
+      threadId: "wct_123",
+      storageKey: prepared.uploadPreparation.storageKey,
+      storageBucket: prepared.uploadPreparation.storageBucket,
+      storageBackend: prepared.uploadPreparation.storageBackend,
+      storedValue: "{\"version\":3}",
+      directUploadUrl: prepared.uploadPreparation.directUploadUrl,
+      directUploadMethod: prepared.uploadPreparation.directUploadMethod,
+    });
+
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]?.url, "https://worker.example.com/web-chat/codex-session/upload-prepare");
+    assert.equal(
+      calls[1]?.url,
+      "https://storage.googleapis.com/bucket/web_chat_codex_session_blob%3Awct_123%3A94%3Anonce?X-Goog-Signature=test",
+    );
+    assert.equal(calls[1]?.method, "PUT");
+    assert.equal(calls[1]?.contentType, "application/json; charset=utf-8");
+    assert.deepEqual(calls[1]?.body, { version: 3 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("writeFirebaseStorageSignedTextObject reports signed upload failures", async () => {
+  await assert.rejects(
+    () =>
+      writeFirebaseStorageSignedTextObject({
+        uploadUrl:
+          "https://storage.googleapis.com/bucket/web_chat_codex_session_blob%3Awct_123%3A94%3Anonce?X-Goog-Signature=test",
+        storedValue: "{\"version\":3}",
+        retries: 1,
+        fetchImpl: async () => new Response("signature expired", { status: 403 }),
+      }),
+    /signature expired/,
+  );
 });
 
 test("persistCapturedCodexSessionBundleWithRetries accepts duplicate same-run revision conflicts", async () => {
