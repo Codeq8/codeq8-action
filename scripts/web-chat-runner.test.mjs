@@ -4024,6 +4024,19 @@ test("isRecoverableCodexSessionErrorState treats missing session keys as recover
   );
 });
 
+test("isRecoverableCodexSessionErrorState treats oversized session uploads as recoverable stale state", () => {
+  assert.equal(
+    isRecoverableCodexSessionErrorState("Request Entity Too Large"),
+    true,
+  );
+  assert.equal(
+    isRecoverableCodexSessionErrorState(
+      "Codex session state is in error status: Codex session state is in error status: Request Entity Too Large",
+    ),
+    true,
+  );
+});
+
 test("superseded web chat runs do not poison Codex session state", () => {
   const message =
     "Codex session state is in error status: Run wcr_098550d0-7874-4f2e-856b-433034c63793 was superseded by a newer message.";
