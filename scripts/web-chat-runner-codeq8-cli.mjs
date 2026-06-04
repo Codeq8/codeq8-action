@@ -177,6 +177,8 @@ function printHelp(stdout) {
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
       "  codeq8 threads create --title title --message text [--assigned-to codeq8|me]",
       "  codeq8 threads message <thread-id> --text text",
+      "  codeq8 threads goal <thread-id> --objective text [--status active|paused]",
+      "  codeq8 threads goal <thread-id> --clear",
       "  codeq8 threads state <thread-id> [--limit 50]",
       "  codeq8 attachments get --attachment <attachment-id> [--thread <thread-id>] [--output file]",
       "  codeq8 github issue attachments <url|number> [--repo owner/repo] [--comments] --output-dir dir",
@@ -322,6 +324,50 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
           child_thread_id: childThreadId,
           content,
           role: "user",
+        }),
+      }),
+    );
+    return 0;
+  }
+
+  if (command === "goal" || command === "set-goal") {
+    const positional = removeFlags(
+      rest,
+      ["--objective", "--goal", "--text", "--status"],
+      ["--clear"],
+    );
+    const targetThreadId = normalizeText(positional[0]);
+    const clear = hasFlag(rest, "--clear");
+    const objective = readFlag(rest, ["--objective", "--goal", "--text"]);
+    const status = readFlag(rest, "--status");
+    if (!targetThreadId) {
+      throw new Error("thread id is required.");
+    }
+    if (clear && objective) {
+      throw new Error("--objective must be omitted when --clear is used.");
+    }
+    if (!clear && !objective) {
+      throw new Error("--objective is required unless --clear is used.");
+    }
+    if (status && !["active", "paused"].includes(status.toLowerCase())) {
+      throw new Error("--status must be active or paused.");
+    }
+    writeJson(
+      stdout,
+      await requestJson({
+        context,
+        fetchImpl,
+        routeBase: "public",
+        path: "/api/chat/runs/thread-goal",
+        method: "POST",
+        body: parentBody(context, {
+          target_thread_id: targetThreadId,
+          ...(clear
+            ? { clear: true }
+            : {
+                objective,
+                ...(status ? { status: status.toLowerCase() } : {}),
+              }),
         }),
       }),
     );

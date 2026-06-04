@@ -96,6 +96,75 @@ test("runner codeq8 helper creates delegated threads through backend contract", 
   assert.equal(output.readJson().thread.thread_id, "wct_child");
 });
 
+test("runner codeq8 helper sets thread goals through backend contract", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: [
+      "threads",
+      "goal",
+      "wct_target",
+      "--objective",
+      "Keep this goal visible",
+      "--status",
+      "paused",
+    ],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        target_thread_id: "wct_target",
+        codex_goal_state: {
+          objective: "Keep this goal visible",
+          status: "paused",
+        },
+      });
+    },
+  });
+
+  assert.equal(new URL(calls[0]?.url).pathname, "/api/chat/runs/thread-goal");
+  assert.equal(calls[0]?.init?.headers?.Authorization, "Bearer header.payload.signature");
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+  const body = JSON.parse(String(calls[0]?.init?.body || "{}"));
+  assert.equal(body.workspace_repository, "Codeq8/Codeq8");
+  assert.equal(body.thread_id, "wct_parent");
+  assert.equal(body.run_id, "wcr_parent");
+  assert.equal(body.target_thread_id, "wct_target");
+  assert.equal(body.objective, "Keep this goal visible");
+  assert.equal(body.status, "paused");
+  assert.equal(output.readJson().codex_goal_state.objective, "Keep this goal visible");
+});
+
+test("runner codeq8 helper clears thread goals through backend contract", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "goal", "wct_target", "--clear"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        target_thread_id: "wct_target",
+        cleared: true,
+      });
+    },
+  });
+
+  assert.equal(new URL(calls[0]?.url).pathname, "/api/chat/runs/thread-goal");
+  const body = JSON.parse(String(calls[0]?.init?.body || "{}"));
+  assert.equal(body.workspace_repository, "Codeq8/Codeq8");
+  assert.equal(body.thread_id, "wct_parent");
+  assert.equal(body.run_id, "wcr_parent");
+  assert.equal(body.target_thread_id, "wct_target");
+  assert.equal(body.clear, true);
+  assert.equal(Object.hasOwn(body, "objective"), false);
+  assert.equal(output.readJson().cleared, true);
+});
+
 test("runner codeq8 helper materializes attachments through worker route", async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-runner-cli-"));
   t.after(async () => {
