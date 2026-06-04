@@ -6665,6 +6665,14 @@ function extractAppServerTurnId(value) {
   return normalizeCodexSessionId(turn.id || object.turnId || object.turn_id || "");
 }
 
+function extractAppServerActiveTurnIdMismatch(value) {
+  const message = extractErrorMessage(value);
+  const match = message.match(
+    /expected active turn id [`'"]?([^`'"]+)[`'"]? but found [`'"]?([^`'"]+)[`'"]?/i,
+  );
+  return normalizeCodexSessionId(match?.[2] || "");
+}
+
 function extractAppServerTurnStatus(value) {
   const object = normalizeObject(value);
   const turn = normalizeObject(object.turn);
@@ -7366,6 +7374,40 @@ function applyAppServerControlAcknowledgementsToRequests({
   return { changed, requests: nextRequests };
 }
 
+async function sendAppServerTurnControlRequestWithActiveTurnRetry({
+  method,
+  params,
+  sendRequest,
+  setAppServerTurnId = () => {},
+}) {
+  try {
+    return await sendRequest(method, params);
+  } catch (error) {
+    const refreshedTurnId = extractAppServerActiveTurnIdMismatch(error);
+    const previousTurnId = normalizeCodexSessionId(
+      params?.expectedTurnId || params?.turnId,
+    );
+    if (!refreshedTurnId || refreshedTurnId === previousTurnId) {
+      throw error;
+    }
+    setAppServerTurnId(refreshedTurnId);
+    log(
+      "Retrying Codex app-server control with refreshed active turn id",
+      `method=${normalizeAppServerMethod(method)}`,
+    );
+    const retryParams = normalizeObject(params);
+    return await sendRequest(method, {
+      ...retryParams,
+      ...(Object.prototype.hasOwnProperty.call(retryParams, "expectedTurnId")
+        ? { expectedTurnId: refreshedTurnId }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(retryParams, "turnId")
+        ? { turnId: refreshedTurnId }
+        : {}),
+    });
+  }
+}
+
 function createAppServerFirestoreControlListener({
   FieldPathImpl,
   channel,
@@ -7382,6 +7424,7 @@ function createAppServerFirestoreControlListener({
   sendRequest,
   getAppServerThreadId,
   getAppServerTurnId,
+  setAppServerTurnId = () => {},
 }) {
   // Control is event-driven through Firestore onSnapshot. Do not replace this
   // with periodic HTTP fetches to the private app; that failure mode has caused
@@ -7507,15 +7550,25 @@ function createAppServerFirestoreControlListener({
         if (!inputText) {
           throw new Error("Steer content is empty.");
         }
-        await sendRequest("turn/steer", {
-          threadId: appServerThreadId,
-          expectedTurnId: appServerTurnId,
-          input: [{ type: "text", text: inputText }],
+        await sendAppServerTurnControlRequestWithActiveTurnRetry({
+          method: "turn/steer",
+          params: {
+            threadId: appServerThreadId,
+            expectedTurnId: appServerTurnId,
+            input: [{ type: "text", text: inputText }],
+          },
+          sendRequest,
+          setAppServerTurnId,
         });
       } else {
-        await sendRequest("turn/interrupt", {
-          threadId: appServerThreadId,
-          turnId: appServerTurnId,
+        await sendAppServerTurnControlRequestWithActiveTurnRetry({
+          method: "turn/interrupt",
+          params: {
+            threadId: appServerThreadId,
+            turnId: appServerTurnId,
+          },
+          sendRequest,
+          setAppServerTurnId,
         });
       }
       acknowledgements.push({ request_id: requestId, status: "accepted" });
@@ -8269,6 +8322,9 @@ async function runCodexAppServer({
         sendRequest,
         getAppServerThreadId: () => appServerThreadId,
         getAppServerTurnId: () => activeTurnId,
+        setAppServerTurnId: (turnId) => {
+          activeTurnId = normalizeCodexSessionId(turnId) || activeTurnId;
+        },
       }) || null;
       controlListener?.start?.();
       const turnResult = await sendRequest("turn/start", {
@@ -10708,6 +10764,7 @@ export {
   buildResumePrompt,
   buildFinalWorkspaceStateCallbackPayload,
   buildUploadedCodexSessionStoredValue,
+  createAppServerFirestoreControlListener,
   captureCodexSessionBundle,
   checkoutPreparedWorkspaceBranch,
   checkoutOriginBranch,

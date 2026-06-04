@@ -25,6 +25,7 @@ import {
   buildWebChatRunMarker,
   buildWebChatRunnerDiagnosticRequest,
   buildUploadedCodexSessionStoredValue,
+  createAppServerFirestoreControlListener,
   captureCodexSessionBundle,
   configureWorkspaceGitCredentialHelper,
   configureWorkspacePushPolicy,
@@ -836,6 +837,95 @@ test("runCodex sends AppServer steer requests with the active expected turn id",
   assert.deepEqual(acknowledgementBodies.at(-1)?.acknowledgements, [
     { request_id: "wcasr_steer", status: "accepted" },
   ]);
+});
+
+test("AppServer Firestore control listener retries stale active turn id rejections", async () => {
+  class FieldPath {
+    constructor(...segments) {
+      this.segments = segments;
+    }
+  }
+
+  let activeTurnId = "stale_turn";
+  const sentRequests = [];
+  const transactionUpdates = [];
+  const docData = {
+    threads: {
+      wct_app: {
+        latestRunId: "wcr_app",
+        appServerControlRequests: [
+          {
+            request_id: "wcasr_stale_turn",
+            sequence: 1,
+            kind: "steer",
+            content: "Please switch to the production issue.",
+            attachments: [],
+            status: "pending",
+            error: "",
+          },
+        ],
+      },
+    },
+  };
+
+  const listener = createAppServerFirestoreControlListener({
+    FieldPathImpl: FieldPath,
+    channel: {
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      collectionId: "chat_repository_live_status",
+      documentId: "app-server-run:workspace:workspace:repository:repo:thread:wct_app:run:wcr_app",
+    },
+    docRef: {},
+    firestore: {},
+    onSnapshotImpl: (_docRef, next) => {
+      next({
+        exists: () => true,
+        data: () => docData,
+      });
+      return () => {};
+    },
+    runTransactionImpl: async (_firestore, callback) =>
+      await callback({
+        get: async () => ({
+          exists: () => true,
+          data: () => docData,
+        }),
+        update: (...args) => {
+          transactionUpdates.push(args);
+          docData.threads.wct_app.appServerControlRequests = args[2];
+        },
+      }),
+    sendRequest: async (method, params) => {
+      sentRequests.push({ method, params });
+      if (sentRequests.length === 1) {
+        throw new Error(
+          "expected active turn id `stale_turn` but found `fresh_turn`",
+        );
+      }
+      return { ok: true };
+    },
+    getAppServerThreadId: () => "thr_app",
+    getAppServerTurnId: () => activeTurnId,
+    setAppServerTurnId: (turnId) => {
+      activeTurnId = turnId || activeTurnId;
+    },
+  });
+
+  listener.start();
+  await listener.stop();
+
+  assert.deepEqual(
+    sentRequests.map((request) => request.method),
+    ["turn/steer", "turn/steer"],
+  );
+  assert.equal(sentRequests[0]?.params?.expectedTurnId, "stale_turn");
+  assert.equal(sentRequests[1]?.params?.expectedTurnId, "fresh_turn");
+  assert.equal(activeTurnId, "fresh_turn");
+  assert.equal(transactionUpdates.length, 1);
+  assert.equal(transactionUpdates[0]?.[2]?.[0]?.request_id, "wcasr_stale_turn");
+  assert.equal(transactionUpdates[0]?.[2]?.[0]?.status, "accepted");
 });
 
 test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => {
