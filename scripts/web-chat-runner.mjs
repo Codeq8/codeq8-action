@@ -70,7 +70,6 @@ const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
   "codex_app_server_attachment_turn_control";
 const CODEX_GOAL_UPDATE_PATH = "/api/chat/runs/goal";
 const CODEX_GOAL_OBJECTIVE_MAX_CHARS = 4000;
-const CODEX_GOAL_PROGRESS_LABEL_MAX_CHARS = 180;
 const APP_SERVER_CONTROL_CAPABILITIES = Object.freeze([
   APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY,
 ]);
@@ -1201,10 +1200,7 @@ function buildCodexGoalProgressEvent({
     event_id: `app_server:goal:${hashDiagnosticValue(identity).slice(0, 20)}`,
     kind: "codex_goal",
     item_type: "codex_goal",
-    label: truncateWithEllipsis(
-      `Goal: ${goal.objective}`,
-      CODEX_GOAL_PROGRESS_LABEL_MAX_CHARS,
-    ),
+    label: `Goal: ${goal.objective}`,
     status: "completed",
     at: now,
   };

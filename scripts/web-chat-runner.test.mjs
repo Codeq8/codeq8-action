@@ -932,6 +932,7 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-goal-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  const longGoalObjective = `Ship native Codeq8 goal support ${"without truncating active-run reasoning context ".repeat(5)}`.trim();
   const goalUpdates = [];
   const progressEvents = [];
   const server = createServer((request, response) => {
@@ -983,7 +984,7 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
     timeoutSeconds: 30,
     codexThreadGoalsEnabled: true,
     codexGoalState: {
-      objective: "Ship native Codeq8 goal support",
+      objective: longGoalObjective,
       status: "active",
       token_budget: 12345,
       tokens_used: 8,
@@ -1015,7 +1016,7 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
 
   assert.equal(result.ok, true);
   assert.equal(result.output, "goal ok");
-  assert.equal(result.codexGoalState.objective, "Ship native Codeq8 goal support");
+  assert.equal(result.codexGoalState.objective, longGoalObjective);
   const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
   const goalSet = requests.find((request) => request.method === "thread/goal/set");
   const turnStartIndex = requests.findIndex((request) => request.method === "turn/start");
@@ -1024,7 +1025,7 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
   assert(turnStartIndex > goalSetIndex);
   assert.deepEqual(goalSet?.params, {
     threadId: "thr_app",
-    objective: "Ship native Codeq8 goal support",
+    objective: longGoalObjective,
     status: "active",
     tokenBudget: 12345,
   });
@@ -1036,10 +1037,11 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
   assert.equal(goalUpdates[0]?.url, "/api/chat/runs/goal");
   assert.equal(goalUpdates[0]?.authorization, "Bearer header.payload.signature");
   assert.equal(goalUpdates[0]?.body?.event, "updated");
-  assert.equal(goalUpdates[0]?.body?.goal?.objective, "Ship native Codeq8 goal support");
+  assert.equal(goalUpdates[0]?.body?.goal?.objective, longGoalObjective);
   assert.equal(progressEvents[0]?.kind, "codex_goal");
   assert.equal(progressEvents[0]?.item_type, "codex_goal");
-  assert.equal(progressEvents[0]?.label, "Goal: Ship native Codeq8 goal support");
+  assert(longGoalObjective.length > 180);
+  assert.equal(progressEvents[0]?.label, `Goal: ${longGoalObjective}`);
   assert.equal(progressEvents[0]?.status, "completed");
   assert.match(progressEvents[0]?.event_id, /^app_server:goal:/);
 });
