@@ -2895,6 +2895,7 @@ test("prepareGitHubCliAuth refreshes gh tokens before each invocation", async ()
   const fakeBinPath = path.join(tempDir, "fake-bin");
   const runtimeHomePath = path.join(tempDir, "runtime");
   const helperStatePath = path.join(tempDir, "helper-count.txt");
+  const helperCallLogPath = path.join(tempDir, "helper-call-log.txt");
   const ghCallLogPath = path.join(tempDir, "gh-call-log.txt");
   await fs.mkdir(fakeBinPath, { recursive: true });
 
@@ -2917,10 +2918,14 @@ test("prepareGitHubCliAuth refreshes gh tokens before each invocation", async ()
     [
       "#!/bin/sh",
       `state_path=${JSON.stringify(helperStatePath)}`,
+      `call_log_path=${JSON.stringify(helperCallLogPath)}`,
+      'printf "%s\\n" "$*" >> "$call_log_path"',
       'count="$(cat "$state_path" 2>/dev/null || printf 0)"',
       'count="$((count + 1))"',
       'printf "%s" "$count" > "$state_path"',
-      'printf "fresh-token-%s" "$count"',
+      'repo="${2:-primary}"',
+      'safe_repo="$(printf "%s" "$repo" | tr "/" "-")"',
+      'printf "fresh-token-%s-%s" "$count" "$safe_repo"',
       "",
     ].join("\n"),
     { mode: 0o755 },
@@ -2942,32 +2947,48 @@ test("prepareGitHubCliAuth refreshes gh tokens before each invocation", async ()
   assert.equal(prepared.available, true);
   assert.equal(prepared.wrappedBinPath, fakeGhPath);
   assert.equal(prepared.binPath, path.join(runtimeHomePath, "bin", "gh"));
-  assert.equal(commandEnv.GH_TOKEN, "fresh-token-1");
-  assert.equal(commandEnv.GITHUB_TOKEN, "fresh-token-1");
+  assert.equal(commandEnv.GH_TOKEN, "fresh-token-1-primary");
+  assert.equal(commandEnv.GITHUB_TOKEN, "fresh-token-1-primary");
   const escapedRuntimeBinPath = path
     .join(runtimeHomePath, "bin")
     .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   assert.match(commandEnv.PATH, new RegExp(`^${escapedRuntimeBinPath}${path.delimiter}`));
 
-  execFileSync("gh", ["pr", "view", "1"], {
+  execFileSync("gh", ["pr", "view", "1", "--repo", "Codeq8/status"], {
     env: commandEnv,
     encoding: "utf8",
     stdio: "pipe",
   });
-  execFileSync("gh", ["run", "view", "2"], {
+  execFileSync("gh", ["run", "view", "2", "-R", "Codeq8/codeq8-action"], {
     env: commandEnv,
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+  execFileSync("gh", ["issue", "list"], {
+    env: {
+      ...commandEnv,
+      GH_REPO: "Codeq8/status",
+    },
     encoding: "utf8",
     stdio: "pipe",
   });
 
   const ghCallLog = await fs.readFile(ghCallLogPath, "utf8");
-  assert.match(ghCallLog, /GH_TOKEN=fresh-token-2/);
-  assert.match(ghCallLog, /GITHUB_TOKEN=fresh-token-2/);
-  assert.match(ghCallLog, /ARGS=pr view 1/);
-  assert.match(ghCallLog, /GH_TOKEN=fresh-token-3/);
-  assert.match(ghCallLog, /GITHUB_TOKEN=fresh-token-3/);
-  assert.match(ghCallLog, /ARGS=run view 2/);
+  assert.match(ghCallLog, /GH_TOKEN=fresh-token-2-Codeq8-status/);
+  assert.match(ghCallLog, /GITHUB_TOKEN=fresh-token-2-Codeq8-status/);
+  assert.match(ghCallLog, /ARGS=pr view 1 --repo Codeq8\/status/);
+  assert.match(ghCallLog, /GH_TOKEN=fresh-token-3-Codeq8-codeq8-action/);
+  assert.match(ghCallLog, /GITHUB_TOKEN=fresh-token-3-Codeq8-codeq8-action/);
+  assert.match(ghCallLog, /ARGS=run view 2 -R Codeq8\/codeq8-action/);
+  assert.match(ghCallLog, /GH_TOKEN=fresh-token-4-Codeq8-status/);
+  assert.match(ghCallLog, /GITHUB_TOKEN=fresh-token-4-Codeq8-status/);
+  assert.match(ghCallLog, /ARGS=issue list/);
   assert.doesNotMatch(ghCallLog, /startup-token/);
+
+  const helperCallLog = await fs.readFile(helperCallLogPath, "utf8");
+  assert.match(helperCallLog, /^print-token$/m);
+  assert.match(helperCallLog, /^print-token Codeq8\/status$/m);
+  assert.match(helperCallLog, /^print-token Codeq8\/codeq8-action$/m);
 });
 
 test("persistWorkspaceProgress explicitly pushes remembered branches that are ahead of origin", async () => {
@@ -3595,13 +3616,16 @@ test("configureWorkspaceGitCredentialHelper clears inherited helpers before addi
     assert.match(helperScript, /resolveRequestedRepository/);
     assert.match(helperScript, /request\.path/);
     assert.match(helperScript, /workspace_repository: requestedRepository/);
-    assert.match(helperScript, /Refusing to request a GitHub token for non-workspace repository/);
+    assert.doesNotMatch(
+      helperScript,
+      /Refusing to request a GitHub token for non-workspace repository/,
+    );
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
 });
 
-test("workspace git credential helper rejects non-workspace paths with trailing git path slash", async (t) => {
+test("workspace git credential helper requests linked repository tokens by path", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-credential-helper-"));
   const requests = [];
   const server = createServer((request, response) => {
@@ -3617,7 +3641,7 @@ test("workspace git credential helper rejects non-workspace paths with trailing 
         body: JSON.parse(rawBody || "{}"),
       });
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ ok: true, token: "ghs_unexpected_token" }));
+      response.end(JSON.stringify({ ok: true, token: "ghs_linked_repo_token" }));
     });
   });
   await new Promise((resolve, reject) => {
@@ -3657,13 +3681,17 @@ test("workspace git credential helper rejects non-workspace paths with trailing 
       },
     });
 
-    assert.notEqual(result.code, 0);
-    assert.equal(result.stdout, "");
-    assert.match(
-      result.stderr,
-      /Refusing to request a GitHub token for non-workspace repository miniExtensions\/webapp/,
+    assert.equal(result.code, 0);
+    assert.equal(
+      result.stdout,
+      "username=x-access-token\npassword=ghs_linked_repo_token\n\n",
     );
-    assert.equal(requests.length, 0);
+    assert.equal(result.stderr, "");
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]?.authorization, "Bearer scoped-run-token");
+    assert.deepEqual(requests[0]?.body, {
+      workspace_repository: "miniExtensions/webapp",
+    });
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
