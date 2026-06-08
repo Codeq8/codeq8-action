@@ -60,6 +60,7 @@ const MAX_RUNNER_DIAGNOSTIC_STRING_CHARS = 2000;
 const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 8;
+const APP_SERVER_CONTROL_MAX_REQUESTS_PER_RUN = 20;
 const APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS = 2500;
 // AppServer live chat transport must not be implemented as recurring runner
 // HTTP calls. The runner gets one Firebase session, then uses Firestore
@@ -203,14 +204,74 @@ function normalizeRunExecutionBackend(value) {
   return RUN_EXECUTION_BACKEND_VALUES.has(normalized) ? normalized : "";
 }
 
-function buildCodexRunMetadata({ model = "", mode = "", extra = {} }) {
+function normalizeAppServerControlRequestForRunMetadata(request) {
+  const normalizedRequest = normalizeObject(request);
+  const requestId = normalizeText(normalizedRequest.request_id || normalizedRequest.requestId);
+  const kind = normalizeText(normalizedRequest.kind).toLowerCase();
+  const status = normalizeText(normalizedRequest.status || "pending").toLowerCase();
+  if (
+    !requestId ||
+    (kind !== "steer" && kind !== "interrupt") ||
+    !["pending", "accepted", "failed"].includes(status)
+  ) {
+    return null;
+  }
+  return {
+    ...normalizedRequest,
+    request_id: requestId,
+    sequence: Number(normalizedRequest.sequence || 0) || 0,
+    kind,
+    content: truncate(normalizeText(normalizedRequest.content), 4000),
+    attachments: parseAttachmentList(normalizedRequest.attachments),
+    message_id: normalizeText(normalizedRequest.message_id || normalizedRequest.messageId),
+    status,
+    error: truncate(extractErrorMessage(normalizedRequest.error), 500),
+    requested_by_github_login: truncate(
+      normalizeText(
+        normalizedRequest.requested_by_github_login ||
+          normalizedRequest.requestedByGithubLogin,
+      ),
+      255,
+    ),
+    requested_at: Number(normalizedRequest.requested_at || normalizedRequest.requestedAt || 0) || 0,
+    acknowledged_at:
+      Number(normalizedRequest.acknowledged_at || normalizedRequest.acknowledgedAt || 0) || 0,
+  };
+}
+
+function normalizeAppServerControlRequestsForRunMetadata(requests) {
+  return (Array.isArray(requests) ? requests : [])
+    .map(normalizeAppServerControlRequestForRunMetadata)
+    .filter(Boolean)
+    .slice(-APP_SERVER_CONTROL_MAX_REQUESTS_PER_RUN);
+}
+
+function buildCodexRunMetadata({
+  model = "",
+  mode = "",
+  extra = {},
+  appServerControlRequests = [],
+}) {
   const normalizedModel = normalizeText(model);
   const normalizedMode = normalizeText(mode);
+  const normalizedControlRequests =
+    normalizeAppServerControlRequestsForRunMetadata(appServerControlRequests);
   return {
     ...(normalizedModel ? { model: normalizedModel } : {}),
     reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT,
     ...(normalizedMode ? { codex_session_mode: normalizedMode } : {}),
     app_server_control_capabilities: [...APP_SERVER_CONTROL_CAPABILITIES],
+    ...(normalizedControlRequests.length > 0
+      ? {
+          app_server: {
+            transport: "app-server",
+            control: {
+              updated_at: Date.now(),
+              requests: normalizedControlRequests,
+            },
+          },
+        }
+      : {}),
     ...extra,
   };
 }
@@ -7509,9 +7570,16 @@ function createAppServerFirestoreControlListener({
   }
 
   let stopped = false;
+  let stopping = false;
   let unsubscribe = () => {};
+  let latestSnapshotData = null;
+  let latestControlRequests = [];
   const processingRequestIds = new Set();
   const processingPromises = new Set();
+
+  const updateLatestControlRequests = (requests) => {
+    latestControlRequests = normalizeAppServerControlRequestsForRunMetadata(requests);
+  };
 
   const acknowledge = async (acknowledgements) => {
     if (!Array.isArray(acknowledgements) || acknowledgements.length === 0) {
@@ -7532,7 +7600,25 @@ function createAppServerFirestoreControlListener({
       if (!acknowledged.changed) {
         return;
       }
+      updateLatestControlRequests(acknowledged.requests);
       const now = Date.now();
+      const normalizedData = normalizeObject(data);
+      const threads = normalizeObject(normalizedData.threads);
+      const threadStatus = normalizeObject(threads[normalizedThreadId]);
+      latestSnapshotData = {
+        ...normalizedData,
+        threads: {
+          ...threads,
+          [normalizedThreadId]: {
+            ...threadStatus,
+            appServerControlRequests: acknowledged.requests,
+            appServerControlRevision: `${normalizedRunId}:${now}`,
+            updatedAt: now,
+          },
+        },
+        revision: String(now),
+        updatedAt: now,
+      };
       transaction.update(
         docRef,
         new FieldPathImpl("threads", normalizedThreadId, "appServerControlRequests"),
@@ -7562,6 +7648,29 @@ function createAppServerFirestoreControlListener({
         },
       });
     });
+  };
+
+  const failObservedPendingRequests = async (reason) => {
+    const requests = readAppServerLiveStatusControlRequests(
+      latestSnapshotData,
+      normalizedThreadId,
+      normalizedRunId,
+    );
+    updateLatestControlRequests(requests);
+    const acknowledgements = requests
+      .filter((request) =>
+        normalizeText(request.status || "pending").toLowerCase() === "pending",
+      )
+      .map((request) => ({
+        request_id: normalizeText(request.request_id || request.requestId),
+        status: "failed",
+        error: reason,
+      }))
+      .filter((acknowledgement) => Boolean(acknowledgement.request_id));
+    if (acknowledgements.length === 0) {
+      return;
+    }
+    await acknowledge(acknowledgements);
   };
 
   const processRequest = async (rawRequest) => {
@@ -7650,21 +7759,40 @@ function createAppServerFirestoreControlListener({
     processingPromises.add(promise);
   };
 
-  const handleSnapshotData = (data) => {
-    if (stopped) {
-      return;
-    }
+  const drainSnapshotData = (data, { allowWhileStopping = false } = {}) => {
+    const snapshotData = normalizeObject(data);
     const requests = readAppServerLiveStatusControlRequests(
-      data,
+      snapshotData,
       normalizedThreadId,
       normalizedRunId,
     );
+    updateLatestControlRequests(requests);
+    if (stopped || (stopping && !allowWhileStopping)) {
+      return;
+    }
+    if (!getAppServerThreadId() || !getAppServerTurnId()) {
+      return;
+    }
     for (const request of requests) {
       if (normalizeText(request.status || "pending").toLowerCase() !== "pending") {
         continue;
       }
       enqueueRequest(request);
     }
+  };
+
+  const handleSnapshotData = (data) => {
+    latestSnapshotData = normalizeObject(data);
+    drainSnapshotData(latestSnapshotData);
+  };
+
+  const flushPending = ({ allowWhileStopping = false } = {}) => {
+    if (!latestSnapshotData || stopped || stopping) {
+      if (!(latestSnapshotData && allowWhileStopping && !stopped)) {
+        return;
+      }
+    }
+    drainSnapshotData(latestSnapshotData, { allowWhileStopping });
   };
 
   return {
@@ -7700,8 +7828,13 @@ function createAppServerFirestoreControlListener({
         },
       );
     },
+    flushPending,
+    readControlRequests() {
+      return [...latestControlRequests];
+    },
     async stop() {
-      stopped = true;
+      flushPending({ allowWhileStopping: true });
+      stopping = true;
       try {
         unsubscribe();
       } catch {
@@ -7710,6 +7843,10 @@ function createAppServerFirestoreControlListener({
       if (processingPromises.size > 0) {
         await Promise.allSettled([...processingPromises]);
       }
+      await failObservedPendingRequests(
+        "Codex finished before this follow-up could be delivered.",
+      );
+      stopped = true;
     },
   };
 }
@@ -8016,6 +8153,9 @@ async function runCodexAppServer({
       }
       resolve({
         ...result,
+        appServerControlRequests: Array.isArray(result.appServerControlRequests)
+          ? result.appServerControlRequests
+          : controlListener?.readControlRequests?.() || [],
         sessionId: normalizeCodexSessionId(result.sessionId || appServerThreadId),
         codexGoalState: normalizeCodexGoalState(
           result.codexGoalState || goalReporter.latestGoalState(),
@@ -8176,6 +8316,7 @@ async function runCodexAppServer({
       }
       if (normalizedMethod === "turn/started") {
         activeTurnId = extractAppServerTurnId(params) || activeTurnId;
+        controlListener?.flushPending?.();
       }
       if (normalizedMethod === "thread/goal/updated") {
         const notification = normalizeCodexGoalNotification(params);
@@ -8378,6 +8519,7 @@ async function runCodexAppServer({
         getAppServerTurnId: () => activeTurnId,
         setAppServerTurnId: (turnId) => {
           activeTurnId = normalizeCodexSessionId(turnId) || activeTurnId;
+          controlListener?.flushPending?.();
         },
       }) || null;
       controlListener?.start?.();
@@ -8393,6 +8535,7 @@ async function runCodexAppServer({
         effort: DEFAULT_CODEX_REASONING_EFFORT,
       });
       activeTurnId = extractAppServerTurnId(turnResult) || activeTurnId;
+      controlListener?.flushPending?.();
     })().catch((error) => {
       void finish({
         ok: false,
@@ -9594,6 +9737,7 @@ async function main() {
   let threadTargetRestartCount = 0;
   let codexResumeRecoveryCount = 0;
   let lastPersistenceSummary = "";
+  let latestAppServerControlRequests = [];
   try {
     while (true) {
       assistantMessage = "";
@@ -10115,6 +10259,10 @@ async function main() {
             reportRunnerDiagnostic,
           },
         });
+        latestAppServerControlRequests =
+          normalizeAppServerControlRequestsForRunMetadata(
+            execution.appServerControlRequests,
+          );
         const executionCodexGoalState = normalizeCodexGoalState(
           execution.codexGoalState,
         );
@@ -10271,6 +10419,7 @@ async function main() {
                 metadata: buildCodexRunMetadata({
                   model: codexModel,
                   mode: executionMode,
+                  appServerControlRequests: latestAppServerControlRequests,
                   extra: {
                     thread_target_restart_count: threadTargetRestartCount,
                     thread_target_restart_limit_reached: true,
@@ -10632,6 +10781,7 @@ async function main() {
             metadata: buildCodexRunMetadata({
               model: codexModel,
               mode: executionMode,
+              appServerControlRequests: latestAppServerControlRequests,
               extra: {
                 exit_code: execution.exitCode,
                 signal: execution.signal || "",
@@ -10773,6 +10923,7 @@ async function main() {
           metadata: buildCodexRunMetadata({
             model: codexModel,
             mode: executionMode,
+            appServerControlRequests: latestAppServerControlRequests,
             extra: {
               codex_session_id: persistedCodexSessionState.session_id,
               codex_session_bundle_revision: persistedCodexSessionState.bundle_revision,

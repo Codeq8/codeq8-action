@@ -301,6 +301,36 @@ test("buildCodexRunMetadata advertises AppServer attachment steering support", (
   ]);
 });
 
+test("buildCodexRunMetadata preserves final AppServer control statuses", () => {
+  const metadata = buildCodexRunMetadata({
+    model: "gpt-5.5",
+    mode: "fresh",
+    appServerControlRequests: [
+      {
+        request_id: "wcasr_accepted",
+        sequence: 1,
+        kind: "steer",
+        content: "Delivered follow-up",
+        attachments: [],
+        message_id: "wcm_followup",
+        status: "accepted",
+        error: "",
+        requested_by_github_login: "aalzanki",
+        requested_at: 1000,
+        acknowledged_at: 2000,
+      },
+    ],
+  });
+
+  assert.equal(metadata.app_server.transport, "app-server");
+  assert.equal(
+    metadata.app_server.control.requests[0].request_id,
+    "wcasr_accepted",
+  );
+  assert.equal(metadata.app_server.control.requests[0].status, "accepted");
+  assert.equal(metadata.app_server.control.requests[0].message_id, "wcm_followup");
+});
+
 test("runner diagnostic requests redact secrets before posting", async () => {
   const diagnostic = buildWebChatRunnerDiagnosticRequest({
     event: "runner_session_marker_missing",
@@ -926,6 +956,167 @@ test("AppServer Firestore control listener retries stale active turn id rejectio
   assert.equal(transactionUpdates.length, 1);
   assert.equal(transactionUpdates[0]?.[2]?.[0]?.request_id, "wcasr_stale_turn");
   assert.equal(transactionUpdates[0]?.[2]?.[0]?.status, "accepted");
+});
+
+test("AppServer Firestore control listener drains requests after the active turn id arrives", async () => {
+  class FieldPath {
+    constructor(...segments) {
+      this.segments = segments;
+    }
+  }
+
+  let activeTurnId = "";
+  const sentRequests = [];
+  const transactionUpdates = [];
+  const docData = {
+    threads: {
+      wct_app: {
+        latestRunId: "wcr_app",
+        appServerControlRequests: [
+          {
+            request_id: "wcasr_deferred_turn",
+            sequence: 1,
+            kind: "steer",
+            content: "This arrived before turn/start returned.",
+            attachments: [],
+            status: "pending",
+            error: "",
+          },
+        ],
+      },
+    },
+  };
+
+  const listener = createAppServerFirestoreControlListener({
+    FieldPathImpl: FieldPath,
+    channel: {
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      collectionId: "chat_repository_live_status",
+      documentId: "app-server-run:workspace:workspace:repository:repo:thread:wct_app:run:wcr_app",
+    },
+    docRef: {},
+    firestore: {},
+    onSnapshotImpl: (_docRef, next) => {
+      next({
+        exists: () => true,
+        data: () => docData,
+      });
+      return () => {};
+    },
+    runTransactionImpl: async (_firestore, callback) =>
+      await callback({
+        get: async () => ({
+          exists: () => true,
+          data: () => docData,
+        }),
+        update: (...args) => {
+          transactionUpdates.push(args);
+          docData.threads.wct_app.appServerControlRequests = args[2];
+        },
+      }),
+    sendRequest: async (method, params) => {
+      sentRequests.push({ method, params });
+      return { ok: true };
+    },
+    getAppServerThreadId: () => "thr_app",
+    getAppServerTurnId: () => activeTurnId,
+  });
+
+  listener.start();
+  assert.equal(sentRequests.length, 0);
+
+  activeTurnId = "turn_app";
+  listener.flushPending();
+  await listener.stop();
+
+  assert.equal(sentRequests.length, 1);
+  assert.equal(sentRequests[0]?.method, "turn/steer");
+  assert.equal(sentRequests[0]?.params?.expectedTurnId, "turn_app");
+  assert.equal(transactionUpdates.length, 1);
+  assert.equal(transactionUpdates[0]?.[2]?.[0]?.request_id, "wcasr_deferred_turn");
+  assert.equal(transactionUpdates[0]?.[2]?.[0]?.status, "accepted");
+  assert.equal(listener.readControlRequests()[0]?.status, "accepted");
+});
+
+test("AppServer Firestore control listener fails observed pending requests on shutdown", async () => {
+  class FieldPath {
+    constructor(...segments) {
+      this.segments = segments;
+    }
+  }
+
+  let sendCount = 0;
+  const transactionUpdates = [];
+  const docData = {
+    threads: {
+      wct_app: {
+        latestRunId: "wcr_app",
+        appServerControlRequests: [
+          {
+            request_id: "wcasr_shutdown",
+            sequence: 1,
+            kind: "steer",
+            content: "This arrived too late.",
+            attachments: [],
+            status: "pending",
+            error: "",
+          },
+        ],
+      },
+    },
+  };
+
+  const listener = createAppServerFirestoreControlListener({
+    FieldPathImpl: FieldPath,
+    channel: {
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      collectionId: "chat_repository_live_status",
+      documentId: "app-server-run:workspace:workspace:repository:repo:thread:wct_app:run:wcr_app",
+    },
+    docRef: {},
+    firestore: {},
+    onSnapshotImpl: (_docRef, next) => {
+      next({
+        exists: () => true,
+        data: () => docData,
+      });
+      return () => {};
+    },
+    runTransactionImpl: async (_firestore, callback) =>
+      await callback({
+        get: async () => ({
+          exists: () => true,
+          data: () => docData,
+        }),
+        update: (...args) => {
+          transactionUpdates.push(args);
+          docData.threads.wct_app.appServerControlRequests = args[2];
+        },
+      }),
+    sendRequest: async () => {
+      sendCount += 1;
+      return { ok: true };
+    },
+    getAppServerThreadId: () => "thr_app",
+    getAppServerTurnId: () => "",
+  });
+
+  listener.start();
+  await listener.stop();
+
+  assert.equal(sendCount, 0);
+  assert.equal(transactionUpdates.length, 1);
+  assert.equal(transactionUpdates[0]?.[2]?.[0]?.request_id, "wcasr_shutdown");
+  assert.equal(transactionUpdates[0]?.[2]?.[0]?.status, "failed");
+  assert.match(
+    transactionUpdates[0]?.[2]?.[0]?.error,
+    /finished before this follow-up could be delivered/,
+  );
+  assert.equal(listener.readControlRequests()[0]?.status, "failed");
 });
 
 test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => {
