@@ -123,3 +123,36 @@ test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => 
   assert.equal(env.CODE_CHAT_REFERENCED_THREADS_JSON, '[{"thread_id":"wct_other"}]');
   assert.equal(env.CODE_CHAT_THREAD_SPEC_TEXT, "Keep diffs narrow.");
 });
+
+test("buildWebChatRunnerEnv maps the dispatched GitHub web session cookie", () => {
+  const env = buildWebChatRunnerEnv({
+    env: {
+      GITHUB_WORKSPACE: "/tmp/codeq8",
+      GITHUB_REPOSITORY: "Codeq8/Codeq8",
+      GITHUB_RUN_ID: "987654321",
+      GITHUB_SERVER_URL: "https://github.com",
+      CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE: "stale_env_cookie",
+    },
+    payload: {
+      run_id: "wcr_123",
+      thread_id: "wct_123",
+      message_id: "wcm_123",
+      workspace_repository: "Codeq8/Codeq8",
+      worker_url: "https://main-codeq8.bojamal7.workers.dev",
+      githubWebSessionCookie: "fresh_payload_cookie",
+      prompt_text: "Fix the failing run",
+      branch_context: {
+        default_branch: "main",
+        protected_branches: ["main", "production"],
+        context_branch: "main",
+        write_mode: "branch_and_pr",
+        base_branch: "main",
+      },
+    },
+  });
+
+  assert.equal(
+    env.CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE,
+    "fresh_payload_cookie",
+  );
+});

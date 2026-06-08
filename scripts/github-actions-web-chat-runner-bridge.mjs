@@ -147,6 +147,9 @@ export function normalizeGitHubActionsChatRunPayload(value) {
     ),
     source_type: normalizeSourceType(normalized.source_type || normalized.sourceType),
     github_login: normalizeText(normalized.github_login || normalized.githubLogin),
+    github_web_session_cookie: normalizeText(
+      normalized.github_web_session_cookie || normalized.githubWebSessionCookie,
+    ),
     web_chat_run_token: normalizeText(
       normalized.web_chat_run_token || normalized.webChatRunToken,
     ),
@@ -287,6 +290,12 @@ export function buildWebChatRunnerEnv({
       normalizedPayload.recent_checks_prompt_text,
     CODE_CHAT_REFERENCED_THREADS_JSON:
       normalizedPayload.referenced_threads_json,
+    ...(normalizedPayload.github_web_session_cookie
+      ? {
+          CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE:
+            normalizedPayload.github_web_session_cookie,
+        }
+      : {}),
     CODE_CHAT_DEFAULT_BRANCH: normalizedPayload.branch_context.default_branch,
     CODE_CHAT_PROTECTED_BRANCHES: stringifyJson(
       normalizedPayload.branch_context.protected_branches,
