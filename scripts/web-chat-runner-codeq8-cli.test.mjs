@@ -63,6 +63,63 @@ test("runner codeq8 helper searches threads with scoped auth and parent fields",
   assert.deepEqual(output.readJson().threads, [{ thread_id: "wct_found" }]);
 });
 
+test("runner codeq8 helper lists current-user threads with compact safe output", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  const exitCode = await handleRunnerCodeq8Cli({
+    argv: ["threads", "mine", "--status", "active", "--limit", "5"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        repository: "Codeq8/Codeq8",
+        assigned_to_github_login: "abdul",
+        threads: [
+          {
+            thread_id: "wct_mine",
+            status: "active",
+            title: "Fanout audit",
+            latest_run_status: "running",
+            assigned_to_github_login: "abdul",
+            updated_at: 1700000000000,
+            branch_context: {
+              pull_request_number: 2499,
+            },
+            thread_stream_token: "secret_stream_token",
+            thread_record_handoff: "secret_handoff_token",
+          },
+        ],
+        page_count: 1,
+        has_more: true,
+        next_before_updated_at: 1699999999999,
+        next_before_thread_id: "wct_cursor",
+      });
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.origin, "https://codeq8.example");
+  assert.equal(url.pathname, "/api/chat/runs/thread-search");
+  assert.equal(url.searchParams.get("workspace_repository"), "Codeq8/Codeq8");
+  assert.equal(url.searchParams.get("thread_id"), "wct_parent");
+  assert.equal(url.searchParams.get("run_id"), "wcr_parent");
+  assert.equal(url.searchParams.get("assigned_to"), "me");
+  assert.equal(url.searchParams.get("status"), "active");
+  assert.equal(url.searchParams.get("limit"), "5");
+
+  const text = output.readText();
+  assert.match(text, /Repository: Codeq8\/Codeq8/);
+  assert.match(text, /Assigned: me/);
+  assert.match(text, /wct_mine\tactive\trunning\t#2499\t2023-11-14T22:13:20\.000Z\tFanout audit/);
+  assert.match(text, /Next: --before-updated-at 1699999999999 --before-thread-id wct_cursor/);
+  assert.doesNotMatch(text, /secret_stream_token/);
+  assert.doesNotMatch(text, /secret_handoff_token/);
+});
+
 test("runner codeq8 helper creates delegated threads through backend contract", async () => {
   const output = createOutputCapture();
   const calls = [];

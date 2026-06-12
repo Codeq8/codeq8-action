@@ -166,12 +166,108 @@ function writeJson(stdout, payload) {
   stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
+function payloadObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function payloadArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeEpochMs(value) {
+  const parsed = Number.parseInt(String(value || "").trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function formatTimestamp(value) {
+  const epochMs = normalizeEpochMs(value);
+  return epochMs > 0 ? new Date(epochMs).toISOString() : "";
+}
+
+function formatThreadTarget(thread) {
+  const branchContext = payloadObject(thread.branch_context || thread.branchContext);
+  const pullRequestNumber = normalizeInteger(
+    branchContext.pull_request_number || branchContext.pullRequestNumber,
+    0,
+  );
+  if (pullRequestNumber > 0) {
+    return `#${pullRequestNumber}`;
+  }
+  return (
+    normalizeText(branchContext.context_branch || branchContext.contextBranch) ||
+    normalizeText(branchContext.base_branch || branchContext.baseBranch) ||
+    normalizeText(thread.source_type || thread.sourceType)
+  );
+}
+
+function formatThreadRunStatus(thread) {
+  return (
+    normalizeText(thread.latest_run_status || thread.latestRunStatus) ||
+    normalizeText(payloadObject(thread.latest_run || thread.latestRun).status) ||
+    normalizeText(payloadObject(thread.run || {}).status)
+  );
+}
+
+function formatThreadUpdatedAt(thread) {
+  return formatTimestamp(
+    thread.updated_at ||
+      thread.updatedAt ||
+      thread.last_message_at ||
+      thread.lastMessageAt ||
+      thread.created_at ||
+      thread.createdAt,
+  );
+}
+
+function writeCompactThreadList(stdout, payload, { assignedLabel = "me", status = "" } = {}) {
+  const threads = payloadArray(payload.threads);
+  const repository = normalizeText(payload.repository);
+  const normalizedStatus = normalizeText(status || payload.status || "");
+  stdout.write(`Repository: ${repository || "(unknown)"}\n`);
+  stdout.write(`Assigned: ${assignedLabel || "me"}\n`);
+  if (normalizedStatus) {
+    stdout.write(`Status: ${normalizedStatus}\n`);
+  }
+  stdout.write("\n");
+
+  if (threads.length === 0) {
+    stdout.write("No matching assigned threads.\n");
+  } else {
+    stdout.write("thread_id\tstatus\trun\ttarget\tupdated_at\ttitle\n");
+    for (const entry of threads) {
+      const thread = payloadObject(entry);
+      stdout.write(
+        [
+          normalizeText(thread.thread_id || thread.threadId),
+          normalizeText(thread.status),
+          formatThreadRunStatus(thread),
+          formatThreadTarget(thread),
+          formatThreadUpdatedAt(thread),
+          normalizeText(thread.title || "(untitled)").replace(/\s+/g, " "),
+        ].join("\t") + "\n",
+      );
+    }
+  }
+
+  stdout.write("\n");
+  stdout.write(`Page count: ${normalizeInteger(payload.page_count || payload.pageCount, 0)}\n`);
+  stdout.write(`Has more: ${payload.has_more || payload.hasMore ? "yes" : "no"}\n`);
+  const nextUpdatedAt = normalizeEpochMs(payload.next_before_updated_at || payload.nextBeforeUpdatedAt);
+  const nextThreadId = normalizeText(payload.next_before_thread_id || payload.nextBeforeThreadId);
+  if (nextUpdatedAt || nextThreadId) {
+    stdout.write(
+      `Next: --before-updated-at ${nextUpdatedAt || ""} --before-thread-id ${nextThreadId}\n`,
+    );
+  }
+}
+
 function printHelp(stdout) {
   stdout.write(
     [
       "Codeq8 runner helper",
       "",
       "Usage:",
+      "  codeq8 threads mine [--status active|all] [--limit 25]",
       "  codeq8 threads search [--search text] [--status active|all] [--limit 25]",
       "  codeq8 threads context <thread-id> [--limit 20]",
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
@@ -193,6 +289,27 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
   const [command, ...rest] = args;
   if (!command || command === "--help" || command === "help") {
     printHelp(stdout);
+    return 0;
+  }
+
+  if (command === "mine") {
+    const query = new URLSearchParams();
+    const status = readFlag(rest, "--status", "active");
+    appendParentQuery(query, context);
+    query.set("status", status);
+    query.set("assigned_to", "me");
+    query.set("search", readFlag(rest, ["--search", "--query", "-q"]));
+    query.set("limit", readFlag(rest, "--limit", "25"));
+    query.set("before_updated_at", readFlag(rest, "--before-updated-at"));
+    query.set("before_thread_id", readFlag(rest, "--before-thread-id"));
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/thread-search",
+      query,
+    });
+    writeCompactThreadList(stdout, payload, { assignedLabel: "me", status });
     return 0;
   }
 
