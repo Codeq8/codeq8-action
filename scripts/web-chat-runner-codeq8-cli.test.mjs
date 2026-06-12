@@ -120,6 +120,213 @@ test("runner codeq8 helper lists current-user threads with compact safe output",
   assert.doesNotMatch(text, /secret_handoff_token/);
 });
 
+test("runner codeq8 helper inspects one delegated thread with compact redacted output", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  const exitCode = await handleRunnerCodeq8Cli({
+    argv: ["threads", "inspect", "wct_child", "--limit", "7"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        parent_thread_id: "wct_parent",
+        parent_run_id: "wcr_parent",
+        parent_workspace_repository: "Codeq8/Codeq8",
+        child_thread_id: "wct_child",
+        thread: {
+          thread_id: "wct_child",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Investigate checks",
+          status: "active",
+          aggregate_status: "loading",
+          source_type: "pull_request",
+          assigned_to_kind: "github_user",
+          assigned_to_github_login: "abdul",
+          latest_run_id: "wcr_latest",
+          latest_run_status: "running",
+          latest_run_started_at: 1700000000000,
+          last_run_at: 1700000060000,
+          latest_check_state: "pending",
+          latest_message_role: "assistant",
+          latest_message_preview: "I am checking the failing job.",
+          last_message_at: 1700000050000,
+          branch_context: {
+            pull_request_number: 42,
+            pull_request_url: "https://github.com/Codeq8/Codeq8/pull/42",
+            pull_request_head_branch: "fix/checks",
+            pull_request_base_branch: "main",
+          },
+          live_status: {
+            status: "in_progress",
+            label: "Inspecting CI logs with token=secret_progress_token",
+            events: [
+              {
+                item_type: "assistant_reasoning",
+                label: "Comparing check state",
+                created_at: 1700000040000,
+              },
+            ],
+          },
+          thread_stream_token: "secret_stream_token",
+          thread_record_handoff: "secret_handoff_token",
+          codex_session_state: {
+            bundle_storage_key: "secret_bundle_key",
+          },
+        },
+        messages: [
+          {
+            message_id: "wcm_user",
+            role: "user",
+            content: "Please inspect this thread.",
+            created_at: 1700000010000,
+            metadata: {
+              thread_record_handoff: "secret_message_handoff",
+            },
+          },
+          {
+            message_id: "wcm_assistant",
+            role: "assistant",
+            content: "Working through thread_stream_token=secret_message_token now.",
+            created_at: 1700000020000,
+          },
+        ],
+        page_count: 2,
+        has_more: false,
+      });
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.origin, "https://codeq8.example");
+  assert.equal(url.pathname, "/api/chat/runs/delegated-thread-state");
+  assert.equal(calls[0]?.init?.method, "GET");
+  assert.equal(url.searchParams.get("workspace_repository"), "Codeq8/Codeq8");
+  assert.equal(url.searchParams.get("thread_id"), "wct_parent");
+  assert.equal(url.searchParams.get("run_id"), "wcr_parent");
+  assert.equal(url.searchParams.get("child_thread_id"), "wct_child");
+  assert.equal(url.searchParams.get("limit"), "7");
+
+  const text = output.readText();
+  assert.match(text, /Thread: wct_child/);
+  assert.match(text, /Title: Investigate checks/);
+  assert.match(text, /State: status=active aggregate=loading/);
+  assert.match(text, /Source: PR #42 https:\/\/github\.com\/Codeq8\/Codeq8\/pull\/42/);
+  assert.match(text, /Run: wcr_latest running/);
+  assert.match(text, /Checks: pending/);
+  assert.match(text, /Progress: status=in_progress \| Inspecting CI logs with token=\[redacted\]/);
+  assert.match(text, /assistant: Working through thread_stream_token=\[redacted\] now\./);
+  assert.match(text, /Follow-up: codeq8 threads message wct_child --text "\.\.\."/);
+  assert.match(text, /Page: 2 message\(s\), has more: no/);
+  assert.ok(text.length < 2200);
+  assert.doesNotMatch(text, /secret_stream_token/);
+  assert.doesNotMatch(text, /secret_handoff_token/);
+  assert.doesNotMatch(text, /secret_bundle_key/);
+  assert.doesNotMatch(text, /secret_message_handoff/);
+  assert.doesNotMatch(text, /secret_message_token/);
+  assert.doesNotMatch(text, /secret_progress_token/);
+});
+
+test("runner codeq8 helper inspect json returns a redacted snapshot contract", async () => {
+  const output = createOutputCapture();
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "inspect", "wct_child", "--json"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async () =>
+      Response.json({
+        ok: true,
+        child_thread_id: "wct_child",
+        thread: {
+          thread_id: "wct_child",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Review PR",
+          status: "active",
+          latest_run_id: "wcr_review",
+          latest_run_status: "completed",
+          latest_check_state: "success",
+          branch_context: {
+            pull_request_number: 77,
+            pull_request_head_branch: "review/fix",
+            pull_request_base_branch: "main",
+          },
+          thread_stream_token: "secret_stream_token",
+          thread_record_handoff: "secret_handoff_token",
+          codex_session_state: {
+            session_id: "secret_session_id",
+            bundle_storage_key: "secret_bundle_key",
+          },
+        },
+        messages: [
+          {
+            message_id: "wcm_latest",
+            role: "assistant",
+            content: "Completed the change.",
+            created_at: 1700000000000,
+            metadata: {
+              cookie: "secret_cookie",
+              session_bundle_key: "secret_session_bundle",
+            },
+          },
+        ],
+        total_count: 1,
+        page_count: 1,
+      }),
+  });
+
+  const snapshot = output.readJson();
+  assert.equal(snapshot.inspected, true);
+  assert.equal(snapshot.target_thread_id, "wct_child");
+  assert.equal(snapshot.thread.repository, "Codeq8/Codeq8");
+  assert.equal(snapshot.run.run_id, "wcr_review");
+  assert.equal(snapshot.run.status, "completed");
+  assert.equal(snapshot.checks.latest_state, "success");
+  assert.equal(snapshot.pull_request.number, 77);
+  assert.equal(snapshot.recent_messages[0].preview, "Completed the change.");
+  assert.equal(
+    snapshot.follow_up_command,
+    'codeq8 threads message wct_child --text "..."',
+  );
+
+  const serialized = JSON.stringify(snapshot);
+  assert.doesNotMatch(serialized, /thread_stream_token/);
+  assert.doesNotMatch(serialized, /thread_record_handoff/);
+  assert.doesNotMatch(serialized, /codex_session_state/);
+  assert.doesNotMatch(serialized, /metadata/);
+  assert.doesNotMatch(serialized, /secret_stream_token/);
+  assert.doesNotMatch(serialized, /secret_handoff_token/);
+  assert.doesNotMatch(serialized, /secret_bundle_key/);
+  assert.doesNotMatch(serialized, /secret_cookie/);
+  assert.doesNotMatch(serialized, /secret_session_bundle/);
+});
+
+test("runner codeq8 helper exposes inspect and message without a threads steer command", async () => {
+  const output = createOutputCapture();
+  const exitCode = await handleRunnerCodeq8Cli({
+    argv: ["threads", "--help"],
+    stdout: output.stream,
+    fetchImpl: async () => {
+      throw new Error("help must not fetch");
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  const text = output.readText();
+  assert.match(text, /codeq8 threads inspect <thread-id> \[--limit 12\] \[--json\]/);
+  assert.match(text, /codeq8 threads message <thread-id> --text text/);
+  assert.doesNotMatch(text, /threads steer/);
+
+  const cliSource = await fs.readFile(
+    new URL("./web-chat-runner-codeq8-cli.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(cliSource, /command === "steer"/);
+  assert.doesNotMatch(cliSource, /threads steer/);
+});
+
 test("runner codeq8 helper creates delegated threads through backend contract", async () => {
   const output = createOutputCapture();
   const calls = [];

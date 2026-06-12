@@ -17,6 +17,11 @@ function normalizeInteger(value, fallback = 0) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function normalizeNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function normalizeBaseUrl(value, fallback = "") {
   const normalized = normalizeText(value || fallback).replace(/\/+$/, "");
   return normalized;
@@ -174,6 +179,26 @@ function payloadArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function firstText(...values) {
+  for (const value of values) {
+    const normalized = normalizeText(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const normalized = normalizeNumber(value, 0);
+    if (normalized > 0) {
+      return normalized;
+    }
+  }
+  return 0;
+}
+
 function normalizeEpochMs(value) {
   const parsed = Number.parseInt(String(value || "").trim(), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
@@ -261,6 +286,383 @@ function writeCompactThreadList(stdout, payload, { assignedLabel = "me", status 
   }
 }
 
+function truncateText(value, maxLength = 240) {
+  const normalized = redactSensitiveText(normalizeText(value).replace(/\s+/g, " "));
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function redactSensitiveText(value) {
+  return normalizeText(value)
+    .replace(
+      /\b(thread_stream_token|thread_record_handoff|run_record_handoff|repository_access_handoff|session_bundle_key|bundle_storage_key|authorization|cookie|token|secret|password|api_key|private_key)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$1=[redacted]",
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]");
+}
+
+function readThreadBranchContext(thread) {
+  return payloadObject(thread.branch_context || thread.branchContext);
+}
+
+function readThreadGitHubContext(thread) {
+  return payloadObject(thread.github_context || thread.githubContext);
+}
+
+function readThreadPullRequest(thread) {
+  const branchContext = readThreadBranchContext(thread);
+  const githubContext = readThreadGitHubContext(thread);
+  const githubPullRequest = payloadObject(
+    githubContext.pull_request || githubContext.pullRequest,
+  );
+  const pullRequestNumber = firstPositiveNumber(
+    branchContext.pull_request_number,
+    branchContext.pullRequestNumber,
+    githubPullRequest.number,
+    githubPullRequest.pull_request_number,
+  );
+  return {
+    number: pullRequestNumber,
+    url: firstText(
+      branchContext.pull_request_url,
+      branchContext.pullRequestUrl,
+      githubPullRequest.html_url,
+      githubPullRequest.url,
+    ),
+    base_branch: firstText(
+      branchContext.pull_request_base_branch,
+      branchContext.pullRequestBaseBranch,
+      payloadObject(githubPullRequest.base).ref,
+    ),
+    head_branch: firstText(
+      branchContext.pull_request_head_branch,
+      branchContext.pullRequestHeadBranch,
+      payloadObject(githubPullRequest.head).ref,
+    ),
+  };
+}
+
+function readThreadRepository(thread, payload) {
+  const githubContext = readThreadGitHubContext(thread);
+  const repository = payloadObject(githubContext.repository);
+  return firstText(
+    thread.workspace_repository,
+    thread.workspaceRepository,
+    payload.repository,
+    repository.full_name,
+    repository.fullName,
+  );
+}
+
+function summarizeThreadMessage(message) {
+  const normalized = payloadObject(message);
+  return {
+    message_id: firstText(normalized.message_id, normalized.messageId),
+    role: firstText(normalized.role),
+    created_at: normalizeEpochMs(normalized.created_at || normalized.createdAt),
+    preview: truncateText(
+      firstText(
+        normalized.content,
+        normalized.text,
+        normalized.preview,
+        normalized.message,
+      ),
+      320,
+    ),
+  };
+}
+
+function readProgressCandidate(value) {
+  const candidate = payloadObject(value);
+  if (Object.keys(candidate).length === 0) {
+    return null;
+  }
+  const events = payloadArray(candidate.events || candidate.progress_events || candidate.progressEvents);
+  const latestEvent = payloadObject(events[events.length - 1]);
+  const latestReasoningEvent = [...events]
+    .reverse()
+    .map((event) => payloadObject(event))
+    .find((event) =>
+      /reasoning/i.test(firstText(event.item_type, event.itemType, event.kind, event.type)),
+    );
+  const label = firstText(
+    candidate.label,
+    candidate.latest_label,
+    candidate.latestLabel,
+    candidate.status_text,
+    candidate.statusText,
+    latestEvent.label,
+    latestEvent.text,
+    latestEvent.message,
+  );
+  const reasoning = firstText(
+    candidate.reasoning,
+    candidate.latest_reasoning,
+    candidate.latestReasoning,
+    latestReasoningEvent?.label,
+    latestReasoningEvent?.text,
+    latestReasoningEvent?.message,
+  );
+  const status = firstText(candidate.status, latestEvent.status);
+  const revision = firstText(candidate.revision, candidate.version);
+  const updatedAt = normalizeEpochMs(
+    candidate.updated_at ||
+      candidate.updatedAt ||
+      latestEvent.updated_at ||
+      latestEvent.updatedAt ||
+      latestEvent.created_at ||
+      latestEvent.createdAt,
+  );
+  if (!label && !reasoning && !status && !revision && !updatedAt) {
+    return null;
+  }
+  return {
+    status,
+    label: truncateText(label, 240),
+    reasoning: truncateText(reasoning, 240),
+    revision,
+    updated_at: updatedAt,
+  };
+}
+
+function readThreadProgressFacts(payload, thread) {
+  const threadAppServer = payloadObject(thread.app_server || thread.appServer);
+  const payloadAppServer = payloadObject(payload.app_server || payload.appServer);
+  const candidates = [
+    payload.progress,
+    payload.live_status,
+    payload.liveStatus,
+    payload.app_server_progress,
+    payload.appServerProgress,
+    payloadAppServer.progress,
+    payloadAppServer.live_status,
+    thread.progress,
+    thread.live_status,
+    thread.liveStatus,
+    thread.app_server_progress,
+    thread.appServerProgress,
+    threadAppServer.progress,
+    threadAppServer.live_status,
+  ];
+  for (const candidate of candidates) {
+    const progress = readProgressCandidate(candidate);
+    if (progress) {
+      return progress;
+    }
+  }
+  return null;
+}
+
+function buildThreadInspectSnapshot(payload) {
+  const thread = payloadObject(payload.thread);
+  const branchContext = readThreadBranchContext(thread);
+  const pullRequest = readThreadPullRequest(thread);
+  const progress = readThreadProgressFacts(payload, thread);
+  const targetThreadId = firstText(
+    payload.target_thread_id,
+    payload.child_thread_id,
+    payload.thread_id,
+    thread.thread_id,
+    thread.threadId,
+  );
+  const latestRunId = firstText(
+    thread.latest_run_id,
+    thread.latestRunId,
+    payloadObject(thread.latest_run || thread.latestRun).run_id,
+    payloadObject(thread.run).run_id,
+  );
+  const latestRunStatus = formatThreadRunStatus(thread);
+  const latestRunStartedAt = normalizeEpochMs(
+    thread.latest_run_started_at ||
+      thread.latestRunStartedAt ||
+      payloadObject(thread.latest_run || thread.latestRun).started_at ||
+      payloadObject(thread.run).started_at,
+  );
+  const latestRunUpdatedAt = normalizeEpochMs(
+    thread.last_run_at ||
+      thread.lastRunAt ||
+      thread.latest_run_at ||
+      thread.latestRunAt ||
+      payloadObject(thread.latest_run || thread.latestRun).updated_at ||
+      payloadObject(thread.run).updated_at,
+  );
+  const recentMessages = payloadArray(payload.messages)
+    .map((message) => summarizeThreadMessage(message))
+    .filter((message) => message.message_id || message.role || message.preview);
+
+  return {
+    ok: Boolean(payload.ok),
+    inspected: true,
+    parent_thread_id: firstText(payload.parent_thread_id, payload.parentThreadId),
+    parent_run_id: firstText(payload.parent_run_id, payload.parentRunId),
+    parent_workspace_repository: firstText(
+      payload.parent_workspace_repository,
+      payload.parentWorkspaceRepository,
+    ),
+    target_thread_id: targetThreadId,
+    thread: {
+      thread_id: targetThreadId,
+      repository: readThreadRepository(thread, payload),
+      title: truncateText(thread.title || "(untitled)", 160),
+      status: firstText(thread.status),
+      aggregate_status: firstText(thread.aggregate_status, thread.aggregateStatus),
+      source_type: firstText(thread.source_type, thread.sourceType),
+      assigned_to_kind: firstText(thread.assigned_to_kind, thread.assignedToKind),
+      assigned_to_github_login: firstText(
+        thread.assigned_to_github_login,
+        thread.assignedToGithubLogin,
+      ),
+      updated_at: normalizeEpochMs(thread.updated_at || thread.updatedAt),
+    },
+    run: {
+      run_id: latestRunId,
+      status: latestRunStatus,
+      started_at: latestRunStartedAt,
+      updated_at: latestRunUpdatedAt,
+    },
+    checks: {
+      latest_state: firstText(thread.latest_check_state, thread.latestCheckState),
+    },
+    pull_request: pullRequest,
+    branch: {
+      context_branch: firstText(branchContext.context_branch, branchContext.contextBranch),
+      base_branch: firstText(branchContext.base_branch, branchContext.baseBranch),
+      head_branch: firstText(
+        branchContext.pull_request_head_branch,
+        branchContext.pullRequestHeadBranch,
+        branchContext.write_branch,
+        branchContext.writeBranch,
+      ),
+      target: formatThreadTarget(thread),
+    },
+    latest_message: {
+      role: firstText(thread.latest_message_role, thread.latestMessageRole),
+      preview: truncateText(
+        firstText(thread.latest_message_preview, thread.latestMessagePreview),
+        240,
+      ),
+      at: normalizeEpochMs(thread.last_message_at || thread.lastMessageAt),
+    },
+    progress: progress || {
+      status: "",
+      label: "",
+      reasoning: "",
+      revision: "",
+      updated_at: 0,
+    },
+    recent_messages: recentMessages,
+    page: {
+      count: normalizeInteger(payload.page_count || payload.pageCount, recentMessages.length),
+      total_count: normalizeInteger(payload.total_count || payload.totalCount, recentMessages.length),
+      has_more: Boolean(payload.has_more || payload.hasMore),
+      next_before_created_at: normalizeEpochMs(
+        payload.next_before_created_at || payload.nextBeforeCreatedAt,
+      ),
+      next_before_message_id: firstText(
+        payload.next_before_message_id,
+        payload.nextBeforeMessageId,
+      ),
+    },
+    follow_up_command: targetThreadId
+      ? `codeq8 threads message ${targetThreadId} --text "..."`
+      : "",
+  };
+}
+
+function writeThreadInspect(stdout, snapshot) {
+  const thread = payloadObject(snapshot.thread);
+  const run = payloadObject(snapshot.run);
+  const checks = payloadObject(snapshot.checks);
+  const pullRequest = payloadObject(snapshot.pull_request);
+  const branch = payloadObject(snapshot.branch);
+  const latestMessage = payloadObject(snapshot.latest_message);
+  const progress = payloadObject(snapshot.progress);
+  const page = payloadObject(snapshot.page);
+  const recentMessages = payloadArray(snapshot.recent_messages);
+
+  stdout.write(`Thread: ${thread.thread_id || snapshot.target_thread_id || "(unknown)"}\n`);
+  stdout.write(`Title: ${thread.title || "(untitled)"}\n`);
+  stdout.write(`Repository: ${thread.repository || "(unknown)"}\n`);
+  const statusLine = [
+    thread.status ? `status=${thread.status}` : "",
+    thread.aggregate_status ? `aggregate=${thread.aggregate_status}` : "",
+  ].filter(Boolean).join(" ");
+  stdout.write(`State: ${statusLine || "(unknown)"}\n`);
+  if (thread.assigned_to_kind || thread.assigned_to_github_login) {
+    stdout.write(
+      `Assignee: ${[thread.assigned_to_kind, thread.assigned_to_github_login]
+        .filter(Boolean)
+        .join(" ") || "(unknown)"}\n`,
+    );
+  }
+  const pullRequestLabel = pullRequest.number
+    ? `PR #${pullRequest.number}${pullRequest.url ? ` ${pullRequest.url}` : ""}`
+    : "";
+  const branchLabel = [
+    branch.target ? `target=${branch.target}` : "",
+    branch.head_branch || branch.base_branch
+      ? `${branch.head_branch || "?"} -> ${branch.base_branch || "?"}`
+      : "",
+  ].filter(Boolean).join(" ");
+  stdout.write(`Source: ${pullRequestLabel || branchLabel || thread.source_type || "(unknown)"}\n`);
+  if (run.run_id || run.status) {
+    stdout.write(
+      `Run: ${[run.run_id, run.status].filter(Boolean).join(" ") || "(unknown)"}`,
+    );
+    const runTimes = [
+      run.started_at ? `started ${formatTimestamp(run.started_at)}` : "",
+      run.updated_at ? `updated ${formatTimestamp(run.updated_at)}` : "",
+    ].filter(Boolean).join(", ");
+    stdout.write(runTimes ? ` (${runTimes})\n` : "\n");
+  }
+  stdout.write(`Checks: ${checks.latest_state || "(none)"}\n`);
+  if (progress.status || progress.label || progress.reasoning) {
+    stdout.write(
+      `Progress: ${[
+        progress.status ? `status=${progress.status}` : "",
+        progress.label,
+        progress.reasoning ? `reasoning=${progress.reasoning}` : "",
+      ].filter(Boolean).join(" | ")}\n`,
+    );
+  }
+  if (latestMessage.role || latestMessage.preview) {
+    stdout.write(
+      `Latest message: ${[
+        latestMessage.role,
+        latestMessage.preview,
+        latestMessage.at ? formatTimestamp(latestMessage.at) : "",
+      ].filter(Boolean).join(" | ")}\n`,
+    );
+  }
+  stdout.write("\nRecent messages:\n");
+  if (recentMessages.length === 0) {
+    stdout.write("- (none returned)\n");
+  } else {
+    for (const message of recentMessages) {
+      const createdAt = message.created_at ? `${formatTimestamp(message.created_at)} ` : "";
+      stdout.write(
+        `- ${createdAt}${message.role || "message"}: ${message.preview || "(empty)"}\n`,
+      );
+    }
+  }
+  stdout.write("\n");
+  stdout.write(`Follow-up: ${snapshot.follow_up_command || "codeq8 threads message <thread-id> --text \"...\""}\n`);
+  stdout.write(
+    `Page: ${page.count || recentMessages.length} message(s), has more: ${
+      page.has_more ? "yes" : "no"
+    }\n`,
+  );
+  if (page.next_before_created_at || page.next_before_message_id) {
+    stdout.write(
+      `Next: --before-created-at ${page.next_before_created_at || ""} --before-message-id ${
+        page.next_before_message_id || ""
+      }\n`,
+    );
+  }
+}
+
 function printHelp(stdout) {
   stdout.write(
     [
@@ -270,6 +672,7 @@ function printHelp(stdout) {
       "  codeq8 threads mine [--status active|all] [--limit 25]",
       "  codeq8 threads search [--search text] [--status active|all] [--limit 25]",
       "  codeq8 threads context <thread-id> [--limit 20]",
+      "  codeq8 threads inspect <thread-id> [--limit 12] [--json]",
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
       "  codeq8 threads create --title title --message text [--assigned-to codeq8|me]",
       "  codeq8 threads message <thread-id> --text text",
@@ -358,6 +761,38 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
         query,
       }),
     );
+    return 0;
+  }
+
+  if (command === "inspect") {
+    const positional = removeFlags(
+      rest,
+      ["--limit", "--before-created-at", "--before-message-id"],
+      ["--json"],
+    );
+    const childThreadId = normalizeText(positional[0]);
+    if (!childThreadId) {
+      throw new Error("thread id is required.");
+    }
+    const query = new URLSearchParams();
+    appendParentQuery(query, context);
+    query.set("child_thread_id", childThreadId);
+    query.set("limit", readFlag(rest, "--limit", "12"));
+    query.set("before_created_at", readFlag(rest, "--before-created-at"));
+    query.set("before_message_id", readFlag(rest, "--before-message-id"));
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/delegated-thread-state",
+      query,
+    });
+    const snapshot = buildThreadInspectSnapshot(payload);
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, snapshot);
+    } else {
+      writeThreadInspect(stdout, snapshot);
+    }
     return 0;
   }
 
