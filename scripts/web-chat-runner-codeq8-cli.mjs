@@ -167,10 +167,6 @@ async function requestJson({
   return payload;
 }
 
-function writeJson(stdout, payload) {
-  stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
-}
-
 function payloadObject(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
@@ -294,13 +290,220 @@ function truncateText(value, maxLength = 240) {
   return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
 }
 
+function isSensitiveOutputKey(key) {
+  const normalized = normalizeText(key).toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (
+    new Set([
+      "token_budget",
+      "tokenbudget",
+      "tokens_used",
+      "tokensused",
+      "token_usage",
+      "tokenusage",
+      "token_usage_updates",
+      "tokenusageupdates",
+    ]).has(normalized)
+  ) {
+    return false;
+  }
+  return (
+    /(^|_)(authorization|cookie|credential|handoff|password|secret|token)($|_)/i.test(
+      normalized,
+    ) ||
+    /(^|_)api_?key($|_)/i.test(normalized) ||
+    /(^|_)private_?key($|_)/i.test(normalized) ||
+    normalized === "session_bundle_key" ||
+    normalized === "bundle_storage_key"
+  );
+}
+
 function redactSensitiveText(value) {
   return normalizeText(value)
+    .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, "[redacted]")
     .replace(
       /\b(thread_stream_token|thread_record_handoff|run_record_handoff|repository_access_handoff|session_bundle_key|bundle_storage_key|authorization|cookie|token|secret|password|api_key|private_key)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi,
       "$1=[redacted]",
     )
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]");
+}
+
+function sanitizeForOutput(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeForOutput(entry));
+  }
+  if (value && typeof value === "object") {
+    const sanitized = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (isSensitiveOutputKey(key)) {
+        continue;
+      }
+      sanitized[key] = sanitizeForOutput(entry);
+    }
+    return sanitized;
+  }
+  if (typeof value === "string") {
+    return redactSensitiveText(value);
+  }
+  return value;
+}
+
+function writeJson(stdout, payload) {
+  stdout.write(`${JSON.stringify(sanitizeForOutput(payload), null, 2)}\n`);
+}
+
+function compactObject(entries) {
+  const output = {};
+  for (const [key, value] of Object.entries(entries)) {
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+    if (typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0) {
+      continue;
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
+function summarizeThreadForOutput(thread, payload = {}) {
+  const normalized = payloadObject(thread);
+  const summary = compactObject({
+    thread_id: firstText(
+      normalized.thread_id,
+      normalized.threadId,
+      payload.child_thread_id,
+      payload.target_thread_id,
+      payload.thread_id,
+    ),
+    repository: readThreadRepository(normalized, payload),
+    title: truncateText(firstText(normalized.title), 160),
+    status: firstText(normalized.status, payload.status),
+    aggregate_status: firstText(normalized.aggregate_status, normalized.aggregateStatus),
+    source_type: firstText(normalized.source_type, normalized.sourceType),
+    assigned_to_kind: firstText(normalized.assigned_to_kind, normalized.assignedToKind),
+    assigned_to_github_login: firstText(
+      normalized.assigned_to_github_login,
+      normalized.assignedToGithubLogin,
+    ),
+    updated_at: normalizeEpochMs(normalized.updated_at || normalized.updatedAt),
+  });
+  return sanitizeForOutput(summary);
+}
+
+function summarizeRunForOutput(run) {
+  const normalized = payloadObject(run);
+  return sanitizeForOutput(
+    compactObject({
+      run_id: firstText(normalized.run_id, normalized.runId),
+      status: firstText(normalized.status),
+      started_at: normalizeEpochMs(normalized.started_at || normalized.startedAt),
+      updated_at: normalizeEpochMs(normalized.updated_at || normalized.updatedAt),
+    }),
+  );
+}
+
+function summarizeMessageForOutput(message) {
+  const summary = summarizeThreadMessage(message);
+  return sanitizeForOutput(compactObject(summary));
+}
+
+function summarizeGoalForOutput(goal) {
+  const normalized = payloadObject(goal);
+  return sanitizeForOutput(
+    compactObject({
+      objective: truncateText(firstText(normalized.objective), 240),
+      status: firstText(normalized.status),
+      created_at: normalizeEpochMs(normalized.created_at || normalized.createdAt),
+      updated_at: normalizeEpochMs(normalized.updated_at || normalized.updatedAt),
+    }),
+  );
+}
+
+function parentSummaryFields(payload) {
+  return compactObject({
+    parent_thread_id: firstText(payload.parent_thread_id, payload.parentThreadId),
+    parent_run_id: firstText(payload.parent_run_id, payload.parentRunId),
+    parent_workspace_repository: firstText(
+      payload.parent_workspace_repository,
+      payload.parentWorkspaceRepository,
+    ),
+  });
+}
+
+function readThreadOutputId(payload, fallback = "") {
+  const thread = payloadObject(payload.thread);
+  return firstText(
+    payload.child_thread_id,
+    payload.childThreadId,
+    payload.target_thread_id,
+    payload.targetThreadId,
+    payload.assigned_thread_id,
+    payload.assignedThreadId,
+    payload.thread_id,
+    payload.threadId,
+    thread.thread_id,
+    thread.threadId,
+    fallback,
+  );
+}
+
+function buildDelegatedThreadCreateOutput(payload) {
+  const thread = summarizeThreadForOutput(payload.thread, payload);
+  const threadId = readThreadOutputId(payload);
+  const message = summarizeMessageForOutput(payload.message);
+  return compactObject({
+    ok: Boolean(payload.ok),
+    delegated: Boolean(payload.delegated),
+    child_thread_id: threadId,
+    delegated_dispatch_failed: payload.delegated_dispatch_failed ? true : undefined,
+    ...parentSummaryFields(payload),
+    thread,
+    run: summarizeRunForOutput(payload.run),
+    message,
+    follow_up_command: threadId ? `codeq8 threads message ${threadId} --text "..."` : "",
+  });
+}
+
+function buildDelegatedThreadMessageOutput(payload, fallbackThreadId) {
+  const thread = summarizeThreadForOutput(payload.thread, payload);
+  const threadId = readThreadOutputId(payload, fallbackThreadId);
+  const message = summarizeMessageForOutput(payload.message);
+  return compactObject({
+    ok: Boolean(payload.ok),
+    delegated: Boolean(payload.delegated),
+    child_thread_id: threadId,
+    ...parentSummaryFields(payload),
+    thread,
+    message,
+    follow_up_command: threadId ? `codeq8 threads inspect ${threadId}` : "",
+  });
+}
+
+function buildAssignedThreadOutput(payload, fallbackThreadId) {
+  return compactObject({
+    ok: Boolean(payload.ok),
+    assigned: Boolean(payload.assigned),
+    updated: payload.updated !== false,
+    assigned_thread_id: readThreadOutputId(payload, fallbackThreadId),
+    assigned_to_github_login: firstText(payload.assigned_to_github_login, payload.assignedToGithubLogin),
+    assigned_by_github_login: firstText(payload.assigned_by_github_login, payload.assignedByGithubLogin),
+    ...parentSummaryFields(payload),
+    thread: summarizeThreadForOutput(payload.thread, payload),
+    error: firstText(payload.error),
+  });
+}
+
+function buildThreadGoalOutput(payload, fallbackThreadId) {
+  return compactObject({
+    ok: Boolean(payload.ok),
+    updated: payload.updated !== false,
+    cleared: Boolean(payload.cleared),
+    target_thread_id: readThreadOutputId(payload, fallbackThreadId),
+    ...parentSummaryFields(payload),
+    thread: summarizeThreadForOutput(payload.thread, payload),
+    codex_goal_state: summarizeGoalForOutput(payload.codex_goal_state || payload.codexGoalState),
+    error: firstText(payload.error),
+  });
 }
 
 function readThreadBranchContext(thread) {
@@ -804,20 +1007,18 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
     if (!assignedThreadId) {
       throw new Error("thread id is required.");
     }
-    writeJson(
-      stdout,
-      await requestJson({
-        context,
-        fetchImpl,
-        routeBase: "public",
-        path: "/api/chat/runs/assigned-thread",
-        method: "POST",
-        body: parentBody(context, {
-          assigned_thread_id: assignedThreadId,
-          assigned_to_github_login: readFlag(rest, "--assigned-to", "me"),
-        }),
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/assigned-thread",
+      method: "POST",
+      body: parentBody(context, {
+        assigned_thread_id: assignedThreadId,
+        assigned_to_github_login: readFlag(rest, "--assigned-to", "me"),
       }),
-    );
+    });
+    writeJson(stdout, buildAssignedThreadOutput(payload, assignedThreadId));
     return 0;
   }
 
@@ -842,17 +1043,15 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
         body.assigned_to_github_login = assignedTo;
       }
     }
-    writeJson(
-      stdout,
-      await requestJson({
-        context,
-        fetchImpl,
-        routeBase: "public",
-        path: "/api/chat/runs/delegated-threads",
-        method: "POST",
-        body,
-      }),
-    );
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/delegated-threads",
+      method: "POST",
+      body,
+    });
+    writeJson(stdout, buildDelegatedThreadCreateOutput(payload));
     return 0;
   }
 
@@ -866,21 +1065,19 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
     if (!content) {
       throw new Error("--text is required.");
     }
-    writeJson(
-      stdout,
-      await requestJson({
-        context,
-        fetchImpl,
-        routeBase: "public",
-        path: "/api/chat/runs/delegated-thread-messages",
-        method: "POST",
-        body: parentBody(context, {
-          child_thread_id: childThreadId,
-          content,
-          role: "user",
-        }),
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/delegated-thread-messages",
+      method: "POST",
+      body: parentBody(context, {
+        child_thread_id: childThreadId,
+        content,
+        role: "user",
       }),
-    );
+    });
+    writeJson(stdout, buildDelegatedThreadMessageOutput(payload, childThreadId));
     return 0;
   }
 
@@ -958,25 +1155,23 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
     if (status && !["active", "paused"].includes(status.toLowerCase())) {
       throw new Error("--status must be active or paused.");
     }
-    writeJson(
-      stdout,
-      await requestJson({
-        context,
-        fetchImpl,
-        routeBase: "public",
-        path: "/api/chat/runs/thread-goal",
-        method: "POST",
-        body: parentBody(context, {
-          target_thread_id: targetThreadId,
-          ...(clear
-            ? { clear: true }
-            : {
-                objective,
-                ...(status ? { status: status.toLowerCase() } : {}),
-              }),
-        }),
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/thread-goal",
+      method: "POST",
+      body: parentBody(context, {
+        target_thread_id: targetThreadId,
+        ...(clear
+          ? { clear: true }
+          : {
+              objective,
+              ...(status ? { status: status.toLowerCase() } : {}),
+            }),
       }),
-    );
+    });
+    writeJson(stdout, buildThreadGoalOutput(payload, targetThreadId));
     return 0;
   }
 

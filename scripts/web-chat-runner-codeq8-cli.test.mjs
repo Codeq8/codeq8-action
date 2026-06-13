@@ -35,6 +35,20 @@ function createOutputCapture() {
   };
 }
 
+function assertNoRawCredentialPayload(text) {
+  for (const key of [
+    "thread_stream_token",
+    "thread_record_handoff",
+    "run_record_handoff",
+    "repository_access_handoff",
+    "session_bundle_key",
+    "bundle_storage_key",
+  ]) {
+    assert.doesNotMatch(text, new RegExp(`"${key}"`));
+  }
+  assert.doesNotMatch(text, /secret_(stream|handoff|run|repository|session|bundle|message|root|goal|assign|ghp)/);
+}
+
 test("runner codeq8 helper searches threads with scoped auth and parent fields", async () => {
   const output = createOutputCapture();
   const calls = [];
@@ -222,6 +236,7 @@ test("runner codeq8 helper inspects one delegated thread with compact redacted o
   assert.match(text, /Follow-up: codeq8 threads message wct_child --text "\.\.\."/);
   assert.match(text, /Page: 2 message\(s\), has more: no/);
   assert.ok(text.length < 2200);
+  assertNoRawCredentialPayload(text);
   assert.doesNotMatch(text, /secret_stream_token/);
   assert.doesNotMatch(text, /secret_handoff_token/);
   assert.doesNotMatch(text, /secret_bundle_key/);
@@ -292,6 +307,7 @@ test("runner codeq8 helper inspect json returns a redacted snapshot contract", a
   );
 
   const serialized = JSON.stringify(snapshot);
+  assertNoRawCredentialPayload(serialized);
   assert.doesNotMatch(serialized, /thread_stream_token/);
   assert.doesNotMatch(serialized, /thread_record_handoff/);
   assert.doesNotMatch(serialized, /codex_session_state/);
@@ -376,6 +392,7 @@ test("runner codeq8 helper archives completed threads through the runner route w
     updated: true,
   });
   const text = output.readText();
+  assertNoRawCredentialPayload(text);
   assert.doesNotMatch(text, /secret_stream_token/);
   assert.doesNotMatch(text, /secret_handoff_token/);
 });
@@ -427,11 +444,12 @@ test("runner codeq8 helper reopens archived threads through the runner route wit
     updated: true,
   });
   const text = output.readText();
+  assertNoRawCredentialPayload(text);
   assert.doesNotMatch(text, /secret_stream_token/);
   assert.doesNotMatch(text, /secret_handoff_token/);
 });
 
-test("runner codeq8 helper creates delegated threads through backend contract", async () => {
+test("runner codeq8 helper creates delegated threads with compact safe output", async () => {
   const output = createOutputCapture();
   const calls = [];
   await handleRunnerCodeq8Cli({
@@ -449,7 +467,37 @@ test("runner codeq8 helper creates delegated threads through backend contract", 
     stdout: output.stream,
     fetchImpl: async (url, init = {}) => {
       calls.push({ url: String(url), init });
-      return Response.json({ ok: true, thread: { thread_id: "wct_child" } });
+      return Response.json({
+        ok: true,
+        delegated: true,
+        child_thread_id: "wct_child",
+        parent_thread_id: "wct_parent",
+        parent_run_id: "wcr_parent",
+        parent_workspace_repository: "Codeq8/Codeq8",
+        thread_stream_token: "secret_root_stream_token",
+        thread_record_handoff: "secret_root_handoff",
+        thread: {
+          thread_id: "wct_child",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Investigate",
+          status: "active",
+          thread_stream_token: "secret_stream_token",
+          thread_record_handoff: "secret_handoff_token",
+        },
+        run: {
+          run_id: "wcr_child",
+          status: "queued",
+          run_record_handoff: "secret_run_handoff",
+        },
+        message: {
+          message_id: "wcm_child",
+          role: "user",
+          content: "Please inspect repository_access_handoff=secret_repository_handoff.",
+          metadata: {
+            session_bundle_key: "secret_session_bundle",
+          },
+        },
+      });
     },
   });
 
@@ -461,7 +509,80 @@ test("runner codeq8 helper creates delegated threads through backend contract", 
   assert.equal(body.title, "Investigate");
   assert.equal(body.initial_message.content, "Please inspect this.");
   assert.equal(body.assigned_to_kind, "codeq8");
-  assert.equal(output.readJson().thread.thread_id, "wct_child");
+  const payload = output.readJson();
+  assert.equal(payload.ok, true);
+  assert.equal(payload.delegated, true);
+  assert.equal(payload.child_thread_id, "wct_child");
+  assert.equal(payload.thread.thread_id, "wct_child");
+  assert.equal(payload.run.run_id, "wcr_child");
+  assert.equal(payload.message.message_id, "wcm_child");
+  assert.equal(
+    payload.message.preview,
+    "Please inspect repository_access_handoff=[redacted]",
+  );
+  assert.equal(
+    payload.follow_up_command,
+    'codeq8 threads message wct_child --text "..."',
+  );
+  assertNoRawCredentialPayload(output.readText());
+});
+
+test("runner codeq8 helper sends delegated thread messages with compact safe output", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: [
+      "threads",
+      "message",
+      "wct_child",
+      "--text",
+      "Continue from the latest evidence.",
+    ],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        delegated: true,
+        child_thread_id: "wct_child",
+        parent_thread_id: "wct_parent",
+        parent_run_id: "wcr_parent",
+        parent_workspace_repository: "Codeq8/Codeq8",
+        thread: {
+          thread_id: "wct_child",
+          workspace_repository: "Codeq8/Codeq8",
+          status: "active",
+          thread_stream_token: "secret_stream_token",
+          thread_record_handoff: "secret_handoff_token",
+        },
+        message: {
+          message_id: "wcm_followup",
+          role: "user",
+          content: "Continue with thread_stream_token=secret_message_stream.",
+          metadata: {
+            run_record_handoff: "secret_message_run",
+          },
+        },
+      });
+    },
+  });
+
+  assert.equal(new URL(calls[0]?.url).pathname, "/api/chat/runs/delegated-thread-messages");
+  const body = JSON.parse(String(calls[0]?.init?.body || "{}"));
+  assert.equal(body.workspace_repository, "Codeq8/Codeq8");
+  assert.equal(body.thread_id, "wct_parent");
+  assert.equal(body.run_id, "wcr_parent");
+  assert.equal(body.child_thread_id, "wct_child");
+  assert.equal(body.content, "Continue from the latest evidence.");
+  assert.equal(body.role, "user");
+  const payload = output.readJson();
+  assert.equal(payload.ok, true);
+  assert.equal(payload.child_thread_id, "wct_child");
+  assert.equal(payload.message.message_id, "wcm_followup");
+  assert.equal(payload.message.preview, "Continue with thread_stream_token=[redacted]");
+  assert.equal(payload.follow_up_command, "codeq8 threads inspect wct_child");
+  assertNoRawCredentialPayload(output.readText());
 });
 
 test("runner codeq8 helper sets thread goals through backend contract", async () => {
@@ -484,9 +605,15 @@ test("runner codeq8 helper sets thread goals through backend contract", async ()
       return Response.json({
         ok: true,
         target_thread_id: "wct_target",
+        thread: {
+          thread_id: "wct_target",
+          thread_stream_token: "secret_goal_stream",
+          thread_record_handoff: "secret_goal_handoff",
+        },
         codex_goal_state: {
           objective: "Keep this goal visible",
           status: "paused",
+          session_bundle_key: "secret_goal_bundle",
         },
       });
     },
@@ -503,6 +630,7 @@ test("runner codeq8 helper sets thread goals through backend contract", async ()
   assert.equal(body.objective, "Keep this goal visible");
   assert.equal(body.status, "paused");
   assert.equal(output.readJson().codex_goal_state.objective, "Keep this goal visible");
+  assertNoRawCredentialPayload(output.readText());
 });
 
 test("runner codeq8 helper clears thread goals through backend contract", async () => {
@@ -518,6 +646,11 @@ test("runner codeq8 helper clears thread goals through backend contract", async 
         ok: true,
         target_thread_id: "wct_target",
         cleared: true,
+        thread: {
+          thread_id: "wct_target",
+          thread_stream_token: "secret_goal_stream",
+          thread_record_handoff: "secret_goal_handoff",
+        },
       });
     },
   });
@@ -531,6 +664,7 @@ test("runner codeq8 helper clears thread goals through backend contract", async 
   assert.equal(body.clear, true);
   assert.equal(Object.hasOwn(body, "objective"), false);
   assert.equal(output.readJson().cleared, true);
+  assertNoRawCredentialPayload(output.readText());
 });
 
 test("runner codeq8 helper materializes attachments through worker route", async (t) => {
