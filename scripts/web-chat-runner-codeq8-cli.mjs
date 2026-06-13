@@ -307,7 +307,7 @@ function isSensitiveOutputKey(key) {
     return false;
   }
   return (
-    /(^|_)(authorization|cookie|credential|handoff|password|secret|token)($|_)/i.test(
+    /(^|_)(authorization|cookie|credential|handoff|password|secret|session|token)($|_)/i.test(
       normalized,
     ) ||
     /(^|_)api_?key($|_)/i.test(normalized) ||
@@ -320,11 +320,11 @@ function isSensitiveOutputKey(key) {
 function redactSensitiveText(value) {
   return normalizeText(value)
     .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, "[redacted]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]")
     .replace(
-      /\b(thread_stream_token|thread_record_handoff|run_record_handoff|repository_access_handoff|session_bundle_key|bundle_storage_key|authorization|cookie|token|secret|password|api_key|private_key)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      /\b(thread_stream_token|thread_record_handoff|run_record_handoff|repository_access_handoff|codex_session_state|github_web_session_cookie|session_id|session_file_relative_path|session_bundle_key|bundle_storage_key|authorization|cookie|credential|handoff|token|secret|password|api_key|private_key)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi,
       "$1=[redacted]",
-    )
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]");
+    );
 }
 
 function sanitizeForOutput(value) {

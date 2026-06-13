@@ -41,8 +41,15 @@ function assertNoRawCredentialPayload(text) {
     "thread_record_handoff",
     "run_record_handoff",
     "repository_access_handoff",
+    "codex_session_state",
+    "github_web_session_cookie",
+    "session_id",
+    "session_file_relative_path",
     "session_bundle_key",
     "bundle_storage_key",
+    "authorization",
+    "cookie",
+    "credential",
   ]) {
     assert.doesNotMatch(text, new RegExp(`"${key}"`));
   }
@@ -317,6 +324,148 @@ test("runner codeq8 helper inspect json returns a redacted snapshot contract", a
   assert.doesNotMatch(serialized, /secret_bundle_key/);
   assert.doesNotMatch(serialized, /secret_cookie/);
   assert.doesNotMatch(serialized, /secret_session_bundle/);
+});
+
+test("runner codeq8 helper thread context fallback redacts raw credential-bearing output", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "context", "wct_child", "--limit", "3"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        target_thread_id: "wct_child",
+        thread: {
+          thread_id: "wct_child",
+          title: "Fallback audit",
+          thread_stream_token: "secret_stream_token",
+          thread_record_handoff: "secret_handoff_token",
+          repository_access_handoff: "secret_repository_handoff",
+          codex_session_state: {
+            session_id: "secret_session_id",
+            session_file_relative_path: "secret_session_path.jsonl",
+            bundle_storage_key: "secret_bundle_key",
+          },
+          nested: {
+            safe_field: "safe value",
+            authorization: "Bearer secret_nested_authorization",
+          },
+        },
+        messages: [
+          {
+            message_id: "wcm_context",
+            role: "assistant",
+            content:
+              "Authorization: Bearer secret_message_authorization; session_id=secret_message_session; repository_access_handoff=secret_message_repository.",
+            metadata: {
+              cookie: "secret_cookie",
+              github_web_session_cookie: "secret_github_cookie",
+              credential: "secret_credential",
+            },
+          },
+        ],
+      });
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.pathname, "/api/chat/runs/thread-context");
+  assert.equal(url.searchParams.get("target_thread_id"), "wct_child");
+  assert.equal(url.searchParams.get("limit"), "3");
+  assert.equal(calls[0]?.init?.headers?.Authorization, "Bearer header.payload.signature");
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+
+  const payload = output.readJson();
+  assert.equal(payload.thread.thread_id, "wct_child");
+  assert.equal(payload.thread.nested.safe_field, "safe value");
+  assert.equal(Object.hasOwn(payload.thread, "thread_stream_token"), false);
+  assert.equal(Object.hasOwn(payload.thread, "codex_session_state"), false);
+  assert.equal(Object.hasOwn(payload.thread.nested, "authorization"), false);
+  assert.match(payload.messages[0].content, /Authorization=\[redacted\]/);
+  assert.match(payload.messages[0].content, /session_id=\[redacted\]/);
+  assert.match(payload.messages[0].content, /repository_access_handoff=\[redacted\]/);
+  const text = output.readText();
+  assertNoRawCredentialPayload(text);
+  assert.doesNotMatch(
+    text,
+    /secret_(stream|handoff|repository|session|bundle|nested|message|authorization|cookie|github|credential)/,
+  );
+});
+
+test("runner codeq8 helper delegated state fallback redacts raw credential-bearing output", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "state", "wct_child", "--limit", "4"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        child_thread_id: "wct_child",
+        thread: {
+          thread_id: "wct_child",
+          status: "active",
+          thread_stream_token: "secret_state_stream",
+          thread_record_handoff: "secret_state_handoff",
+          codex_session_state: {
+            session_id: "secret_state_session",
+            session_bundle_key: "secret_state_bundle",
+          },
+        },
+        runs: [
+          {
+            run_id: "wcr_child",
+            status: "running",
+            run_record_handoff: "secret_state_run_handoff",
+            environment: {
+              CODE_WEB_CHAT_RUN_TOKEN: "secret_state_env_token",
+              CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE: "secret_state_env_cookie",
+            },
+          },
+        ],
+        messages: [
+          {
+            message_id: "wcm_state",
+            role: "assistant",
+            content:
+              "Using cookie=secret_state_message_cookie and token=secret_state_message_token.",
+          },
+        ],
+      });
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.pathname, "/api/chat/runs/delegated-thread-state");
+  assert.equal(url.searchParams.get("child_thread_id"), "wct_child");
+  assert.equal(url.searchParams.get("limit"), "4");
+
+  const payload = output.readJson();
+  assert.equal(payload.child_thread_id, "wct_child");
+  assert.equal(payload.thread.status, "active");
+  assert.equal(payload.runs[0].run_id, "wcr_child");
+  assert.equal(Object.hasOwn(payload.thread, "thread_stream_token"), false);
+  assert.equal(Object.hasOwn(payload.thread, "codex_session_state"), false);
+  assert.equal(Object.hasOwn(payload.runs[0], "run_record_handoff"), false);
+  assert.equal(Object.hasOwn(payload.runs[0].environment, "CODE_WEB_CHAT_RUN_TOKEN"), false);
+  assert.equal(
+    Object.hasOwn(payload.runs[0].environment, "CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE"),
+    false,
+  );
+  assert.equal(
+    payload.messages[0].content,
+    "Using cookie=[redacted] and token=[redacted]",
+  );
+  const text = output.readText();
+  assertNoRawCredentialPayload(text);
+  assert.doesNotMatch(text, /secret_state/);
 });
 
 test("runner codeq8 helper exposes inspect and message without a threads steer command", async () => {
