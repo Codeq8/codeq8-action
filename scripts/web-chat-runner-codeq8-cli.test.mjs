@@ -317,6 +317,7 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   const text = output.readText();
   assert.match(text, /codeq8 threads inspect <thread-id> \[--limit 12\] \[--json\]/);
   assert.match(text, /codeq8 threads message <thread-id> --text text/);
+  assert.match(text, /codeq8 threads archive <thread-id>\s+\(alias: close\)/);
   assert.doesNotMatch(text, /threads steer/);
 
   const cliSource = await fs.readFile(
@@ -325,6 +326,50 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   );
   assert.doesNotMatch(cliSource, /command === "steer"/);
   assert.doesNotMatch(cliSource, /threads steer/);
+});
+
+test("runner codeq8 helper archives completed threads through the chat mutation route", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "close", "wct_done"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        updated: true,
+        thread: {
+          thread_id: "wct_done",
+          status: "archived",
+          thread_stream_token: "secret_stream_token",
+          thread_record_handoff: "secret_handoff_token",
+        },
+      });
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.origin, "https://codeq8.example");
+  assert.equal(url.pathname, "/api/chat/threads/wct_done");
+  assert.equal(calls[0]?.init?.method, "PATCH");
+  assert.equal(calls[0]?.init?.headers?.Authorization, "Bearer header.payload.signature");
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body || "{}")), {
+    status: "archived",
+  });
+
+  assert.deepEqual(output.readJson(), {
+    ok: true,
+    thread_id: "wct_done",
+    status: "archived",
+    updated: true,
+  });
+  const text = output.readText();
+  assert.doesNotMatch(text, /secret_stream_token/);
+  assert.doesNotMatch(text, /secret_handoff_token/);
 });
 
 test("runner codeq8 helper creates delegated threads through backend contract", async () => {

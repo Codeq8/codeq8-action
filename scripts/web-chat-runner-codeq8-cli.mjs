@@ -676,6 +676,7 @@ function printHelp(stdout) {
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
       "  codeq8 threads create --title title --message text [--assigned-to codeq8|me]",
       "  codeq8 threads message <thread-id> --text text",
+      "  codeq8 threads archive <thread-id>  (alias: close)",
       "  codeq8 threads goal <thread-id> --objective text [--status active|paused]",
       "  codeq8 threads goal <thread-id> --clear",
       "  codeq8 threads state <thread-id> [--limit 50]",
@@ -879,6 +880,32 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
         }),
       }),
     );
+    return 0;
+  }
+
+  if (command === "archive" || command === "close") {
+    const positional = removeFlags(rest);
+    const targetThreadId = normalizeText(positional[0]);
+    if (!targetThreadId) {
+      throw new Error("thread id is required.");
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: `/api/chat/threads/${encodeURIComponent(targetThreadId)}`,
+      method: "PATCH",
+      body: {
+        status: "archived",
+      },
+    });
+    const thread = payloadObject(payload.thread);
+    writeJson(stdout, {
+      ok: true,
+      thread_id: normalizeText(thread.thread_id) || targetThreadId,
+      status: normalizeText(thread.status) || "archived",
+      updated: payload.updated !== false,
+    });
     return 0;
   }
 
