@@ -318,6 +318,7 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.match(text, /codeq8 threads inspect <thread-id> \[--limit 12\] \[--json\]/);
   assert.match(text, /codeq8 threads message <thread-id> --text text/);
   assert.match(text, /codeq8 threads archive <thread-id>\s+\(alias: close\)/);
+  assert.match(text, /codeq8 threads reopen <thread-id>/);
   assert.doesNotMatch(text, /threads steer/);
 
   const cliSource = await fs.readFile(
@@ -372,6 +373,57 @@ test("runner codeq8 helper archives completed threads through the runner route w
     ok: true,
     thread_id: "wct_done",
     status: "archived",
+    updated: true,
+  });
+  const text = output.readText();
+  assert.doesNotMatch(text, /secret_stream_token/);
+  assert.doesNotMatch(text, /secret_handoff_token/);
+});
+
+test("runner codeq8 helper reopens archived threads through the runner route without a web session cookie", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  const env = {
+    ...testEnv(),
+    CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE: "",
+  };
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "reopen", "wct_archived"],
+    env,
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        updated: true,
+        thread: {
+          thread_id: "wct_archived",
+          status: "active",
+          thread_stream_token: "secret_stream_token",
+          thread_record_handoff: "secret_handoff_token",
+        },
+      });
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.origin, "https://codeq8.example");
+  assert.equal(url.pathname, "/api/chat/runs/thread-reopen");
+  assert.equal(calls[0]?.init?.method, "POST");
+  assert.equal(calls[0]?.init?.headers?.Authorization, "Bearer header.payload.signature");
+  assert.equal(calls[0]?.init?.headers?.Cookie, undefined);
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body || "{}")), {
+    workspace_repository: "Codeq8/Codeq8",
+    thread_id: "wct_parent",
+    run_id: "wcr_parent",
+    target_thread_id: "wct_archived",
+  });
+
+  assert.deepEqual(output.readJson(), {
+    ok: true,
+    thread_id: "wct_archived",
+    status: "active",
     updated: true,
   });
   const text = output.readText();

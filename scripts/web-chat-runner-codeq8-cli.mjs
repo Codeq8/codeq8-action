@@ -677,6 +677,7 @@ function printHelp(stdout) {
       "  codeq8 threads create --title title --message text [--assigned-to codeq8|me]",
       "  codeq8 threads message <thread-id> --text text",
       "  codeq8 threads archive <thread-id>  (alias: close)",
+      "  codeq8 threads reopen <thread-id>",
       "  codeq8 threads goal <thread-id> --objective text [--status active|paused]",
       "  codeq8 threads goal <thread-id> --clear",
       "  codeq8 threads state <thread-id> [--limit 50]",
@@ -904,6 +905,32 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       ok: true,
       thread_id: normalizeText(thread.thread_id) || targetThreadId,
       status: normalizeText(thread.status) || "archived",
+      updated: payload.updated !== false,
+    });
+    return 0;
+  }
+
+  if (command === "reopen") {
+    const positional = removeFlags(rest);
+    const targetThreadId = normalizeText(positional[0]);
+    if (!targetThreadId) {
+      throw new Error("thread id is required.");
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/thread-reopen",
+      method: "POST",
+      body: parentBody(context, {
+        target_thread_id: targetThreadId,
+      }),
+    });
+    const thread = payloadObject(payload.thread);
+    writeJson(stdout, {
+      ok: true,
+      thread_id: normalizeText(thread.thread_id) || targetThreadId,
+      status: normalizeText(thread.status) || "active",
       updated: payload.updated !== false,
     });
     return 0;
