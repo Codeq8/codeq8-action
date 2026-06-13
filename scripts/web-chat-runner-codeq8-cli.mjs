@@ -893,11 +893,11 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       context,
       fetchImpl,
       routeBase: "public",
-      path: `/api/chat/threads/${encodeURIComponent(targetThreadId)}`,
-      method: "PATCH",
-      body: {
-        status: "archived",
-      },
+      path: "/api/chat/runs/thread-archive",
+      method: "POST",
+      body: parentBody(context, {
+        target_thread_id: targetThreadId,
+      }),
     });
     const thread = payloadObject(payload.thread);
     writeJson(stdout, {

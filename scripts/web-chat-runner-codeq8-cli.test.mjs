@@ -328,12 +328,16 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.doesNotMatch(cliSource, /threads steer/);
 });
 
-test("runner codeq8 helper archives completed threads through the chat mutation route", async () => {
+test("runner codeq8 helper archives completed threads through the runner route without a web session cookie", async () => {
   const output = createOutputCapture();
   const calls = [];
+  const env = {
+    ...testEnv(),
+    CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE: "",
+  };
   await handleRunnerCodeq8Cli({
     argv: ["threads", "close", "wct_done"],
-    env: testEnv(),
+    env,
     stdout: output.stream,
     fetchImpl: async (url, init = {}) => {
       calls.push({ url: String(url), init });
@@ -353,12 +357,15 @@ test("runner codeq8 helper archives completed threads through the chat mutation 
   assert.equal(calls.length, 1);
   const url = new URL(calls[0]?.url);
   assert.equal(url.origin, "https://codeq8.example");
-  assert.equal(url.pathname, "/api/chat/threads/wct_done");
-  assert.equal(calls[0]?.init?.method, "PATCH");
+  assert.equal(url.pathname, "/api/chat/runs/thread-archive");
+  assert.equal(calls[0]?.init?.method, "POST");
   assert.equal(calls[0]?.init?.headers?.Authorization, "Bearer header.payload.signature");
-  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+  assert.equal(calls[0]?.init?.headers?.Cookie, undefined);
   assert.deepEqual(JSON.parse(String(calls[0]?.init?.body || "{}")), {
-    status: "archived",
+    workspace_repository: "Codeq8/Codeq8",
+    thread_id: "wct_parent",
+    run_id: "wcr_parent",
+    target_thread_id: "wct_done",
   });
 
   assert.deepEqual(output.readJson(), {
