@@ -447,20 +447,39 @@ function readThreadOutputId(payload, fallback = "") {
   );
 }
 
+function readDelegatedDispatchState(payload) {
+  if (payload.delegated_dispatch_failed || payload.delegatedDispatchFailed) {
+    return "failed";
+  }
+  if (payload.delegated) {
+    return "delegated";
+  }
+  if (payload.ok) {
+    return "created";
+  }
+  return "";
+}
+
 function buildDelegatedThreadCreateOutput(payload) {
   const thread = summarizeThreadForOutput(payload.thread, payload);
   const threadId = readThreadOutputId(payload);
   const message = summarizeMessageForOutput(payload.message);
+  const followUpMessageCommand = threadId
+    ? `codeq8 threads message ${threadId} --text "..."`
+    : "";
   return compactObject({
     ok: Boolean(payload.ok),
     delegated: Boolean(payload.delegated),
     child_thread_id: threadId,
     delegated_dispatch_failed: payload.delegated_dispatch_failed ? true : undefined,
+    dispatch_state: readDelegatedDispatchState(payload),
     ...parentSummaryFields(payload),
     thread,
     run: summarizeRunForOutput(payload.run),
     message,
-    follow_up_command: threadId ? `codeq8 threads message ${threadId} --text "..."` : "",
+    follow_up_inspect_command: threadId ? `codeq8 threads inspect ${threadId}` : "",
+    follow_up_message_command: followUpMessageCommand,
+    follow_up_command: followUpMessageCommand,
   });
 }
 
@@ -866,6 +885,46 @@ function writeThreadInspect(stdout, snapshot) {
   }
 }
 
+function writeDelegatedThreadCreate(stdout, snapshot) {
+  const thread = payloadObject(snapshot.thread);
+  const run = payloadObject(snapshot.run);
+  const message = payloadObject(snapshot.message);
+  const threadId = snapshot.child_thread_id || thread.thread_id || "(unknown)";
+  const statusLine = [
+    thread.status ? `status=${thread.status}` : "",
+    run.status ? `run=${run.status}` : "",
+    snapshot.dispatch_state ? `dispatch=${snapshot.dispatch_state}` : "",
+  ].filter(Boolean).join(" ");
+
+  stdout.write(`Created thread: ${threadId}\n`);
+  stdout.write(`Title: ${thread.title || "(untitled)"}\n`);
+  stdout.write(`Repository: ${thread.repository || snapshot.parent_workspace_repository || "(unknown)"}\n`);
+  stdout.write(`State: ${statusLine || "(unknown)"}\n`);
+  if (snapshot.parent_thread_id || snapshot.parent_run_id) {
+    stdout.write(
+      `Parent: ${[snapshot.parent_thread_id, snapshot.parent_run_id ? `run=${snapshot.parent_run_id}` : ""]
+        .filter(Boolean)
+        .join(" ")}\n`,
+    );
+  }
+  if (message.preview || message.message_id || message.role) {
+    stdout.write(
+      `Initial message: ${[
+        message.role,
+        message.message_id,
+        message.preview,
+      ].filter(Boolean).join(" | ")}\n`,
+    );
+  }
+  stdout.write("\n");
+  stdout.write(
+    `Follow-up inspect: ${snapshot.follow_up_inspect_command || `codeq8 threads inspect ${threadId}`}\n`,
+  );
+  stdout.write(
+    `Follow-up message: ${snapshot.follow_up_message_command || snapshot.follow_up_command || `codeq8 threads message ${threadId} --text "..."`}\n`,
+  );
+}
+
 function printHelp(stdout) {
   stdout.write(
     [
@@ -877,7 +936,7 @@ function printHelp(stdout) {
       "  codeq8 threads context <thread-id> [--limit 20]",
       "  codeq8 threads inspect <thread-id> [--limit 12] [--json]",
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
-      "  codeq8 threads create --title title --message text [--assigned-to codeq8|me]",
+      "  codeq8 threads create --title title --message text [--assigned-to codeq8|me] [--json]",
       "  codeq8 threads message <thread-id> --text text",
       "  codeq8 threads archive <thread-id>  (alias: close)",
       "  codeq8 threads reopen <thread-id>",
@@ -1051,7 +1110,12 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       method: "POST",
       body,
     });
-    writeJson(stdout, buildDelegatedThreadCreateOutput(payload));
+    const output = buildDelegatedThreadCreateOutput(payload);
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, output);
+    } else {
+      writeDelegatedThreadCreate(stdout, output);
+    }
     return 0;
   }
 
