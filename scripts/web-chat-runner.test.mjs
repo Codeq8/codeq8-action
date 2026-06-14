@@ -35,6 +35,7 @@ import {
   flushServerOwnedCodeq8File,
   hydrateServerOwnedCodeq8File,
   extractUserVisibleFailureHeadline,
+  isRecoverableCodexResumeFailure,
   isRecoverableCodexTransportFailure,
   isRecoverableCodexSessionErrorState,
   isSupersededWebChatRunError,
@@ -4645,6 +4646,23 @@ test("isRecoverableCodexSessionErrorState treats oversized session uploads as re
       "Codex session state is in error status: Codex session state is in error status: Request Entity Too Large",
     ),
     true,
+  );
+});
+
+test("isRecoverableCodexResumeFailure retries zero-output AppServer terminal failures fresh", () => {
+  assert.equal(
+    isRecoverableCodexResumeFailure({
+      reason: "Codex app-server turn completed with status failed.",
+      output: "",
+    }),
+    true,
+  );
+  assert.equal(
+    isRecoverableCodexResumeFailure({
+      reason: "Codex app-server turn completed with status failed.",
+      output: "apply_patch verification failed",
+    }),
+    false,
   );
 });
 

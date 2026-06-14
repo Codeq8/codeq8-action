@@ -845,9 +845,17 @@ function isInvalidCodexSessionBundleError(value) {
 }
 
 function isRecoverableCodexResumeFailure({ reason = "", output = "" } = {}) {
-  const normalized = normalizeText(`${reason}\n${output}`);
+  const normalizedReason = normalizeText(reason);
+  const normalizedOutput = normalizeText(output);
+  const normalized = normalizeText(`${normalizedReason}\n${normalizedOutput}`);
   if (!normalized) {
     return false;
+  }
+  if (
+    /^Codex app-server turn completed with status failed\.?$/i.test(normalizedReason) &&
+    !normalizedOutput
+  ) {
+    return true;
   }
   return (
     /thread\/resume/i.test(normalized) &&
