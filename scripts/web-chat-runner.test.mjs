@@ -3348,6 +3348,11 @@ test("prepareGitHubCliAuth refreshes gh tokens before each invocation", async ()
     encoding: "utf8",
     stdio: "pipe",
   });
+  execFileSync("gh", ["api", "repos/Codeq8/status/pulls"], {
+    env: commandEnv,
+    encoding: "utf8",
+    stdio: "pipe",
+  });
   execFileSync("gh", ["issue", "list"], {
     env: {
       ...commandEnv,
@@ -3366,6 +3371,9 @@ test("prepareGitHubCliAuth refreshes gh tokens before each invocation", async ()
   assert.match(ghCallLog, /ARGS=run view 2 -R Codeq8\/codeq8-action/);
   assert.match(ghCallLog, /GH_TOKEN=fresh-token-4-Codeq8-status/);
   assert.match(ghCallLog, /GITHUB_TOKEN=fresh-token-4-Codeq8-status/);
+  assert.match(ghCallLog, /ARGS=api repos\/Codeq8\/status\/pulls/);
+  assert.match(ghCallLog, /GH_TOKEN=fresh-token-5-Codeq8-status/);
+  assert.match(ghCallLog, /GITHUB_TOKEN=fresh-token-5-Codeq8-status/);
   assert.match(ghCallLog, /ARGS=issue list/);
   assert.doesNotMatch(ghCallLog, /startup-token/);
 
