@@ -240,19 +240,35 @@ function formatThreadUpdatedAt(thread) {
   );
 }
 
-function writeCompactThreadList(stdout, payload, { assignedLabel = "me", status = "" } = {}) {
+function writeCompactThreadList(
+  stdout,
+  payload,
+  { assignedLabel = "me", childrenOfThreadId = "", status = "" } = {},
+) {
   const threads = payloadArray(payload.threads);
   const repository = normalizeText(payload.repository);
   const normalizedStatus = normalizeText(status || payload.status || "");
   stdout.write(`Repository: ${repository || "(unknown)"}\n`);
-  stdout.write(`Assigned: ${assignedLabel || "me"}\n`);
+  if (childrenOfThreadId) {
+    stdout.write(`Children of: ${childrenOfThreadId}\n`);
+  } else {
+    stdout.write(`Assigned: ${assignedLabel || "me"}\n`);
+  }
   if (normalizedStatus) {
     stdout.write(`Status: ${normalizedStatus}\n`);
+  }
+  const lifecycleFilter = firstText(payload.lifecycle_filter, payload.lifecycleFilter);
+  if (lifecycleFilter) {
+    stdout.write(`Lifecycle filter: ${lifecycleFilter}\n`);
   }
   stdout.write("\n");
 
   if (threads.length === 0) {
-    stdout.write("No matching assigned threads.\n");
+    stdout.write(
+      childrenOfThreadId
+        ? "No open child threads.\n"
+        : "No matching assigned threads.\n",
+    );
   } else {
     stdout.write("thread_id\tstatus\trun\ttarget\tupdated_at\ttitle\n");
     for (const entry of threads) {
@@ -933,6 +949,7 @@ function printHelp(stdout) {
       "Usage:",
       "  codeq8 threads mine [--status active|all] [--limit 25]",
       "  codeq8 threads search [--search text] [--status active|all] [--limit 25]",
+      "  codeq8 threads children [parent-thread-id] [--status active] [--limit 25] [--json]",
       "  codeq8 threads context <thread-id> [--limit 20]",
       "  codeq8 threads inspect <thread-id> [--limit 12] [--json]",
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
@@ -947,6 +964,7 @@ function printHelp(stdout) {
       "  codeq8 github issue attachments <url|number> [--repo owner/repo] [--comments] --output-dir dir",
       "",
       "Authentication is read from the Codeq8 runner environment. Tokens are never printed.",
+      "Child thread listing defaults to the current parent thread and currently supports the active/open lifecycle only.",
       "",
     ].join("\n"),
   );
@@ -1000,6 +1018,44 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
         query,
       }),
     );
+    return 0;
+  }
+
+  if (command === "children" || command === "child-list") {
+    const positional = removeFlags(rest, [
+      "--status",
+      "--limit",
+      "--before-updated-at",
+      "--before-thread-id",
+    ], ["--json"]);
+    const parentThreadId = normalizeText(positional[0]) || context.threadId;
+    const status = readFlag(rest, "--status", "active");
+    const query = new URLSearchParams();
+    appendParentQuery(query, context);
+    query.set("children_of_thread_id", parentThreadId);
+    query.set("status", status);
+    query.set("limit", readFlag(rest, "--limit", "25"));
+    query.set("before_updated_at", readFlag(rest, "--before-updated-at"));
+    query.set("before_thread_id", readFlag(rest, "--before-thread-id"));
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/thread-search",
+      query,
+    });
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, payload);
+    } else {
+      writeCompactThreadList(stdout, payload, {
+        childrenOfThreadId: firstText(
+          payload.children_of_thread_id,
+          payload.childrenOfThreadId,
+          parentThreadId,
+        ),
+        status,
+      });
+    }
     return 0;
   }
 

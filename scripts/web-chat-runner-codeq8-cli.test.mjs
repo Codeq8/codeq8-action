@@ -141,6 +141,62 @@ test("runner codeq8 helper lists current-user threads with compact safe output",
   assert.doesNotMatch(text, /secret_handoff_token/);
 });
 
+test("runner codeq8 helper lists active child threads for the current parent", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  const exitCode = await handleRunnerCodeq8Cli({
+    argv: ["threads", "children", "--limit", "3"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        repository: "Codeq8/Codeq8",
+        children_of_thread_id: "wct_parent",
+        matched_by: "parent_thread",
+        lifecycle_filter: "active",
+        threads: [
+          {
+            thread_id: "wct_child",
+            parent_thread_id: "wct_parent",
+            status: "active",
+            title: "Child investigation",
+            latest_run_status: "completed",
+            updated_at: 1700000000000,
+            branch_context: {
+              context_branch: "child/thread",
+            },
+            thread_record_handoff: "secret_handoff_token",
+          },
+        ],
+        page_count: 1,
+        has_more: false,
+      });
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.origin, "https://codeq8.example");
+  assert.equal(url.pathname, "/api/chat/runs/thread-search");
+  assert.equal(url.searchParams.get("workspace_repository"), "Codeq8/Codeq8");
+  assert.equal(url.searchParams.get("thread_id"), "wct_parent");
+  assert.equal(url.searchParams.get("run_id"), "wcr_parent");
+  assert.equal(url.searchParams.get("children_of_thread_id"), "wct_parent");
+  assert.equal(url.searchParams.get("status"), "active");
+  assert.equal(url.searchParams.get("limit"), "3");
+
+  const text = output.readText();
+  assert.match(text, /Repository: Codeq8\/Codeq8/);
+  assert.match(text, /Children of: wct_parent/);
+  assert.match(text, /Status: active/);
+  assert.match(text, /Lifecycle filter: active/);
+  assert.match(text, /wct_child\tactive\tcompleted\tchild\/thread\t2023-11-14T22:13:20\.000Z\tChild investigation/);
+  assert.doesNotMatch(text, /secret_handoff_token/);
+});
+
 test("runner codeq8 helper inspects one delegated thread with compact redacted output", async () => {
   const output = createOutputCapture();
   const calls = [];
@@ -481,6 +537,8 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.equal(exitCode, 0);
   const text = output.readText();
   assert.match(text, /codeq8 threads inspect <thread-id> \[--limit 12\] \[--json\]/);
+  assert.match(text, /codeq8 threads children \[parent-thread-id\] \[--status active\] \[--limit 25\] \[--json\]/);
+  assert.match(text, /currently supports the active\/open lifecycle only/);
   assert.match(text, /codeq8 threads message <thread-id> --text text/);
   assert.match(text, /codeq8 threads archive <thread-id>\s+\(alias: close\)/);
   assert.match(text, /codeq8 threads reopen <thread-id>/);
