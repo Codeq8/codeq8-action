@@ -25,6 +25,7 @@ import {
   buildWebChatRunMarker,
   buildWebChatRunnerDiagnosticRequest,
   buildUploadedCodexSessionStoredValue,
+  createAppServerActionsReasoningTranscript,
   createAppServerFirestoreControlListener,
   captureCodexSessionBundle,
   configureWorkspaceGitCredentialHelper,
@@ -780,6 +781,152 @@ test("runCodex reports invalid AppServer Firestore session payload fields", asyn
     "firebase_config.projectId",
     "channel.document_id",
   ]);
+});
+
+test("AppServer Actions reasoning transcript renders ordered sanitized bounded groups", () => {
+  const githubToken = `ghp_${"A".repeat(36)}`;
+  const messageText = [
+    `Assistant message with ${githubToken}`,
+    "::warning::not a workflow command",
+    "cookie=session_cookie_value",
+  ].join("\n");
+  const transcript = createAppServerActionsReasoningTranscript({
+    maxItems: 2,
+    maxItemChars: 500,
+    maxTotalChars: 1000,
+    chunkChars: 1000,
+  });
+
+  transcript.recordNotification("item/started", {
+    item: {
+      id: "reason-1",
+      type: "assistant_reasoning",
+      text: "Inspecting token=secret_progress_token",
+    },
+  });
+  transcript.recordNotification("item/completed", {
+    item: {
+      id: "reason-1",
+      type: "assistant_reasoning",
+      text: "Inspecting token=secret_progress_token",
+    },
+  });
+  transcript.recordNotification("item/started", {
+    item: { id: "msg-1", type: "agent_message" },
+  });
+  transcript.recordNotification("item/agentMessage/delta", {
+    item_id: "msg-1",
+    delta: messageText,
+  });
+  transcript.recordNotification("item/completed", {
+    item: { id: "msg-1", type: "agent_message", text: messageText },
+  });
+  transcript.recordNotification("item/started", {
+    item: {
+      id: "cmd-1",
+      type: "command_execution",
+      text: "npm test token=command_secret",
+    },
+  });
+  transcript.recordNotification("item/started", {
+    item: {
+      id: "reason-2",
+      type: "agent_reasoning",
+      text: "This reasoning item is omitted by the maxItems guard.",
+    },
+  });
+
+  const rendered = transcript.render().join("\n");
+  assert.match(rendered, /^::group::Codeq8 AppServer reasoning transcript/m);
+  assert.match(rendered, /items=2/);
+  assert.match(rendered, /omitted_items=1/);
+  assert.match(rendered, /\[1\] assistant_reasoning \| status=completed/);
+  assert.match(rendered, /\[2\] agent_message \| status=completed/);
+  assert(rendered.indexOf("[1] assistant_reasoning") < rendered.indexOf("[2] agent_message"));
+  assert.equal((rendered.match(/Inspecting token=\[redacted\]/g) || []).length, 1);
+  assert.match(rendered, /\[redacted_github_token\]/);
+  assert.match(rendered, /cookie=\[redacted\]/);
+  assert.match(rendered, /^    ::warning::not a workflow command$/m);
+  assert.doesNotMatch(rendered, /^::warning::/m);
+  assert.doesNotMatch(rendered, /secret_progress_token|session_cookie_value|command_secret|ghp_A/);
+  assert.doesNotMatch(rendered, /command_execution|npm test/);
+
+  const boundedTranscript = createAppServerActionsReasoningTranscript({
+    maxItems: 1,
+    maxItemChars: 24,
+    maxTotalChars: 24,
+    chunkChars: 1000,
+  });
+  boundedTranscript.recordNotification("item/started", {
+    item: {
+      id: "long-reason",
+      type: "assistant_reasoning",
+      text: "A".repeat(60),
+    },
+  });
+
+  const boundedRendered = boundedTranscript.render().join("\n");
+  assert.match(boundedRendered, /truncated=true/);
+  assert.match(boundedRendered, /omitted_chars=36/);
+});
+
+test("runCodex writes a clean AppServer reasoning transcript to Actions logs", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-reasoning-log-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'reason_1', type: 'assistant_reasoning', text: 'Checking token=secret_reasoning_token' } } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'reason_1', type: 'assistant_reasoning', text: 'Checking token=secret_reasoning_token' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'cmd_1', type: 'command_execution', command: 'npm test' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_1', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_1', delta: 'Ready with cookie=session_cookie_secret' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_1', type: 'agent_message', text: 'Ready with cookie=session_cookie_secret' } } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'cmd_1', type: 'command_execution', command: 'npm test' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const output = await captureRunnerOutput(() =>
+    runCodex({
+      codexPath: fakeCodexPath,
+      model: "gpt-5.5",
+      task: "log reasoning cleanly",
+      workspacePath,
+      commandEnv: process.env,
+      timeoutSeconds: 30,
+    }),
+  );
+
+  assert.equal(output.result.ok, true);
+  assert.match(output.logs, /^::group::Codeq8 AppServer reasoning transcript/m);
+  assert.match(output.logs, /\[1\] assistant_reasoning \| status=completed/);
+  assert.match(output.logs, /\[2\] agent_message \| status=completed/);
+  assert.equal((output.logs.match(/Checking token=\[redacted\]/g) || []).length, 1);
+  assert.match(output.logs, /Ready with cookie=\[redacted\]/);
+  assert.match(output.logs, /Codex app-server requests summarized/);
+  assert.doesNotMatch(output.logs, /secret_reasoning_token|session_cookie_secret/);
+  assert.doesNotMatch(output.logs, /Codex app-server request sent/);
+  assert.doesNotMatch(output.logs, /Codex app-server request completed/);
+  assert.doesNotMatch(output.logs, /command_execution \| status/);
 });
 
 test("runCodex summarizes AppServer chatter and suppresses successful stderr", async (t) => {

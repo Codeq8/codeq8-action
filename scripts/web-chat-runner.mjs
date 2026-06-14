@@ -78,6 +78,12 @@ const APP_SERVER_CONTROL_CAPABILITIES = Object.freeze([
   APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY,
 ]);
 const APP_SERVER_NOTIFICATION_SUMMARY_MAX_METHODS = 8;
+const APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_TITLE =
+  "Codeq8 AppServer reasoning transcript";
+const APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_MAX_ITEMS = 400;
+const APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_MAX_ITEM_CHARS = 20_000;
+const APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_MAX_TOTAL_CHARS = 512_000;
+const APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_CHUNK_CHARS = 64_000;
 const APP_SERVER_NOTIFICATION_TRACE_METHODS = new Set([
   "turn/started",
   "turn/completed",
@@ -346,7 +352,8 @@ function redactDiagnosticText(value) {
     .replace(/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b/g, "[redacted_jwt]")
     .replace(/(authorization\s*:\s*bearer\s+)[^\s]+/gi, "$1[redacted]")
     .replace(/(bearer\s+)[A-Za-z0-9._-]{20,}/gi, "$1[redacted]")
-    .replace(/(token|secret|password|private[_-]?key|credential)=([^&\s]+)/gi, "$1=[redacted]")
+    .replace(/(cookie\s*:\s*)[^\s;]+/gi, "$1[redacted]")
+    .replace(/(token|secret|password|private[_-]?key|credential|cookie)=([^&\s]+)/gi, "$1=[redacted]")
     .replace(/https:\/\/[^:@/\s]+:[^@/\s]+@github\.com/gi, "https://[redacted]@github.com");
 }
 
@@ -6842,6 +6849,278 @@ function isAppServerAgentMessageItem(params) {
   return /agent|assistant/.test(itemType);
 }
 
+function normalizeAppServerItemType(params, fallback = "") {
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  return normalizeText(
+    item.type ||
+      item.kind ||
+      object.type ||
+      object.kind ||
+      object.itemType ||
+      object.item_type ||
+      fallback,
+  );
+}
+
+function normalizeAppServerActionsTranscriptItemType(value) {
+  const normalized = normalizeText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized || "assistant_message";
+}
+
+function isAppServerActionsTranscriptItemType(value) {
+  if (!normalizeText(value)) {
+    return false;
+  }
+  const normalized = normalizeAppServerActionsTranscriptItemType(value);
+  return (
+    normalized.includes("reasoning") ||
+    normalized === "agent_message" ||
+    normalized === "assistant_message" ||
+    normalized === "assistant" ||
+    normalized === "agent"
+  );
+}
+
+function extractAppServerItemText(params) {
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  return extractAppServerTextPreservingWhitespace(item, ["text", "content", "message"]);
+}
+
+function sanitizeActionsTranscriptText(value) {
+  return redactDiagnosticText(String(value || ""))
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\0/g, "");
+}
+
+function escapeGitHubActionsCommandText(value) {
+  return sanitizeActionsTranscriptText(value)
+    .replace(/%/g, "%25")
+    .replace(/\n/g, "%0A")
+    .replace(/\r/g, "%0D");
+}
+
+function formatActionsTranscriptBodyLine(value) {
+  const line = sanitizeActionsTranscriptText(value);
+  return line.startsWith("::") ? `  ${line}` : line;
+}
+
+function appendBoundedActionsTranscriptText(entry, text, limits, { replace = false } = {}) {
+  const sanitized = sanitizeActionsTranscriptText(text);
+  if (!sanitized) {
+    return 0;
+  }
+  if (replace) {
+    entry.totalChars -= entry.text.length;
+    entry.text = "";
+  }
+  const remainingItemChars = Math.max(0, limits.maxItemChars - entry.text.length);
+  const remainingTotalChars = Math.max(0, limits.maxTotalChars - limits.readTotalChars());
+  const allowedChars = Math.min(sanitized.length, remainingItemChars, remainingTotalChars);
+  if (allowedChars > 0) {
+    entry.text += sanitized.slice(0, allowedChars);
+    entry.totalChars += allowedChars;
+  }
+  const omittedChars = sanitized.length - allowedChars;
+  if (omittedChars > 0) {
+    entry.truncated = true;
+  }
+  return omittedChars;
+}
+
+function chunkActionsTranscriptBlocks(blocks, maxChunkChars) {
+  const chunks = [];
+  let current = [];
+  let currentLength = 0;
+  const normalizedMaxChunkChars = Math.max(1000, maxChunkChars);
+  for (const block of blocks) {
+    const blockLength = block.length + 1;
+    if (current.length > 0 && currentLength + blockLength > normalizedMaxChunkChars) {
+      chunks.push(current.join("\n\n"));
+      current = [];
+      currentLength = 0;
+    }
+    current.push(block);
+    currentLength += blockLength;
+  }
+  if (current.length > 0) {
+    chunks.push(current.join("\n\n"));
+  }
+  return chunks;
+}
+
+function createAppServerActionsReasoningTranscript({
+  maxItems = APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_MAX_ITEMS,
+  maxItemChars = APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_MAX_ITEM_CHARS,
+  maxTotalChars = APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_MAX_TOTAL_CHARS,
+  chunkChars = APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_CHUNK_CHARS,
+} = {}) {
+  const normalizedMaxItems = Math.max(1, Number(maxItems) || 1);
+  const normalizedMaxItemChars = Math.max(1, Number(maxItemChars) || 1);
+  const normalizedMaxTotalChars = Math.max(1, Number(maxTotalChars) || 1);
+  const normalizedChunkChars = Math.max(1000, Number(chunkChars) || 1000);
+  const entries = [];
+  const entryIndexes = new Map();
+  let currentTranscriptKey = "";
+  let sequence = 0;
+  let omittedItems = 0;
+  let omittedChars = 0;
+
+  const totalCapturedChars = () =>
+    entries.reduce((sum, entry) => sum + entry.text.length, 0);
+
+  const ensureEntry = ({ itemId = "", itemType = "" } = {}) => {
+    const normalizedItemType = normalizeAppServerActionsTranscriptItemType(itemType);
+    const normalizedItemId = normalizeText(itemId);
+    const key = normalizedItemId
+      ? `id:${normalizedItemId}`
+      : currentTranscriptKey || `seq:${sequence + 1}:${normalizedItemType}`;
+    const existingIndex = entryIndexes.get(key);
+    if (typeof existingIndex === "number") {
+      const existing = entries[existingIndex];
+      existing.itemType = existing.itemType || normalizedItemType;
+      return { entry: existing, key, created: false };
+    }
+    if (entries.length >= normalizedMaxItems) {
+      omittedItems += 1;
+      return { entry: null, key, created: false };
+    }
+    sequence += 1;
+    const entry = {
+      key,
+      sequence,
+      itemType: normalizedItemType,
+      status: "",
+      text: "",
+      totalChars: 0,
+      truncated: false,
+    };
+    entries.push(entry);
+    entryIndexes.set(key, entries.length - 1);
+    return { entry, key, created: true };
+  };
+
+  const writeText = (entry, text, options = {}) => {
+    if (!entry) {
+      omittedChars += sanitizeActionsTranscriptText(text).length;
+      return;
+    }
+    const omitted = appendBoundedActionsTranscriptText(
+      entry,
+      text,
+      {
+        maxItemChars: normalizedMaxItemChars,
+        maxTotalChars: normalizedMaxTotalChars,
+        readTotalChars: totalCapturedChars,
+      },
+      options,
+    );
+    omittedChars += omitted;
+  };
+
+  const recordNotification = (method, params = {}) => {
+    const normalizedMethod = normalizeAppServerMethod(method);
+    const isAgentDelta = normalizedMethod === "item/agentMessage/delta";
+    const isAnyDelta = /\/delta$/i.test(normalizedMethod);
+    const fallbackType = isAgentDelta ? "agent_message" : "";
+    const itemType = normalizeAppServerItemType(params, fallbackType);
+    if (!isAppServerActionsTranscriptItemType(itemType)) {
+      return false;
+    }
+
+    const itemId = extractAppServerItemId(params);
+    const { entry, key } = ensureEntry({ itemId, itemType });
+    if (key) {
+      currentTranscriptKey = key;
+    }
+    if (entry) {
+      entry.itemType = normalizeAppServerActionsTranscriptItemType(itemType);
+    }
+
+    if (normalizedMethod === "item/started") {
+      if (entry) {
+        entry.status = "started";
+      }
+      writeText(entry, extractAppServerItemText(params));
+      return true;
+    }
+
+    if (isAnyDelta) {
+      if (entry) {
+        entry.status = "in_progress";
+      }
+      writeText(
+        entry,
+        isAgentDelta
+          ? extractAppServerAgentDelta(params)
+          : extractAppServerTextPreservingWhitespace(params, ["delta", "text", "content"]),
+      );
+      return true;
+    }
+
+    if (normalizedMethod === "item/completed") {
+      if (entry) {
+        entry.status = "completed";
+      }
+      const completedText = extractAppServerItemText(params);
+      if (completedText && sanitizeActionsTranscriptText(completedText) !== entry?.text) {
+        writeText(entry, completedText, { replace: true });
+      }
+      return true;
+    }
+
+    return false;
+  };
+
+  const render = () => {
+    const visibleEntries = entries.filter((entry) => normalizeText(entry.text));
+    if (visibleEntries.length === 0 && omittedItems === 0 && omittedChars === 0) {
+      return [];
+    }
+    const itemBlocks = visibleEntries.map((entry, index) => {
+      const header = [
+        `[${index + 1}] ${entry.itemType}`,
+        entry.status ? `status=${entry.status}` : "",
+        entry.truncated ? "truncated=true" : "",
+      ].filter(Boolean).join(" | ");
+      const body = entry.text
+        .replace(/\s+$/g, "")
+        .split("\n")
+        .map((line) => `  ${formatActionsTranscriptBodyLine(line)}`)
+        .join("\n");
+      return `${header}\n${body || "  [no text captured]"}`;
+    });
+    const summary = [
+      `items=${visibleEntries.length}`,
+      `captured_chars=${totalCapturedChars()}`,
+      omittedItems ? `omitted_items=${omittedItems}` : "",
+      omittedChars ? `omitted_chars=${omittedChars}` : "",
+    ].filter(Boolean).join(" ");
+    const chunks = chunkActionsTranscriptBlocks([summary, ...itemBlocks], normalizedChunkChars);
+    return chunks.map((chunk, index) => {
+      const title = [
+        APP_SERVER_ACTIONS_REASONING_TRANSCRIPT_TITLE,
+        chunks.length > 1 ? `${index + 1}/${chunks.length}` : "",
+      ].filter(Boolean).join(" ");
+      return [
+        `::group::${escapeGitHubActionsCommandText(title)}`,
+        chunk,
+        "::endgroup::",
+      ].join("\n");
+    });
+  };
+
+  return {
+    recordNotification,
+    render,
+  };
+}
+
 function buildAppServerProgressEventId({
   itemId = "",
   itemType = "",
@@ -6967,6 +7246,18 @@ function summarizeCountMap(counts, maxEntries = APP_SERVER_NOTIFICATION_SUMMARY_
     ),
     hiddenMethodCount ? `other_methods=${hiddenMethodCount}` : "",
   ].filter(Boolean).join(" ");
+}
+
+function formatAppServerRequestSummaryKey(method, event) {
+  const methodKey = normalizeAppServerMethod(method)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "unknown";
+  const eventKey = normalizeText(event)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "observed";
+  return `${methodKey}_${eventKey}`;
 }
 
 function describeAppServerNotificationTrace(method, params = {}) {
@@ -8143,6 +8434,8 @@ async function runCodexAppServer({
     let nextRequestId = 1;
     let appServerTraceCount = 0;
     const appServerNotificationCounts = new Map();
+    const appServerRequestCounts = new Map();
+    const actionsReasoningTranscript = createAppServerActionsReasoningTranscript();
     const pendingRequests = new Map();
     const progressReporter =
       firestoreBridge?.progressReporter || createNoopAppServerProgressReporter();
@@ -8265,6 +8558,15 @@ async function runCodexAppServer({
         // ignore stdin close failure
       }
       killChild("SIGTERM");
+      for (const group of actionsReasoningTranscript.render()) {
+        for (const line of group.split("\n")) {
+          console.log(line);
+        }
+      }
+      const requestSummary = summarizeCountMap(appServerRequestCounts);
+      if (requestSummary) {
+        log("Codex app-server requests summarized", requestSummary);
+      }
       const notificationSummary = summarizeCountMap(appServerNotificationCounts);
       if (notificationSummary) {
         log("Codex app-server notifications summarized", notificationSummary);
@@ -8297,21 +8599,6 @@ async function runCodexAppServer({
       child.stdin?.write(`${JSON.stringify({ method, params })}\n`);
     };
 
-    const describeAppServerRequestParams = (params = {}) => {
-      const normalizedParams = normalizeObject(params);
-      const sandboxPolicy = normalizeObject(normalizedParams.sandboxPolicy);
-      const input = Array.isArray(normalizedParams.input) ? normalizedParams.input : [];
-      return [
-        normalizedParams.approvalPolicy ? `approval_policy=${normalizeText(normalizedParams.approvalPolicy)}` : "",
-        normalizedParams.sandbox ? `sandbox=${normalizeText(normalizedParams.sandbox)}` : "",
-        sandboxPolicy.type ? `sandbox_policy=${normalizeText(sandboxPolicy.type)}` : "",
-        input.length ? `input_items=${input.length}` : "",
-        normalizedParams.threadId ? "has_thread_id=true" : "",
-        normalizedParams.cwd ? "has_cwd=true" : "",
-        normalizedParams.model ? "has_model=true" : "",
-      ].filter(Boolean).join(" ");
-    };
-
     const logAppServerTrace = (message, details = "") => {
       if (appServerTraceCount >= 80) {
         return;
@@ -8323,10 +8610,7 @@ async function runCodexAppServer({
     const sendRequest = (method, params = {}) => new Promise((requestResolve, requestReject) => {
       const id = nextRequestId;
       nextRequestId += 1;
-      logAppServerTrace(
-        "Codex app-server request sent",
-        `id=${id} method=${normalizeAppServerMethod(method)} ${describeAppServerRequestParams(params)}`.trim(),
-      );
+      incrementCount(appServerRequestCounts, formatAppServerRequestSummaryKey(method, "sent"));
       pendingRequests.set(id, { resolve: requestResolve, reject: requestReject, method });
       child.stdin?.write(`${JSON.stringify({ method, id, params })}\n`);
     });
@@ -8434,6 +8718,7 @@ async function runCodexAppServer({
     const handleNotification = (method, params) => {
       const normalizedMethod = normalizeAppServerMethod(method);
       incrementCount(appServerNotificationCounts, normalizedMethod);
+      actionsReasoningTranscript.recordNotification(normalizedMethod, params);
       if (shouldTraceAppServerNotification(normalizedMethod)) {
         logAppServerTrace(
           "Codex app-server notification received",
@@ -8529,21 +8814,29 @@ async function runCodexAppServer({
         if (pending) {
           pendingRequests.delete(id);
           if (object.error) {
+            incrementCount(
+              appServerRequestCounts,
+              formatAppServerRequestSummaryKey(pending.method, "failed"),
+            );
             logAppServerTrace(
               "Codex app-server request failed",
               `id=${id} method=${normalizeAppServerMethod(pending.method)} error=${truncate(extractErrorMessage(object.error), 300)}`,
             );
             pending.reject(new Error(extractErrorMessage(object.error, `${pending.method} failed.`)));
           } else {
-            logAppServerTrace(
-              "Codex app-server request completed",
-              `id=${id} method=${normalizeAppServerMethod(pending.method)}`,
+            incrementCount(
+              appServerRequestCounts,
+              formatAppServerRequestSummaryKey(pending.method, "completed"),
             );
             pending.resolve(object.result || {});
           }
           return;
         }
         if (object.method) {
+          incrementCount(
+            appServerRequestCounts,
+            formatAppServerRequestSummaryKey(object.method, "rejected"),
+          );
           logAppServerTrace(
             "Codex app-server server request rejected",
             `id=${id} method=${normalizeAppServerMethod(object.method)}`,
@@ -11102,6 +11395,7 @@ export {
   buildResumePrompt,
   buildFinalWorkspaceStateCallbackPayload,
   buildUploadedCodexSessionStoredValue,
+  createAppServerActionsReasoningTranscript,
   createAppServerFirestoreControlListener,
   captureCodexSessionBundle,
   checkoutPreparedWorkspaceBranch,
