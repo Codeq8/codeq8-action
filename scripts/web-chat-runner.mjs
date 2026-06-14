@@ -33,6 +33,7 @@ import {
   WEB_CHAT_RUNNER_CODEQ8_FILE_PATH,
   WEB_CHAT_RUNNER_CODEQ8_FILE_SAVE_PATH,
   WEB_CHAT_RUNNER_DIAGNOSTIC_PATH,
+  supportsAppServerProgressHistory,
   supportsServerOwnedCodeq8FileSync,
   supportsCodexThreadGoals,
   supportsServerOwnedDiscordDmChat,
@@ -67,6 +68,8 @@ const APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS = 2500;
 // listeners/writes for progress and control.
 const APP_SERVER_FIRESTORE_SESSION_PATH =
   "/api/chat/runs/app-server/firebase-session";
+const APP_SERVER_PROGRESS_HISTORY_PATH = "/api/chat/runs/app-server/events";
+const APP_SERVER_PROGRESS_HISTORY_MAX_EVENTS_PER_REQUEST = 10;
 const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
   "codex_app_server_attachment_turn_control";
 const CODEX_GOAL_UPDATE_PATH = "/api/chat/runs/goal";
@@ -7024,6 +7027,91 @@ function createNoopAppServerProgressReporter() {
   };
 }
 
+async function postAppServerProgressHistoryBatch({
+  events = [],
+  fetchImpl = globalThis.fetch,
+  publicBaseUrl,
+  runId,
+  threadId,
+  webChatRunToken,
+  workspaceRepository,
+} = {}) {
+  const normalizedEvents = Array.isArray(events)
+    ? events.map(normalizeObject).filter((event) => normalizeText(event.kind))
+    : [];
+  const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
+  const normalizedToken = normalizeText(webChatRunToken);
+  const normalizedRepository = normalizeRepository(workspaceRepository);
+  const normalizedThreadId = normalizeThreadId(threadId);
+  const normalizedRunId = normalizeRunId(runId);
+  if (
+    normalizedEvents.length === 0 ||
+    !normalizedPublicBaseUrl ||
+    !normalizedToken ||
+    !normalizedRepository ||
+    !normalizedThreadId ||
+    !normalizedRunId ||
+    typeof fetchImpl !== "function"
+  ) {
+    return {
+      eventCount: 0,
+      ok: true,
+      requestCount: 0,
+    };
+  }
+
+  let requestCount = 0;
+  for (
+    let index = 0;
+    index < normalizedEvents.length;
+    index += APP_SERVER_PROGRESS_HISTORY_MAX_EVENTS_PER_REQUEST
+  ) {
+    const chunk = normalizedEvents.slice(
+      index,
+      index + APP_SERVER_PROGRESS_HISTORY_MAX_EVENTS_PER_REQUEST,
+    );
+    const response = await fetchImpl(
+      buildAppServerRouteUrl({
+        publicBaseUrl: normalizedPublicBaseUrl,
+        path: APP_SERVER_PROGRESS_HISTORY_PATH,
+      }),
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${normalizedToken}`,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({
+          workspace_repository: normalizedRepository,
+          thread_id: normalizedThreadId,
+          run_id: normalizedRunId,
+          history_only: true,
+          events: chunk,
+        }),
+      },
+    );
+    requestCount += 1;
+    if (!response?.ok) {
+      let payload = {};
+      try {
+        payload = normalizeObject(await response.json());
+      } catch {
+        payload = {};
+      }
+      throw new Error(
+        normalizeText(payload.error) ||
+          `AppServer progress history request failed (${response?.status || 0}).`,
+      );
+    }
+  }
+
+  return {
+    eventCount: normalizedEvents.length,
+    ok: true,
+    requestCount,
+  };
+}
+
 function normalizeFirebasePublicConfig(value) {
   const normalized = normalizeObject(value);
   return {
@@ -7235,7 +7323,12 @@ function createAppServerFirestoreProgressReporter({
   FieldPathImpl,
   channel,
   docRef,
+  fetchImpl = globalThis.fetch,
+  progressHistoryEnabled = false,
+  publicBaseUrl = "",
   reportRunnerDiagnostic,
+  webChatRunToken = "",
+  workspaceRepository = "",
   updateDocImpl,
 }) {
   // Batching here reduces Firestore writes. This timer is not a polling loop:
@@ -7279,40 +7372,68 @@ function createAppServerFirestoreProgressReporter({
     flushing = true;
     const batch = queued.slice(0, APP_SERVER_PROGRESS_MAX_BATCH_SIZE);
     queued = queued.slice(APP_SERVER_PROGRESS_MAX_BATCH_SIZE);
+    const now = Date.now();
     try {
       progressEvents = compactAppServerProgressEvents([
         ...progressEvents,
         ...batch,
       ]).slice(-APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN);
-      const now = Date.now();
-      await updateDocImpl(
-        docRef,
-        new FieldPathImpl("threads", normalizedThreadId, "appServerProgressEvents"),
-        progressEvents,
-        new FieldPathImpl("threads", normalizedThreadId, "appServerProgressRevision"),
-        `${normalizedRunId}:${now}`,
-        new FieldPathImpl("threads", normalizedThreadId, "updatedAt"),
-        now,
-        "revision",
-        String(now),
-        "updatedAt",
-        now,
-      );
-    } catch (error) {
-      const reason = extractErrorMessage(error);
-      log("Codex app-server Firestore progress write failed", reason);
-      await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
-        event: "app_server_firestore_progress_write_failed",
-        failureClass: "app_server_firestore_progress_write_failed",
-        details: {
-          reason,
-          collection_id: normalizeText(channel?.collectionId),
-          document_id_hash: hashDiagnosticValue(channel?.documentId),
-          thread_id: normalizedThreadId,
-          run_id: normalizedRunId,
-          batch_size: batch.length,
-        },
-      });
+      try {
+        await updateDocImpl(
+          docRef,
+          new FieldPathImpl("threads", normalizedThreadId, "appServerProgressEvents"),
+          progressEvents,
+          new FieldPathImpl("threads", normalizedThreadId, "appServerProgressRevision"),
+          `${normalizedRunId}:${now}`,
+          new FieldPathImpl("threads", normalizedThreadId, "updatedAt"),
+          now,
+          "revision",
+          String(now),
+          "updatedAt",
+          now,
+        );
+      } catch (error) {
+        const reason = extractErrorMessage(error);
+        log("Codex app-server Firestore progress write failed", reason);
+        await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+          event: "app_server_firestore_progress_write_failed",
+          failureClass: "app_server_firestore_progress_write_failed",
+          details: {
+            reason,
+            collection_id: normalizeText(channel?.collectionId),
+            document_id_hash: hashDiagnosticValue(channel?.documentId),
+            thread_id: normalizedThreadId,
+            run_id: normalizedRunId,
+            batch_size: batch.length,
+          },
+        });
+      }
+      if (progressHistoryEnabled) {
+        try {
+          await postAppServerProgressHistoryBatch({
+            events: batch,
+            fetchImpl,
+            publicBaseUrl,
+            runId: normalizedRunId,
+            threadId: normalizedThreadId,
+            webChatRunToken,
+            workspaceRepository: workspaceRepository || channel?.workspaceRepository,
+          });
+        } catch (error) {
+          const reason = extractErrorMessage(error);
+          log("Codex app-server progress history write failed", reason);
+          await reportAppServerFirestoreDiagnostic(reportRunnerDiagnostic, {
+            event: "app_server_progress_history_write_failed",
+            failureClass: "app_server_progress_history_write_failed",
+            details: {
+              reason,
+              thread_id: normalizedThreadId,
+              run_id: normalizedRunId,
+              batch_size: batch.length,
+            },
+          });
+        }
+      }
     } finally {
       flushing = false;
       resolveFlushWaiters();
@@ -7913,7 +8034,12 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
         FieldPathImpl: firebaseFirestore.FieldPath,
         channel: session.channel,
         docRef,
+        fetchImpl: appServerContext?.fetchImpl,
+        progressHistoryEnabled: appServerContext?.progressHistoryEnabled === true,
+        publicBaseUrl: appServerContext?.publicBaseUrl,
         reportRunnerDiagnostic,
+        webChatRunToken: appServerContext?.webChatRunToken,
+        workspaceRepository: appServerContext?.workspaceRepository,
         updateDocImpl: firebaseFirestore.updateDoc,
       }),
       createControlListener(listenerArgs = {}) {
@@ -9711,6 +9837,8 @@ async function main() {
   const serverOwnedCodeq8FileSyncEnabled = supportsServerOwnedCodeq8FileSync(runtimeManifest);
   const serverOwnedDiscordDmChatEnabled = supportsServerOwnedDiscordDmChat(runtimeManifest);
   const codexThreadGoalsEnabled = supportsCodexThreadGoals(runtimeManifest);
+  const appServerProgressHistoryEnabled =
+    supportsAppServerProgressHistory(runtimeManifest);
   log(
     "Resolved runner-owned codeq8.md workspace sync capability",
     serverOwnedCodeq8FileSyncEnabled ? "enabled" : "disabled",
@@ -9722,6 +9850,10 @@ async function main() {
   log(
     "Resolved Codex thread goals capability",
     codexThreadGoalsEnabled ? "enabled" : "disabled",
+  );
+  log(
+    "Resolved AppServer progress history capability",
+    appServerProgressHistoryEnabled ? "enabled" : "disabled",
   );
 
   const codexPath = await resolveCodexPath(commandEnv);
@@ -10257,6 +10389,7 @@ async function main() {
             attachmentRootPath: path.join(attemptRunRuntime.homePath, "control-attachments"),
             commandEnv: codexCommandEnv,
             reportRunnerDiagnostic,
+            progressHistoryEnabled: appServerProgressHistoryEnabled,
           },
         });
         latestAppServerControlRequests =
@@ -10996,6 +11129,7 @@ export {
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
   postRunCallback,
+  postAppServerProgressHistoryBatch,
   prepareCodeq8Cli,
   prepareRunnerDiscordDmCli,
   prepareGitHubCliAuth,

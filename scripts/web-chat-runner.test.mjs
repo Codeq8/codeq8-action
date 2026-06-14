@@ -40,6 +40,7 @@ import {
   isTerminalWebChatRunPromptRefusal,
   materializeWebChatAttachments,
   normalizeAttachmentRecord,
+  postAppServerProgressHistoryBatch,
   postWebChatRunnerDiagnostic,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
@@ -100,6 +101,7 @@ test("runtime manifest baseline matches the public startup contract", () => {
   );
   assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_CAPABILITIES, [
     "codex_app_server_thread_goals",
+    "codex_app_server_progress_history",
   ]);
   assert.deepEqual(
     REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
@@ -178,6 +180,10 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
   );
   assert.match(source, /The bridge owns the AppServer live-cost boundary/);
   assert.match(source, /APP_SERVER_FIRESTORE_SESSION_PATH/);
+  assert.match(source, /APP_SERVER_PROGRESS_HISTORY_PATH/);
+  assert.match(source, /history_only:\s*true/);
+  assert.match(source, /supportsAppServerProgressHistory/);
+  assert.match(source, /progressHistoryEnabled/);
   assert.match(source, /app_server_firestore_control_listener_failed/);
   assert.match(source, /reportRunnerDiagnostic/);
   assert.match(bridgeSource, /import\("firebase\/firestore"\)/);
@@ -191,7 +197,6 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
   );
   assert.doesNotMatch(source, /function createAppServerControlPoller/);
   assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/control/);
-  assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/events/);
   assert.doesNotMatch(source, /\bsetInterval\s*\(/);
 });
 
@@ -397,6 +402,46 @@ test("runner diagnostic requests redact secrets before posting", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("postAppServerProgressHistoryBatch sends bounded history-only event chunks", async () => {
+  const calls = [];
+  const result = await postAppServerProgressHistoryBatch({
+    publicBaseUrl: "https://codeq8.example.com",
+    webChatRunToken: "header.payload.signature",
+    workspaceRepository: "Codeq8/Codeq8",
+    threadId: "wct_history",
+    runId: "wcr_history",
+    events: Array.from({ length: 12 }, (_, index) => ({
+      event_id: `event_${index}`,
+      kind: "item",
+      item_type: "assistant_reasoning",
+      label: `Reasoning ${index}`,
+      status: "completed",
+      at: 1_700_000_000_000 + index,
+    })),
+    fetchImpl: async (url, init = {}) => {
+      calls.push({
+        url: String(url),
+        authorization: String(init.headers?.Authorization || ""),
+        body: JSON.parse(String(init.body || "{}")),
+      });
+      return Response.json({ ok: true }, { status: 200 });
+    },
+  });
+
+  assert.deepEqual(result, { eventCount: 12, ok: true, requestCount: 2 });
+  assert.equal(calls.length, 2);
+  assert.equal(
+    calls[0]?.url,
+    "https://codeq8.example.com/api/chat/runs/app-server/events",
+  );
+  assert.equal(calls[0]?.authorization, "Bearer header.payload.signature");
+  assert.equal(calls[0]?.body?.history_only, true);
+  assert.equal(calls[0]?.body?.events.length, 10);
+  assert.equal(calls[1]?.body?.events.length, 2);
+  assert.equal(calls[1]?.body?.thread_id, "wct_history");
+  assert.equal(calls[1]?.body?.run_id, "wcr_history");
 });
 
 test("applyCodexNodeOptions maps dedicated Codex preloads onto the Codex child env", () => {
