@@ -240,10 +240,19 @@ function formatThreadUpdatedAt(thread) {
   );
 }
 
+function readThreadParentThreadId(thread) {
+  return firstText(thread.parent_thread_id, thread.parentThreadId);
+}
+
+function formatThreadRelation(thread) {
+  const parentThreadId = readThreadParentThreadId(thread);
+  return parentThreadId ? `child-of:${parentThreadId}` : "top-level";
+}
+
 function writeCompactThreadList(
   stdout,
   payload,
-  { assignedLabel = "me", childrenOfThreadId = "", status = "" } = {},
+  { assignedLabel = "me", childrenOfThreadId = "", showRelationColumn = false, status = "" } = {},
 ) {
   const threads = payloadArray(payload.threads);
   const repository = normalizeText(payload.repository);
@@ -261,6 +270,12 @@ function writeCompactThreadList(
   if (lifecycleFilter) {
     stdout.write(`Lifecycle filter: ${lifecycleFilter}\n`);
   }
+  const lifecycleNote = firstText(payload.lifecycle_note, payload.lifecycleNote);
+  if (lifecycleNote) {
+    stdout.write(`Lifecycle note: ${lifecycleNote}\n`);
+  } else if (childrenOfThreadId) {
+    stdout.write("Lifecycle note: Child thread listing currently supports the active/open lifecycle only.\n");
+  }
   stdout.write("\n");
 
   if (threads.length === 0) {
@@ -270,19 +285,27 @@ function writeCompactThreadList(
         : "No matching assigned threads.\n",
     );
   } else {
-    stdout.write("thread_id\tstatus\trun\ttarget\tupdated_at\ttitle\n");
+    stdout.write(
+      showRelationColumn
+        ? "thread_id\tstatus\trelation\trun\ttarget\tupdated_at\ttitle\n"
+        : "thread_id\tstatus\trun\ttarget\tupdated_at\ttitle\n",
+    );
     for (const entry of threads) {
       const thread = payloadObject(entry);
-      stdout.write(
-        [
-          normalizeText(thread.thread_id || thread.threadId),
-          normalizeText(thread.status),
-          formatThreadRunStatus(thread),
-          formatThreadTarget(thread),
-          formatThreadUpdatedAt(thread),
-          normalizeText(thread.title || "(untitled)").replace(/\s+/g, " "),
-        ].join("\t") + "\n",
+      const columns = [
+        normalizeText(thread.thread_id || thread.threadId),
+        normalizeText(thread.status),
+      ];
+      if (showRelationColumn) {
+        columns.push(formatThreadRelation(thread));
+      }
+      columns.push(
+        formatThreadRunStatus(thread),
+        formatThreadTarget(thread),
+        formatThreadUpdatedAt(thread),
+        normalizeText(thread.title || "(untitled)").replace(/\s+/g, " "),
       );
+      stdout.write(columns.join("\t") + "\n");
     }
   }
 
@@ -393,6 +416,12 @@ function summarizeThreadForOutput(thread, payload = {}) {
     ),
     repository: readThreadRepository(normalized, payload),
     title: truncateText(firstText(normalized.title), 160),
+    parent_thread_id: firstText(
+      normalized.parent_thread_id,
+      normalized.parentThreadId,
+      payload.target_parent_thread_id,
+      payload.targetParentThreadId,
+    ),
     status: firstText(normalized.status, payload.status),
     aggregate_status: firstText(normalized.aggregate_status, normalized.aggregateStatus),
     source_type: firstText(normalized.source_type, normalized.sourceType),
@@ -436,13 +465,32 @@ function summarizeGoalForOutput(goal) {
 }
 
 function parentSummaryFields(payload) {
+  const runnerParentThreadId = firstText(
+    payload.runner_parent_thread_id,
+    payload.runnerParentThreadId,
+    payload.parent_thread_id,
+    payload.parentThreadId,
+  );
+  const runnerParentRunId = firstText(
+    payload.runner_parent_run_id,
+    payload.runnerParentRunId,
+    payload.parent_run_id,
+    payload.parentRunId,
+  );
+  const runnerParentRepository = firstText(
+    payload.runner_parent_workspace_repository,
+    payload.runnerParentWorkspaceRepository,
+    payload.parent_workspace_repository,
+    payload.parentWorkspaceRepository,
+  );
   return compactObject({
-    parent_thread_id: firstText(payload.parent_thread_id, payload.parentThreadId),
-    parent_run_id: firstText(payload.parent_run_id, payload.parentRunId),
-    parent_workspace_repository: firstText(
-      payload.parent_workspace_repository,
-      payload.parentWorkspaceRepository,
-    ),
+    runner_parent_thread_id: runnerParentThreadId,
+    runner_parent_run_id: runnerParentRunId,
+    runner_parent_workspace_repository: runnerParentRepository,
+    // Backward-compatible aliases for callers that still read parent_*.
+    parent_thread_id: runnerParentThreadId,
+    parent_run_id: runnerParentRunId,
+    parent_workspace_repository: runnerParentRepository,
   });
 }
 
@@ -705,6 +753,30 @@ function buildThreadInspectSnapshot(payload) {
     thread.thread_id,
     thread.threadId,
   );
+  const runnerParentThreadId = firstText(
+    payload.runner_parent_thread_id,
+    payload.runnerParentThreadId,
+    payload.parent_thread_id,
+    payload.parentThreadId,
+  );
+  const runnerParentRunId = firstText(
+    payload.runner_parent_run_id,
+    payload.runnerParentRunId,
+    payload.parent_run_id,
+    payload.parentRunId,
+  );
+  const runnerParentRepository = firstText(
+    payload.runner_parent_workspace_repository,
+    payload.runnerParentWorkspaceRepository,
+    payload.parent_workspace_repository,
+    payload.parentWorkspaceRepository,
+  );
+  const targetParentThreadId = firstText(
+    payload.target_parent_thread_id,
+    payload.targetParentThreadId,
+    thread.parent_thread_id,
+    thread.parentThreadId,
+  );
   const latestRunId = firstText(
     thread.latest_run_id,
     thread.latestRunId,
@@ -733,17 +805,16 @@ function buildThreadInspectSnapshot(payload) {
   return {
     ok: Boolean(payload.ok),
     inspected: true,
-    parent_thread_id: firstText(payload.parent_thread_id, payload.parentThreadId),
-    parent_run_id: firstText(payload.parent_run_id, payload.parentRunId),
-    parent_workspace_repository: firstText(
-      payload.parent_workspace_repository,
-      payload.parentWorkspaceRepository,
-    ),
+    runner_parent_thread_id: runnerParentThreadId,
+    runner_parent_run_id: runnerParentRunId,
+    runner_parent_workspace_repository: runnerParentRepository,
+    target_parent_thread_id: targetParentThreadId,
     target_thread_id: targetThreadId,
     thread: {
       thread_id: targetThreadId,
       repository: readThreadRepository(thread, payload),
       title: truncateText(thread.title || "(untitled)", 160),
+      parent_thread_id: targetParentThreadId,
       status: firstText(thread.status),
       aggregate_status: firstText(thread.aggregate_status, thread.aggregateStatus),
       source_type: firstText(thread.source_type, thread.sourceType),
@@ -834,6 +905,19 @@ function writeThreadInspect(stdout, snapshot) {
         .filter(Boolean)
         .join(" ") || "(unknown)"}\n`,
     );
+  }
+  if (snapshot.runner_parent_thread_id || snapshot.runner_parent_run_id) {
+    stdout.write(
+      `Runner parent: ${[
+        snapshot.runner_parent_thread_id,
+        snapshot.runner_parent_run_id ? `run=${snapshot.runner_parent_run_id}` : "",
+      ].filter(Boolean).join(" ") || "(unknown)"}\n`,
+    );
+  }
+  if (thread.parent_thread_id || snapshot.target_parent_thread_id) {
+    stdout.write(`Target parent: ${thread.parent_thread_id || snapshot.target_parent_thread_id}\n`);
+  } else {
+    stdout.write("Target parent: (none)\n");
   }
   const pullRequestLabel = pullRequest.number
     ? `PR #${pullRequest.number}${pullRequest.url ? ` ${pullRequest.url}` : ""}`
@@ -964,6 +1048,7 @@ function printHelp(stdout) {
       "  codeq8 github issue attachments <url|number> [--repo owner/repo] [--comments] --output-dir dir",
       "",
       "Authentication is read from the Codeq8 runner environment. Tokens are never printed.",
+      "Assigned thread lists label child rows as child-of:<parent-thread-id>.",
       "Child thread listing defaults to the current parent thread and currently supports the active/open lifecycle only.",
       "",
     ].join("\n"),
@@ -994,7 +1079,11 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       path: "/api/chat/runs/thread-search",
       query,
     });
-    writeCompactThreadList(stdout, payload, { assignedLabel: "me", status });
+    writeCompactThreadList(stdout, payload, {
+      assignedLabel: "me",
+      showRelationColumn: true,
+      status,
+    });
     return 0;
   }
 
@@ -1030,6 +1119,9 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
     ], ["--json"]);
     const parentThreadId = normalizeText(positional[0]) || context.threadId;
     const status = readFlag(rest, "--status", "active");
+    if (status && status.toLowerCase() !== "active") {
+      throw new Error("codeq8 threads children currently supports --status active only.");
+    }
     const query = new URLSearchParams();
     appendParentQuery(query, context);
     query.set("children_of_thread_id", parentThreadId);
