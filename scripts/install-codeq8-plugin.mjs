@@ -21,7 +21,6 @@ export const CODEQ8_PLUGIN_MARKETPLACE_ENTRY_MARKER_FILE =
   "codeq8.marketplace-entry.codeq8-managed.json";
 
 const MARKER_SCHEMA_VERSION = 1;
-const MARKETPLACE_ENTRY_SOURCE_PATH = "./plugins/codeq8";
 const OPTIONAL_SKIP_STATUSES = new Set(["source_missing", "collision", "invalid_source"]);
 
 function normalizeText(value) {
@@ -124,7 +123,7 @@ export function resolveCodeq8PluginInstallPaths({
     homePath,
     codexHome,
     sourcePluginPath: path.join(normalizedRepoRoot, pluginSourceRelativePath),
-    pluginInstallPath: homePath ? path.join(homePath, "plugins", CODEQ8_PLUGIN_NAME) : "",
+    pluginInstallPath: codexHome ? path.join(codexHome, "plugins", CODEQ8_PLUGIN_NAME) : "",
     marketplacePath: homePath
       ? path.join(homePath, ".agents", "plugins", "marketplace.json")
       : "",
@@ -283,12 +282,22 @@ function buildManagedMarker({
   };
 }
 
-function buildMarketplaceEntry() {
+export function buildMarketplaceSourcePath({ marketplaceRootPath, pluginInstallPath }) {
+  const normalizedMarketplaceRootPath = path.resolve(marketplaceRootPath);
+  const normalizedPluginInstallPath = path.resolve(pluginInstallPath);
+  const relativePath = path
+    .relative(normalizedMarketplaceRootPath, normalizedPluginInstallPath)
+    .split(path.sep)
+    .join("/");
+  return `./${relativePath.replace(/^\.\//, "")}`;
+}
+
+function buildMarketplaceEntry({ sourcePath }) {
   return {
     name: CODEQ8_PLUGIN_NAME,
     source: {
       source: "local",
-      path: MARKETPLACE_ENTRY_SOURCE_PATH,
+      path: sourcePath,
     },
     policy: {
       installation: "INSTALLED_BY_DEFAULT",
@@ -311,13 +320,13 @@ async function replaceManagedDirectory({ sourcePath, targetPath, marker }) {
   await fs.rename(tempPath, targetPath);
 }
 
-async function updateMarketplaceEntry({ marketplacePath, markerPath, state, marker }) {
+async function updateMarketplaceEntry({ marketplacePath, markerPath, state, marker, sourcePath }) {
   const marketplace = {
     ...state.marketplace,
     interface: normalizeJsonObject(state.marketplace.interface),
     plugins: [...state.marketplace.plugins],
   };
-  const entry = buildMarketplaceEntry();
+  const entry = buildMarketplaceEntry({ sourcePath });
   if (state.entryIndex >= 0) {
     marketplace.plugins[state.entryIndex] = entry;
   } else {
@@ -472,6 +481,10 @@ export async function syncCodeq8PluginInstall({
     artifactHash,
     installedAt: startedAt,
   });
+  const marketplaceSourcePath = buildMarketplaceSourcePath({
+    marketplaceRootPath: paths.homePath,
+    pluginInstallPath: paths.pluginInstallPath,
+  });
 
   await replaceManagedDirectory({
     sourcePath: paths.sourcePluginPath,
@@ -501,6 +514,7 @@ export async function syncCodeq8PluginInstall({
     markerPath: paths.marketplaceMarkerPath,
     state: marketplaceState,
     marker: baseMarker,
+    sourcePath: marketplaceSourcePath,
   });
   targets.push("marketplace");
 

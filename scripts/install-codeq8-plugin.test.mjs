@@ -10,7 +10,9 @@ import {
   CODEQ8_PLUGIN_NAME,
   CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH,
   CODEQ8_PLUGIN_MARKETPLACE_ENTRY_MARKER_FILE,
+  buildMarketplaceSourcePath,
   hashDirectory,
+  resolveCodeq8PluginInstallPaths,
   syncCodeq8PluginInstall,
 } from "./install-codeq8-plugin.mjs";
 
@@ -33,7 +35,7 @@ async function withTempInstallRoot(fn) {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-plugin-install-"));
   try {
     const homePath = path.join(tempRoot, "home");
-    const codexHome = path.join(tempRoot, "codex-home");
+    const codexHome = path.join(homePath, ".codex-runner");
     await fs.mkdir(homePath, { recursive: true });
     await fs.mkdir(codexHome, { recursive: true });
     await fn({
@@ -72,7 +74,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
     assert.deepEqual(env, originalEnv);
 
     const pluginMarker = await readJson(
-      path.join(homePath, "plugins", "codeq8", CODEQ8_PLUGIN_MARKER_FILE),
+      path.join(codexHome, "plugins", "codeq8", CODEQ8_PLUGIN_MARKER_FILE),
     );
     assert.equal(pluginMarker.managed_by, "codeq8-plugin-installer");
     assert.equal(pluginMarker.plugin_name, "codeq8");
@@ -94,7 +96,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
         name: "codeq8",
         source: {
           source: "local",
-          path: "./plugins/codeq8",
+          path: "./.codex-runner/plugins/codeq8",
         },
         policy: {
           installation: "INSTALLED_BY_DEFAULT",
@@ -131,7 +133,7 @@ test("Codeq8 plugin install updates marked marker source fields idempotently", a
     });
 
     const pluginMarker = await readJson(
-      path.join(homePath, "plugins", "codeq8", CODEQ8_PLUGIN_MARKER_FILE),
+      path.join(codexHome, "plugins", "codeq8", CODEQ8_PLUGIN_MARKER_FILE),
     );
     const skillMarker = await readJson(
       path.join(codexHome, "skills", "codeq8-plugin", CODEQ8_PLUGIN_MARKER_FILE),
@@ -148,7 +150,7 @@ test("Codeq8 plugin install updates marked marker source fields idempotently", a
 
 test("Codeq8 plugin install rejects an unmarked plugin directory collision", async () => {
   await withTempInstallRoot(async ({ homePath, codexHome, env }) => {
-    const collisionPath = path.join(homePath, "plugins", "codeq8");
+    const collisionPath = path.join(codexHome, "plugins", "codeq8");
     await fs.mkdir(collisionPath, { recursive: true });
     await fs.writeFile(path.join(collisionPath, "README.md"), "user-owned\n", "utf8");
 
@@ -167,6 +169,7 @@ test("Codeq8 plugin install rejects an unmarked plugin directory collision", asy
       await fs.readFile(path.join(collisionPath, "README.md"), "utf8"),
       "user-owned\n",
     );
+    assert.equal(await pathExists(path.join(collisionPath, CODEQ8_PLUGIN_MARKER_FILE)), false);
     assert.equal(await pathExists(path.join(codexHome, "skills", "codeq8-plugin")), false);
     assert.equal(
       await pathExists(path.join(homePath, ".agents", "plugins", "marketplace.json")),
@@ -192,7 +195,7 @@ test("Codeq8 plugin install rejects an unmarked skill collision", async () => {
     assert.equal(result.code, "collision");
     assert.match(result.reason, /skill:codeq8-plugin exists without a Codeq8 ownership marker/);
     assert.equal(await fs.readFile(path.join(skillPath, "SKILL.md"), "utf8"), "# User skill\n");
-    assert.equal(await pathExists(path.join(homePath, "plugins", "codeq8")), false);
+    assert.equal(await pathExists(path.join(codexHome, "plugins", "codeq8")), false);
   });
 });
 
@@ -231,8 +234,47 @@ test("Codeq8 plugin install rejects an unmarked marketplace entry collision", as
     assert.equal(result.ok, false);
     assert.equal(result.code, "collision");
     assert.match(result.reason, /unmarked Codeq8 plugin entry/);
-    assert.equal(await pathExists(path.join(homePath, "plugins", "codeq8")), false);
+    assert.equal(await pathExists(path.join(codexHome, "plugins", "codeq8")), false);
     assert.equal(await pathExists(path.join(codexHome, "skills", "codeq8-plugin")), false);
+  });
+});
+
+test("Codeq8 plugin install roots package metadata under resolved Codex home", async () => {
+  await withTempInstallRoot(async ({ homePath, codexHome, env }) => {
+    const paths = resolveCodeq8PluginInstallPaths({
+      repoRoot: process.cwd(),
+      env,
+    });
+
+    assert.equal(paths.pluginInstallPath, path.join(codexHome, "plugins", "codeq8"));
+    assert.equal(
+      buildMarketplaceSourcePath({
+        marketplaceRootPath: homePath,
+        pluginInstallPath: paths.pluginInstallPath,
+      }),
+      "./.codex-runner/plugins/codeq8",
+    );
+  });
+});
+
+test("Codeq8 plugin install defaults package metadata to HOME .codex plugins", async () => {
+  await withTempInstallRoot(async ({ homePath }) => {
+    const paths = resolveCodeq8PluginInstallPaths({
+      repoRoot: process.cwd(),
+      env: {
+        HOME: homePath,
+      },
+    });
+
+    assert.equal(paths.codexHome, path.join(homePath, ".codex"));
+    assert.equal(paths.pluginInstallPath, path.join(homePath, ".codex", "plugins", "codeq8"));
+    assert.equal(
+      buildMarketplaceSourcePath({
+        marketplaceRootPath: homePath,
+        pluginInstallPath: paths.pluginInstallPath,
+      }),
+      "./.codex/plugins/codeq8",
+    );
   });
 });
 
@@ -264,5 +306,7 @@ test("Codeq8 plugin install source does not mutate CODEX_HOME or Codex auth stat
 
   assert.doesNotMatch(actionSource, /CODEX_HOME=/);
   assert.doesNotMatch(installerSource, /process\.env\.CODEX_HOME\s*=/);
+  assert.doesNotMatch(installerSource, /path\.join\(homePath,\s*"plugins"/);
+  assert.doesNotMatch(installerSource, /\.\/plugins\/codeq8/);
   assert.doesNotMatch(installerSource, /auth\.json|config\.toml|sessions/);
 });
