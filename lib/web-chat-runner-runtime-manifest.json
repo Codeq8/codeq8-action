@@ -10,7 +10,8 @@
   ],
   "optional_capabilities": [
     "codex_app_server_thread_goals",
-    "codex_app_server_progress_history"
+    "codex_app_server_progress_history",
+    "codeq8_plugin"
   ],
   "required_paths": [
     "/api/github/workspace-git-token",

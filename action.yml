@@ -61,6 +61,8 @@ runs:
           --repo-root "$codeq8_action_repo_root" \
           --node-path "$CODEQ8_RESOLVED_NODE_BIN" \
           --npm-path "$npm_bin"
+        "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/install-codeq8-plugin.mjs" \
+          --repo-root "$codeq8_action_repo_root"
 
     - name: Prepare global npm tool prefix
       shell: bash

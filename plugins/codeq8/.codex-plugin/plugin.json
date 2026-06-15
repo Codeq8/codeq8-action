@@ -1,0 +1,32 @@
+{
+  "name": "codeq8",
+  "version": "0.1.0",
+  "description": "Codeq8-owned Codex capabilities for Codeq8 chat runs.",
+  "author": {
+    "name": "Codeq8",
+    "url": "https://github.com/Codeq8"
+  },
+  "homepage": "https://github.com/Codeq8/codeq8-action",
+  "repository": "https://github.com/Codeq8/codeq8-action",
+  "license": "MIT",
+  "keywords": [
+    "codeq8",
+    "codex",
+    "chat-runs",
+    "developer-tools"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codeq8",
+    "shortDescription": "Codeq8-owned Codex capabilities",
+    "longDescription": "Bundles Codeq8-owned Codex guidance and future tool capabilities for Codeq8 chat runs while preserving user-owned Codex state.",
+    "developerName": "Codeq8",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Codeq8/codeq8-action",
+    "brandColor": "#111827"
+  }
+}
