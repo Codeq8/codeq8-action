@@ -87,7 +87,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
       const skillMarker = await readJson(path.join(skillPath, CODEQ8_PLUGIN_MARKER_FILE));
       assert.equal(skillMarker.target_kind, "skill");
       assert.equal(skillMarker.target_name, skillName);
-      assert.equal(skillMarker.plugin_version, "0.2.0");
+      assert.equal(skillMarker.plugin_version, "0.2.1");
       assert.equal(await pathExists(path.join(skillPath, "SKILL.md")), true);
     }
 

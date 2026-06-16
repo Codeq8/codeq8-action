@@ -88,6 +88,12 @@ help before using unfamiliar commands. If the helper lacks the needed command,
 use only the runner-approved API fallback described in the current run context
 and keep reads bounded to the explicit request.
 
+Exact archive/reopen cleanup is run-token scoped and should still be attempted
+when the triggering web-session cookie is unavailable. Treat child
+listing/context/inspect/create/message cookie failures as a separate helper
+read/write limitation, not as proof that exact archive/reopen cleanup is
+blocked.
+
 Do not call undocumented backend URLs, print secrets, persist token or cookie
 values, clone repositories to expand access, or use unrelated browser routes as
 a substitute for the supported child-thread helper/API surface.
