@@ -21,6 +21,17 @@ runs:
           exit 1
         fi
         codeq8_action_repo_root="$(cd "$GITHUB_ACTION_PATH" && pwd)"
+        npm_global_prefix="${HOME}/.npm-global"
+        playwright_browsers_path="${HOME}/.cache/codeq8/ms-playwright"
+        mkdir -p "${npm_global_prefix}/bin"
+        mkdir -p "${playwright_browsers_path}"
+        export NPM_CONFIG_PREFIX="${npm_global_prefix}"
+        export PLAYWRIGHT_BROWSERS_PATH="${playwright_browsers_path}"
+        export PATH="${npm_global_prefix}/bin:${PATH}"
+        echo "NPM_CONFIG_PREFIX=${npm_global_prefix}" >> "$GITHUB_ENV"
+        echo "PLAYWRIGHT_BROWSERS_PATH=${playwright_browsers_path}" >> "$GITHUB_ENV"
+        echo "${npm_global_prefix}/bin" >> "$GITHUB_PATH"
+
         runtime_assignments="$(
           node "$codeq8_action_repo_root/scripts/resolve-workspace-node-runtime.mjs" \
             --workspace-path "$codeq8_action_repo_root" \
@@ -63,19 +74,9 @@ runs:
           --npm-path "$npm_bin"
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/install-codeq8-plugin.mjs" \
           --repo-root "$codeq8_action_repo_root"
+        "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/runner-global-cli-tools.mjs"
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/prepare-codeq8-playwright-mcp.mjs" \
-          --repo-root "$codeq8_action_repo_root" \
-          --npm-path "$npm_bin"
-
-    - name: Prepare global npm tool prefix
-      shell: bash
-      run: |
-        set -euo pipefail
-
-        npm_global_prefix="${HOME}/.npm-global"
-        mkdir -p "${npm_global_prefix}/bin"
-        echo "NPM_CONFIG_PREFIX=${npm_global_prefix}" >> "$GITHUB_ENV"
-        echo "${npm_global_prefix}/bin" >> "$GITHUB_PATH"
+          --repo-root "$codeq8_action_repo_root"
 
     - name: Run Codeq8 chat bridge
       shell: bash

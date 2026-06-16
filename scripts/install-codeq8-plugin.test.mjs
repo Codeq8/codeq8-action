@@ -93,17 +93,15 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
       const skillMarker = await readJson(path.join(skillPath, CODEQ8_PLUGIN_MARKER_FILE));
       assert.equal(skillMarker.target_kind, "skill");
       assert.equal(skillMarker.target_name, skillName);
-      assert.equal(skillMarker.plugin_version, "0.3.0");
+      assert.equal(skillMarker.plugin_version, "0.3.1");
       assert.equal(await pathExists(path.join(skillPath, "SKILL.md")), true);
     }
 
     const installedMcpConfig = await readJson(
       path.join(codexHome, "plugins", "codeq8", ".mcp.json"),
     );
-    assert.equal(installedMcpConfig.playwright.command, "npx");
+    assert.equal(installedMcpConfig.playwright.command, "playwright-mcp");
     assert.deepEqual(installedMcpConfig.playwright.args, [
-      "-y",
-      "@playwright/mcp@latest",
       "--browser=chromium",
       "--headless",
       "--isolated",
@@ -120,6 +118,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
       "PLAYWRIGHT_MCP_AUTH_URLS",
       "CODE_DEPLOYED_PUBLIC_URL",
       "PLAYWRIGHT_TEST_BASE_URL",
+      "PLAYWRIGHT_BROWSERS_PATH",
     ]);
     assert.equal(
       await pathExists(
@@ -348,8 +347,8 @@ test("Codeq8 plugin manifest bundles Playwright MCP without raw secrets", async 
   const mcpConfigSource = await fs.readFile(path.join(pluginRoot, ".mcp.json"), "utf8");
 
   assert.equal(manifest.mcpServers, "./.mcp.json");
-  assert.equal(mcpConfig.playwright.command, "npx");
-  assert.match(JSON.stringify(mcpConfig.playwright.args), /@playwright\/mcp@latest/);
+  assert.equal(mcpConfig.playwright.command, "playwright-mcp");
+  assert.doesNotMatch(JSON.stringify(mcpConfig.playwright.args), /@playwright\/mcp|npx|latest/);
   assert.match(JSON.stringify(mcpConfig.playwright.args), /playwright-mcp-auth-init\.ts/);
   assert.match(JSON.stringify(mcpConfig.playwright.args), /--headless/);
   assert.match(JSON.stringify(mcpConfig.playwright.args), /--isolated/);
@@ -358,6 +357,7 @@ test("Codeq8 plugin manifest bundles Playwright MCP without raw secrets", async 
     mcpConfig.playwright.env_vars.includes("CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE"),
     true,
   );
+  assert.equal(mcpConfig.playwright.env_vars.includes("PLAYWRIGHT_BROWSERS_PATH"), true);
   assert.equal(mcpConfigSource.includes("code_github_session="), false);
   assert.doesNotMatch(mcpConfigSource, /^\s*"env"\s*:/m);
   assert.doesNotMatch(mcpConfigSource, /^\s*"CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE"\s*:/m);

@@ -21,9 +21,14 @@ const GLOBAL_CLI_TOOLS = Object.freeze([
     binaryName: "codeq8",
     desiredVersionPath: "codeq8-cli/package.json",
   },
+  {
+    label: "playwright-mcp",
+    packageName: "@playwright/mcp",
+    binaryName: "playwright-mcp",
+    desiredVersionPath: "playwright-mcp/package.json",
+  },
 ]);
 
-const DEFAULT_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_STATE_FILE = "~/.config/codeq8/runner-global-cli-tools.json";
 
 function normalizeText(value) {
@@ -241,7 +246,6 @@ async function resolveToolSnapshot({ env = process.env, cwd = process.cwd() } = 
 
 export async function ensureRunnerGlobalCliTools({
   force = false,
-  refreshIntervalMs = DEFAULT_REFRESH_INTERVAL_MS,
   stateFile = DEFAULT_STATE_FILE,
   npmPath = "",
   env = process.env,
@@ -266,14 +270,12 @@ export async function ensureRunnerGlobalCliTools({
     return normalizeText(previousToolVersions[tool.packageName]) !== normalizeText(tool.desiredVersion);
   });
   const lastSuccessAt = parsePositiveInteger(previousState.last_success_at, 0);
-  const stale =
-    !lastSuccessAt || Date.now() - lastSuccessAt >= Math.max(60_000, refreshIntervalMs);
 
-  if (!force && missingTools.length === 0 && versionMismatchTools.length === 0 && !stale) {
+  if (!force && missingTools.length === 0 && versionMismatchTools.length === 0) {
     return {
       ok: true,
       refreshed: false,
-      reason: "Global CLI tools are present and refresh is not due.",
+      reason: "Global CLI tools are present and pinned versions match.",
       lastSuccessAt,
       stateFilePath,
       tools: toolSnapshot,
@@ -287,7 +289,7 @@ export async function ensureRunnerGlobalCliTools({
   });
   logger(
     "Refreshing runner global CLI tools",
-    `force=${force ? "yes" : "no"} missing=${missingTools.map((tool) => tool.label).join(",") || "none"} version_mismatch=${versionMismatchTools.map((tool) => tool.label).join(",") || "none"} stale=${stale ? "yes" : "no"}`,
+    `force=${force ? "yes" : "no"} missing=${missingTools.map((tool) => tool.label).join(",") || "none"} version_mismatch=${versionMismatchTools.map((tool) => tool.label).join(",") || "none"}`,
   );
 
   const installTargets = GLOBAL_CLI_TOOLS.map((tool) => {
@@ -315,7 +317,7 @@ export async function ensureRunnerGlobalCliTools({
     },
   );
 
-  if (!install.ok && missingTools.length > 0) {
+  if (!install.ok) {
     throw new Error(
       `Unable to install required global CLI tools (${install.reason || `exit_code=${install.code}`}). ${
         normalizeText(install.stderr) || normalizeText(install.stdout) || "No install output."

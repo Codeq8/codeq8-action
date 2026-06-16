@@ -21,8 +21,8 @@ made available during Codeq8 chat runs.
 ## Current Capability
 
 The plugin records the Codeq8 plugin contract and install boundaries, provides
-the Child Threads runtime coordination skill, and bundles Playwright MCP as an
-optional Codeq8-owned browser verification capability.
+the Child Threads runtime coordination skill, and bundles Playwright MCP as a
+standard pinned Codeq8-owned browser verification capability.
 
 Playwright MCP availability is not permission to mutate live state. Follow the
 runner prompt's Codeq8 staging rules, visible workspace proof, and existing

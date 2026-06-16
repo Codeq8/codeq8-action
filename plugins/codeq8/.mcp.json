@@ -1,9 +1,7 @@
 {
   "playwright": {
-    "command": "npx",
+    "command": "playwright-mcp",
     "args": [
-      "-y",
-      "@playwright/mcp@latest",
       "--browser=chromium",
       "--headless",
       "--isolated",
@@ -19,7 +17,8 @@
       "CODEQ8_MCP_AUTH_URLS",
       "PLAYWRIGHT_MCP_AUTH_URLS",
       "CODE_DEPLOYED_PUBLIC_URL",
-      "PLAYWRIGHT_TEST_BASE_URL"
+      "PLAYWRIGHT_TEST_BASE_URL",
+      "PLAYWRIGHT_BROWSERS_PATH"
     ],
     "startup_timeout_sec": 20,
     "tool_timeout_sec": 60

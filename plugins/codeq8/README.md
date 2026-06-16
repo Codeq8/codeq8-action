@@ -12,5 +12,7 @@ Bundled skills:
 Bundled MCP servers:
 
 - `playwright`: authenticated Playwright MCP for Codeq8 staging/browser
-  verification, using only runner-provided session cookie environment names and
-  the plugin-owned auth init bridge.
+  verification. The public action installs the pinned `@playwright/mcp` runner
+  tool and prepares a Codeq8-owned Playwright browser cache before Codex
+  starts. The MCP server uses only runner-provided session cookie environment
+  names and the plugin-owned auth init bridge.

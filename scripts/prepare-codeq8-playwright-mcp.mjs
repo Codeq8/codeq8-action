@@ -1,23 +1,54 @@
 #!/usr/bin/env node
 
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const CODEQ8_PLAYWRIGHT_MCP_PACKAGE_SPEC = "@playwright/mcp@latest";
+export const CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME = "@playwright/mcp";
+export const CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION = "0.0.76";
 export const CODEQ8_PLAYWRIGHT_MCP_BROWSER = "chromium";
+export const CODEQ8_PLAYWRIGHT_MCP_BINARY = "playwright-mcp";
 export const CODEQ8_PLAYWRIGHT_MCP_CAPABILITY = "codeq8_plugin_playwright_mcp";
+export const DEFAULT_MARKER_FILE = "~/.cache/codeq8/playwright-mcp-browser.json";
 
 function normalizeText(value) {
   return String(value ?? "").trim();
 }
 
+function expandHomePath(value, homeDirectory = os.homedir()) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return "";
+  }
+  if (normalized === "~") {
+    return homeDirectory;
+  }
+  if (normalized.startsWith("~/")) {
+    return path.join(homeDirectory, normalized.slice(2));
+  }
+  if (normalized === "$HOME") {
+    return homeDirectory;
+  }
+  if (normalized.startsWith("$HOME/")) {
+    return path.join(homeDirectory, normalized.slice("$HOME/".length));
+  }
+  if (normalized === "${HOME}") {
+    return homeDirectory;
+  }
+  if (normalized.startsWith("${HOME}/")) {
+    return path.join(homeDirectory, normalized.slice("${HOME}/".length));
+  }
+  return normalized;
+}
+
 function parseArgs(argv = process.argv.slice(2)) {
   const result = {
     repoRoot: "",
-    npmPath: "",
-    packageSpec: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_SPEC,
+    markerFile: "",
+    playwrightMcpPath: "",
     browser: CODEQ8_PLAYWRIGHT_MCP_BROWSER,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -35,13 +66,13 @@ function parseArgs(argv = process.argv.slice(2)) {
       index += 1;
       continue;
     }
-    if (key === "npm-path") {
-      result.npmPath = nextValue;
+    if (key === "marker-file") {
+      result.markerFile = nextValue;
       index += 1;
       continue;
     }
-    if (key === "package-spec") {
-      result.packageSpec = nextValue;
+    if (key === "playwright-mcp-path") {
+      result.playwrightMcpPath = nextValue;
       index += 1;
       continue;
     }
@@ -53,37 +84,32 @@ function parseArgs(argv = process.argv.slice(2)) {
   return result;
 }
 
-function resolveNpmPath({ npmPath = "", env = process.env }) {
-  const explicit = normalizeText(npmPath);
-  if (explicit) {
-    return path.resolve(explicit);
+async function pathExists(targetPath) {
+  const normalized = normalizeText(targetPath);
+  if (!normalized) {
+    return false;
   }
-  const fromEnv = normalizeText(env.npm_execpath);
-  if (fromEnv) {
-    return path.resolve(fromEnv);
+  try {
+    await fs.access(normalized);
+    return true;
+  } catch {
+    return false;
   }
-  return "npm";
 }
 
-export function buildPlaywrightMcpBrowserInstallCommand({
-  npmPath = "",
-  packageSpec = CODEQ8_PLAYWRIGHT_MCP_PACKAGE_SPEC,
-  browser = CODEQ8_PLAYWRIGHT_MCP_BROWSER,
-  env = process.env,
-} = {}) {
-  return {
-    command: resolveNpmPath({ npmPath, env }),
-    args: [
-      "exec",
-      "--yes",
-      "--package",
-      normalizeText(packageSpec) || CODEQ8_PLAYWRIGHT_MCP_PACKAGE_SPEC,
-      "--",
-      "playwright-mcp",
-      "install-browser",
-      normalizeText(browser) || CODEQ8_PLAYWRIGHT_MCP_BROWSER,
-    ],
-  };
+async function readJsonFile(filePath) {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeJsonFile(filePath, payload) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
 async function runCommand({ command, args, cwd, env }) {
@@ -120,53 +146,225 @@ async function runCommand({ command, args, cwd, env }) {
   });
 }
 
+async function resolvePlaywrightMcpPath({
+  playwrightMcpPath = "",
+  env = process.env,
+  cwd = process.cwd(),
+  runCommandImpl = runCommand,
+} = {}) {
+  const explicit = normalizeText(playwrightMcpPath);
+  if (explicit) {
+    const resolved = path.resolve(explicit);
+    if (await pathExists(resolved)) {
+      return resolved;
+    }
+    throw new Error(`playwright-mcp executable was not found at ${resolved}.`);
+  }
+
+  const whichResult = await runCommandImpl({
+    command: "/bin/bash",
+    args: ["-lc", `command -v ${CODEQ8_PLAYWRIGHT_MCP_BINARY}`],
+    cwd,
+    env,
+  });
+  const resolved = normalizeText(whichResult.stdout);
+  if (whichResult.ok && resolved && (await pathExists(resolved))) {
+    return resolved;
+  }
+  throw new Error(
+    "playwright-mcp executable was not found. Ensure runner-global-cli-tools installed @playwright/mcp first.",
+  );
+}
+
+export function buildPlaywrightMcpBrowserDryRunCommand({
+  playwrightMcpPath = CODEQ8_PLAYWRIGHT_MCP_BINARY,
+  browser = CODEQ8_PLAYWRIGHT_MCP_BROWSER,
+} = {}) {
+  return {
+    command: normalizeText(playwrightMcpPath) || CODEQ8_PLAYWRIGHT_MCP_BINARY,
+    args: ["install-browser", normalizeText(browser) || CODEQ8_PLAYWRIGHT_MCP_BROWSER, "--dry-run"],
+  };
+}
+
+export function buildPlaywrightMcpBrowserInstallCommand({
+  playwrightMcpPath = CODEQ8_PLAYWRIGHT_MCP_BINARY,
+  browser = CODEQ8_PLAYWRIGHT_MCP_BROWSER,
+} = {}) {
+  return {
+    command: normalizeText(playwrightMcpPath) || CODEQ8_PLAYWRIGHT_MCP_BINARY,
+    args: [
+      "install-browser",
+      normalizeText(browser) || CODEQ8_PLAYWRIGHT_MCP_BROWSER,
+      "--no-progress",
+    ],
+  };
+}
+
+export function parsePlaywrightInstallLocations(output = "") {
+  const locations = [];
+  const pattern = /^\s*Install location:\s*(.+?)\s*$/gm;
+  let match = pattern.exec(String(output || ""));
+  while (match) {
+    const location = normalizeText(match[1]);
+    if (location) {
+      locations.push(location);
+    }
+    match = pattern.exec(String(output || ""));
+  }
+  return locations;
+}
+
+async function allPathsExist(paths = []) {
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return false;
+  }
+  for (const entry of paths) {
+    if (!(await pathExists(entry))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function markerMatches({
+  marker,
+  browser,
+  installLocations,
+  playwrightBrowsersPath,
+}) {
+  return (
+    normalizeText(marker?.package_name) === CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME &&
+    normalizeText(marker?.package_version) === CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION &&
+    normalizeText(marker?.browser) === normalizeText(browser) &&
+    normalizeText(marker?.playwright_browsers_path) === normalizeText(playwrightBrowsersPath) &&
+    JSON.stringify(marker?.install_locations || []) === JSON.stringify(installLocations)
+  );
+}
+
+function summarizeFirstLine(value) {
+  return normalizeText(value).split("\n")[0] || "unknown error";
+}
+
 export async function prepareCodeq8PlaywrightMcp({
   repoRoot = process.cwd(),
-  npmPath = "",
-  packageSpec = CODEQ8_PLAYWRIGHT_MCP_PACKAGE_SPEC,
+  markerFile = DEFAULT_MARKER_FILE,
+  playwrightMcpPath = "",
   browser = CODEQ8_PLAYWRIGHT_MCP_BROWSER,
   env = process.env,
   runCommandImpl = runCommand,
   logger = null,
 } = {}) {
   const normalizedRepoRoot = path.resolve(normalizeText(repoRoot) || process.cwd());
-  const installCommand = buildPlaywrightMcpBrowserInstallCommand({
-    npmPath,
-    packageSpec,
-    browser,
+  const normalizedBrowser = normalizeText(browser) || CODEQ8_PLAYWRIGHT_MCP_BROWSER;
+  const homeDirectory = normalizeText(env?.HOME) || normalizeText(process.env.HOME) || os.homedir();
+  const markerFilePath = path.resolve(
+    expandHomePath(normalizeText(markerFile) || DEFAULT_MARKER_FILE, homeDirectory),
+  );
+  const resolvedPlaywrightMcpPath = await resolvePlaywrightMcpPath({
+    playwrightMcpPath,
     env,
-  });
-  const result = await runCommandImpl({
-    ...installCommand,
     cwd: normalizedRepoRoot,
-    env: {
-      ...env,
-      npm_config_update_notifier: "false",
-    },
+    runCommandImpl,
   });
-  if (result?.ok) {
+  const commandEnv = {
+    ...env,
+    npm_config_update_notifier: "false",
+  };
+
+  const dryRunCommand = buildPlaywrightMcpBrowserDryRunCommand({
+    playwrightMcpPath: resolvedPlaywrightMcpPath,
+    browser: normalizedBrowser,
+  });
+  const dryRun = await runCommandImpl({
+    ...dryRunCommand,
+    cwd: normalizedRepoRoot,
+    env: commandEnv,
+  });
+  if (!dryRun?.ok) {
+    throw new Error(
+      `Unable to inspect Playwright MCP browser payload (${summarizeFirstLine(dryRun?.stderr || dryRun?.stdout)}).`,
+    );
+  }
+
+  const installLocations = parsePlaywrightInstallLocations(dryRun.stdout);
+  const marker = await readJsonFile(markerFilePath);
+  const playwrightBrowsersPath = normalizeText(commandEnv.PLAYWRIGHT_BROWSERS_PATH);
+  if (
+    markerMatches({
+      marker,
+      browser: normalizedBrowser,
+      installLocations,
+      playwrightBrowsersPath,
+    }) &&
+    (await allPathsExist(installLocations))
+  ) {
     logger?.log?.(
-      `[codeq8-playwright-mcp] status=prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${normalizeText(packageSpec)} browser=${normalizeText(browser)}`,
+      `[codeq8-playwright-mcp] status=already-prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser}`,
     );
     return {
       ok: true,
-      status: "prepared",
+      status: "already-prepared",
       capability: CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
-      packageSpec: normalizeText(packageSpec),
-      browser: normalizeText(browser),
+      packageName: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME,
+      packageVersion: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION,
+      browser: normalizedBrowser,
+      markerFilePath,
+      installLocations,
     };
   }
-  const stderr = normalizeText(result?.stderr).split("\n")[0] || "unknown error";
-  logger?.warn?.(
-    `::warning::[codeq8-playwright-mcp] status=skipped capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${normalizeText(packageSpec)} browser=${normalizeText(browser)} reason=${stderr}`,
+
+  const installCommand = buildPlaywrightMcpBrowserInstallCommand({
+    playwrightMcpPath: resolvedPlaywrightMcpPath,
+    browser: normalizedBrowser,
+  });
+  const install = await runCommandImpl({
+    ...installCommand,
+    cwd: normalizedRepoRoot,
+    env: commandEnv,
+  });
+  if (!install?.ok) {
+    throw new Error(
+      `Unable to install required Playwright MCP browser payload (${summarizeFirstLine(install?.stderr || install?.stdout)}).`,
+    );
+  }
+
+  const postInstallDryRun = await runCommandImpl({
+    ...dryRunCommand,
+    cwd: normalizedRepoRoot,
+    env: commandEnv,
+  });
+  const postInstallLocations = postInstallDryRun?.ok
+    ? parsePlaywrightInstallLocations(postInstallDryRun.stdout)
+    : installLocations;
+  if (!(await allPathsExist(postInstallLocations))) {
+    throw new Error(
+      "Playwright MCP browser install completed, but the expected browser payload paths are missing.",
+    );
+  }
+
+  await writeJsonFile(markerFilePath, {
+    managed_by: "codeq8-playwright-mcp-prep",
+    capability: CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
+    package_name: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME,
+    package_version: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION,
+    browser: normalizedBrowser,
+    playwright_browsers_path: playwrightBrowsersPath,
+    install_locations: postInstallLocations,
+    prepared_at: new Date().toISOString(),
+  });
+
+  logger?.log?.(
+    `[codeq8-playwright-mcp] status=prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser}`,
   );
   return {
-    ok: false,
-    status: "skipped",
+    ok: true,
+    status: "prepared",
     capability: CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
-    packageSpec: normalizeText(packageSpec),
-    browser: normalizeText(browser),
-    reason: stderr,
+    packageName: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME,
+    packageVersion: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION,
+    browser: normalizedBrowser,
+    markerFilePath,
+    installLocations: postInstallLocations,
   };
 }
 
@@ -175,8 +373,8 @@ async function main() {
   await prepareCodeq8PlaywrightMcp({
     repoRoot:
       args.repoRoot || path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
-    npmPath: args.npmPath,
-    packageSpec: args.packageSpec,
+    markerFile: args.markerFile,
+    playwrightMcpPath: args.playwrightMcpPath,
     browser: args.browser,
     logger: console,
   });
@@ -185,5 +383,11 @@ async function main() {
 const executedAsScript = path.resolve(process.argv[1] || "") === fileURLToPath(import.meta.url);
 
 if (executedAsScript) {
-  await main();
+  try {
+    await main();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`::error::[codeq8-playwright-mcp] ${message}`);
+    process.exitCode = 1;
+  }
 }
