@@ -8,3 +8,9 @@ Bundled skills:
 
 - `codeq8-plugin`: plugin runtime boundaries and rollout checkpoints.
 - `codeq8-child-threads`: Child Threads runtime coordination behavior.
+
+Bundled MCP servers:
+
+- `playwright`: authenticated Playwright MCP for Codeq8 staging/browser
+  verification, using only runner-provided session cookie environment names and
+  the plugin-owned auth init bridge.

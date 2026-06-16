@@ -8,6 +8,7 @@ import {
   CODEQ8_PLUGIN_CAPABILITY,
   CODEQ8_PLUGIN_MARKER_FILE,
   CODEQ8_PLUGIN_NAME,
+  CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY,
   CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH,
   CODEQ8_PLUGIN_MARKETPLACE_ENTRY_MARKER_FILE,
   buildMarketplaceSourcePath,
@@ -17,6 +18,10 @@ import {
 } from "./install-codeq8-plugin.mjs";
 
 const FIXED_NOW = () => new Date("2026-06-15T00:00:00.000Z");
+const CODEQ8_PLUGIN_CAPABILITIES = [
+  CODEQ8_PLUGIN_CAPABILITY,
+  CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY,
+];
 
 async function pathExists(targetPath) {
   try {
@@ -70,7 +75,8 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
     assert.equal(result.status, "installed");
     assert.equal(result.plugin, CODEQ8_PLUGIN_NAME);
     assert.equal(result.artifactHash, expectedArtifactHash);
-    assert.deepEqual(result.capabilities, [CODEQ8_PLUGIN_CAPABILITY]);
+    assert.deepEqual(result.capabilities, CODEQ8_PLUGIN_CAPABILITIES);
+    assert.deepEqual(result.targets.slice(0, 2), ["plugin", "mcp:playwright"]);
     assert.deepEqual(env, originalEnv);
 
     const pluginMarker = await readJson(
@@ -87,9 +93,40 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
       const skillMarker = await readJson(path.join(skillPath, CODEQ8_PLUGIN_MARKER_FILE));
       assert.equal(skillMarker.target_kind, "skill");
       assert.equal(skillMarker.target_name, skillName);
-      assert.equal(skillMarker.plugin_version, "0.2.2");
+      assert.equal(skillMarker.plugin_version, "0.3.0");
       assert.equal(await pathExists(path.join(skillPath, "SKILL.md")), true);
     }
+
+    const installedMcpConfig = await readJson(
+      path.join(codexHome, "plugins", "codeq8", ".mcp.json"),
+    );
+    assert.equal(installedMcpConfig.playwright.command, "npx");
+    assert.deepEqual(installedMcpConfig.playwright.args, [
+      "-y",
+      "@playwright/mcp@latest",
+      "--browser=chromium",
+      "--headless",
+      "--isolated",
+      "--init-page",
+      "./playwright-mcp-auth-init.ts",
+    ]);
+    assert.deepEqual(installedMcpConfig.playwright.env_vars, [
+      "CODEQ8_E2E_GITHUB_WEB_SESSION_COOKIE",
+      "CODEQ8_GITHUB_WEB_SESSION_COOKIE",
+      "CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE",
+      "CODEQ8_MCP_AUTH_HOSTS",
+      "PLAYWRIGHT_MCP_AUTH_HOSTS",
+      "CODEQ8_MCP_AUTH_URLS",
+      "PLAYWRIGHT_MCP_AUTH_URLS",
+      "CODE_DEPLOYED_PUBLIC_URL",
+      "PLAYWRIGHT_TEST_BASE_URL",
+    ]);
+    assert.equal(
+      await pathExists(
+        path.join(codexHome, "plugins", "codeq8", "playwright-mcp-auth-init.ts"),
+      ),
+      true,
+    );
 
     const marketplace = await readJson(
       path.join(homePath, ".agents", "plugins", "marketplace.json"),
@@ -171,7 +208,7 @@ test("Codeq8 plugin install rejects an unmarked plugin directory collision", asy
     assert.equal(result.ok, false);
     assert.equal(result.code, "collision");
     assert.match(result.reason, /plugin:codeq8 exists without a Codeq8 ownership marker/);
-    assert.deepEqual(result.capabilities, [CODEQ8_PLUGIN_CAPABILITY]);
+    assert.deepEqual(result.capabilities, CODEQ8_PLUGIN_CAPABILITIES);
     assert.equal(
       await fs.readFile(path.join(collisionPath, "README.md"), "utf8"),
       "user-owned\n",
@@ -302,6 +339,28 @@ test("Codeq8 plugin install skips optional capability when source package is abs
     assert.equal(result.code, "source_missing");
     assert.deepEqual(result.capabilities, [CODEQ8_PLUGIN_CAPABILITY]);
   });
+});
+
+test("Codeq8 plugin manifest bundles Playwright MCP without raw secrets", async () => {
+  const pluginRoot = path.join(process.cwd(), CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH);
+  const manifest = await readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
+  const mcpConfig = await readJson(path.join(pluginRoot, ".mcp.json"));
+  const mcpConfigSource = await fs.readFile(path.join(pluginRoot, ".mcp.json"), "utf8");
+
+  assert.equal(manifest.mcpServers, "./.mcp.json");
+  assert.equal(mcpConfig.playwright.command, "npx");
+  assert.match(JSON.stringify(mcpConfig.playwright.args), /@playwright\/mcp@latest/);
+  assert.match(JSON.stringify(mcpConfig.playwright.args), /playwright-mcp-auth-init\.ts/);
+  assert.match(JSON.stringify(mcpConfig.playwright.args), /--headless/);
+  assert.match(JSON.stringify(mcpConfig.playwright.args), /--isolated/);
+  assert.equal(Array.isArray(mcpConfig.playwright.env_vars), true);
+  assert.equal(
+    mcpConfig.playwright.env_vars.includes("CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE"),
+    true,
+  );
+  assert.equal(mcpConfigSource.includes("code_github_session="), false);
+  assert.doesNotMatch(mcpConfigSource, /^\s*"env"\s*:/m);
+  assert.doesNotMatch(mcpConfigSource, /^\s*"CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE"\s*:/m);
 });
 
 test("Codeq8 plugin install source does not mutate CODEX_HOME or Codex auth state", async () => {

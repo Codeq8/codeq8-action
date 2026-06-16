@@ -1,6 +1,6 @@
 {
   "name": "codeq8",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Codeq8-owned Codex capabilities for Codeq8 chat runs.",
   "author": {
     "name": "Codeq8",
@@ -16,6 +16,7 @@
     "developer-tools"
   ],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codeq8",
     "shortDescription": "Codeq8-owned Codex capabilities",

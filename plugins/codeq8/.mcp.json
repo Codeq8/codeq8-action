@@ -1,0 +1,27 @@
+{
+  "playwright": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "@playwright/mcp@latest",
+      "--browser=chromium",
+      "--headless",
+      "--isolated",
+      "--init-page",
+      "./playwright-mcp-auth-init.ts"
+    ],
+    "env_vars": [
+      "CODEQ8_E2E_GITHUB_WEB_SESSION_COOKIE",
+      "CODEQ8_GITHUB_WEB_SESSION_COOKIE",
+      "CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE",
+      "CODEQ8_MCP_AUTH_HOSTS",
+      "PLAYWRIGHT_MCP_AUTH_HOSTS",
+      "CODEQ8_MCP_AUTH_URLS",
+      "PLAYWRIGHT_MCP_AUTH_URLS",
+      "CODE_DEPLOYED_PUBLIC_URL",
+      "PLAYWRIGHT_TEST_BASE_URL"
+    ],
+    "startup_timeout_sec": 20,
+    "tool_timeout_sec": 60
+  }
+}

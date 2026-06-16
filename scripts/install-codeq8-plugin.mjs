@@ -13,6 +13,8 @@ const execFileAsync = promisify(execFile);
 
 export const CODEQ8_PLUGIN_NAME = "codeq8";
 export const CODEQ8_PLUGIN_CAPABILITY = "codeq8_plugin";
+export const CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY =
+  "codeq8_plugin_playwright_mcp";
 export const CODEQ8_PLUGIN_MARKER_FILE = ".codeq8-managed.json";
 export const CODEQ8_PLUGIN_MANAGED_BY = "codeq8-plugin-installer";
 export const CODEQ8_PLUGIN_SOURCE_REPOSITORY = "Codeq8/codeq8-action";
@@ -176,6 +178,31 @@ async function listBundledSkills(sourcePluginPath, manifest) {
     });
   }
   return skills.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function listBundledMcpServerNames(sourcePluginPath, manifest) {
+  const mcpServersRelativePath = normalizeText(manifest.mcpServers);
+  if (!mcpServersRelativePath) {
+    return [];
+  }
+  const normalizedMcpServersRelativePath = mcpServersRelativePath.replace(/^\.\//, "");
+  const mcpServersPath = path.join(sourcePluginPath, normalizedMcpServersRelativePath);
+  if (!(await pathExists(mcpServersPath))) {
+    throw new Error("Codeq8 plugin manifest references missing MCP server config.");
+  }
+  const mcpServers = normalizeJsonObject(await readJsonFile(mcpServersPath));
+  return Object.keys(mcpServers)
+    .map((entry) => normalizeText(entry))
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function buildPluginCapabilities({ mcpServerNames = [] } = {}) {
+  const capabilities = [CODEQ8_PLUGIN_CAPABILITY];
+  if (normalizeList(mcpServerNames).includes("playwright")) {
+    capabilities.push(CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY);
+  }
+  return capabilities;
 }
 
 async function readManagedMarker(targetPath) {
@@ -380,7 +407,7 @@ export async function syncCodeq8PluginInstall({
   logger = null,
 } = {}) {
   const paths = resolveCodeq8PluginInstallPaths({ repoRoot, env });
-  const capabilities = [CODEQ8_PLUGIN_CAPABILITY];
+  let capabilities = buildPluginCapabilities();
   const startedAt = now().toISOString();
 
   if (!paths.homePath || !paths.codexHome) {
@@ -416,11 +443,17 @@ export async function syncCodeq8PluginInstall({
   let pluginVersion = "";
   let artifactHash = "";
   let skills = [];
+  let mcpServerNames = [];
   try {
     const source = await readPluginManifest(paths.sourcePluginPath);
     pluginVersion = source.pluginVersion;
     artifactHash = await hashDirectory(paths.sourcePluginPath);
     skills = await listBundledSkills(paths.sourcePluginPath, source.manifest);
+    mcpServerNames = await listBundledMcpServerNames(
+      paths.sourcePluginPath,
+      source.manifest,
+    );
+    capabilities = buildPluginCapabilities({ mcpServerNames });
   } catch (error) {
     return {
       ok: false,
@@ -492,7 +525,10 @@ export async function syncCodeq8PluginInstall({
     marker: baseMarker,
   });
 
-  const targets = ["plugin"];
+  const targets = [
+    "plugin",
+    ...mcpServerNames.map((serverName) => `mcp:${serverName}`),
+  ];
   for (const skill of skills) {
     await replaceManagedDirectory({
       sourcePath: skill.sourcePath,

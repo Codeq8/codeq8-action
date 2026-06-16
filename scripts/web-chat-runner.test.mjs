@@ -105,6 +105,7 @@ test("runtime manifest baseline matches the public startup contract", () => {
     "codex_app_server_thread_goals",
     "codex_app_server_progress_history",
     "codeq8_plugin",
+    "codeq8_plugin_playwright_mcp",
   ]);
   assert.deepEqual(
     REQUIRED_WEB_CHAT_RUNNER_RUNTIME_PATHS,
