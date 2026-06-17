@@ -34,6 +34,7 @@
     "/web-chat/threads/get"
   ],
   "optional_paths": [
-    "/api/chat/runs/goal"
+    "/api/chat/runs/goal",
+    "/api/chat/runs/thread-title"
   ]
 }

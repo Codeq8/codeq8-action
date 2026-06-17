@@ -416,6 +416,7 @@ function summarizeThreadForOutput(thread, payload = {}) {
     ),
     repository: readThreadRepository(normalized, payload),
     title: truncateText(firstText(normalized.title), 160),
+    title_source: firstText(normalized.title_source, normalized.titleSource),
     parent_thread_id: firstText(
       normalized.parent_thread_id,
       normalized.parentThreadId,
@@ -585,6 +586,21 @@ function buildThreadGoalOutput(payload, fallbackThreadId) {
     ...parentSummaryFields(payload),
     thread: summarizeThreadForOutput(payload.thread, payload),
     codex_goal_state: summarizeGoalForOutput(payload.codex_goal_state || payload.codexGoalState),
+    error: firstText(payload.error),
+  });
+}
+
+function buildThreadTitleOutput(payload, fallbackThreadId, fallbackTitle) {
+  const thread = payloadObject(payload.thread);
+  return compactObject({
+    ok: Boolean(payload.ok),
+    titled: payload.titled !== false,
+    updated: payload.updated !== false,
+    target_thread_id: readThreadOutputId(payload, fallbackThreadId),
+    ...parentSummaryFields(payload),
+    title: firstText(payload.title, thread.title, fallbackTitle),
+    title_source: firstText(payload.title_source, payload.titleSource, thread.title_source, thread.titleSource),
+    thread: summarizeThreadForOutput(thread, payload),
     error: firstText(payload.error),
   });
 }
@@ -1039,6 +1055,7 @@ function printHelp(stdout) {
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
       "  codeq8 threads create --title title --message text [--assigned-to codeq8|me] [--json]",
       "  codeq8 threads message <thread-id> --text text",
+      "  codeq8 threads title <thread-id> --title text",
       "  codeq8 threads archive <thread-id>  (alias: close)",
       "  codeq8 threads reopen <thread-id>",
       "  codeq8 threads goal <thread-id> --objective text [--status active|paused]",
@@ -1316,6 +1333,31 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       status: normalizeText(thread.status) || "archived",
       updated: payload.updated !== false,
     });
+    return 0;
+  }
+
+  if (command === "title" || command === "set-title" || command === "rename") {
+    const positional = removeFlags(rest, ["--title", "--name"], ["--json"]);
+    const targetThreadId = normalizeText(positional[0]);
+    const title = readFlag(rest, ["--title", "--name"]);
+    if (!targetThreadId) {
+      throw new Error("thread id is required.");
+    }
+    if (!title) {
+      throw new Error("--title is required.");
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/thread-title",
+      method: "POST",
+      body: parentBody(context, {
+        target_thread_id: targetThreadId,
+        title,
+      }),
+    });
+    writeJson(stdout, buildThreadTitleOutput(payload, targetThreadId, title));
     return 0;
   }
 

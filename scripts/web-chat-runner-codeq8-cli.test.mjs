@@ -591,6 +591,7 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.match(text, /Assigned thread lists label child rows as child-of:<parent-thread-id>\./);
   assert.match(text, /currently supports the active\/open lifecycle only/);
   assert.match(text, /codeq8 threads message <thread-id> --text text/);
+  assert.match(text, /codeq8 threads title <thread-id> --title text/);
   assert.match(text, /codeq8 threads archive <thread-id>\s+\(alias: close\)/);
   assert.match(text, /codeq8 threads reopen <thread-id>/);
   assert.doesNotMatch(text, /threads steer/);
@@ -705,6 +706,54 @@ test("runner codeq8 helper reopens archived threads through the runner route wit
   assertNoRawCredentialPayload(text);
   assert.doesNotMatch(text, /secret_stream_token/);
   assert.doesNotMatch(text, /secret_handoff_token/);
+});
+
+test("runner codeq8 helper sets thread titles through backend contract", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "title", "wct_target", "--title", "Runner title"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        titled: true,
+        updated: true,
+        target_thread_id: "wct_target",
+        title: "Runner title",
+        title_source: "manual",
+        thread: {
+          thread_id: "wct_target",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Runner title",
+          title_source: "manual",
+          thread_stream_token: "secret_title_stream",
+          thread_record_handoff: "secret_title_handoff",
+        },
+      });
+    },
+  });
+
+  assert.equal(new URL(calls[0]?.url).pathname, "/api/chat/runs/thread-title");
+  assert.equal(calls[0]?.init?.method, "POST");
+  assert.equal(calls[0]?.init?.headers?.Authorization, "Bearer header.payload.signature");
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+  const body = JSON.parse(String(calls[0]?.init?.body || "{}"));
+  assert.equal(body.workspace_repository, "Codeq8/Codeq8");
+  assert.equal(body.thread_id, "wct_parent");
+  assert.equal(body.run_id, "wcr_parent");
+  assert.equal(body.target_thread_id, "wct_target");
+  assert.equal(body.title, "Runner title");
+  const payload = output.readJson();
+  assert.equal(payload.ok, true);
+  assert.equal(payload.updated, true);
+  assert.equal(payload.target_thread_id, "wct_target");
+  assert.equal(payload.title, "Runner title");
+  assert.equal(payload.title_source, "manual");
+  assert.equal(payload.thread.title, "Runner title");
+  assertNoRawCredentialPayload(output.readText());
 });
 
 test("runner codeq8 helper creates delegated threads with compact safe output", async () => {
