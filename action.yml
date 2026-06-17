@@ -79,6 +79,9 @@ runs:
           --repo-root "$codeq8_action_repo_root"
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/sync-codeq8-playwright-mcp-config.mjs" \
           --repo-root "$codeq8_action_repo_root"
+        "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/sync-workspace-mcp-config.mjs" \
+          --repo-root "$codeq8_action_repo_root" \
+          --workspace-path "${GITHUB_WORKSPACE:-}"
 
     - name: Run Codeq8 chat bridge
       shell: bash
