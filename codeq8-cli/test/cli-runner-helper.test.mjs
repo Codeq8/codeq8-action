@@ -68,6 +68,25 @@ test("runner helper commands are served by the package CLI with runner auth", as
   }
 });
 
+test("runner helper help is available without runner environment", async () => {
+  const result = await runCli(["threads", "--help"], {
+    env: {
+      ...withTempConfig(),
+      CODE_PUBLIC_BASE_URL: "",
+      CODE_WORKER_URL: "",
+      CODE_WEB_CHAT_RUN_TOKEN: "",
+      CODE_WORKSPACE_REPOSITORY: "",
+      CODE_CHAT_THREAD_ID: "",
+      CODE_CHAT_RUN_ID: "",
+    },
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /Codeq8 runner helper/);
+  assert.match(result.stdout, /codeq8 threads inspect <thread-id>/);
+});
+
 test("runner helper commands fail clearly without runner environment", async () => {
   const result = await runCli(["threads", "inspect", "wct_123"], {
     env: {

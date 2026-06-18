@@ -552,6 +552,10 @@ function isRunnerHelperCommand(args: readonly string[]): boolean {
   return command === "github" && resource === "issue" && ["attachments", "attachment"].includes(subcommand);
 }
 
+function isRunnerHelperHelpCommand(args: readonly string[]): boolean {
+  return isRunnerHelperCommand(args) && (parseFlag(args, ["--help", "-h"]) || args.slice(1).includes("help"));
+}
+
 export async function runCli(argv: readonly unknown[]): Promise<number> {
   const global = parseGlobalOptions(argv);
   const args = global.args;
@@ -567,6 +571,10 @@ export async function runCli(argv: readonly unknown[]): Promise<number> {
   if (command === "--version" || command === "-v") {
     print(await readVersion());
     return 0;
+  }
+
+  if (isRunnerHelperHelpCommand(args)) {
+    return await handleRunnerCodeq8Cli({ argv: args });
   }
 
   if (hasRunnerHelperEnvironment() && isRunnerHelperCommand(args)) {

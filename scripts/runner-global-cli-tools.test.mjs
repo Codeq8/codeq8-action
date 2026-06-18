@@ -7,7 +7,7 @@ import test from "node:test";
 import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
 
 const TOOL_VERSIONS = {
-  "@codeq8/codeq8": "0.2.4",
+  "@codeq8/codeq8": "0.2.5",
   "@playwright/mcp": "0.0.76",
 };
 
