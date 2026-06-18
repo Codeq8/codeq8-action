@@ -34,6 +34,8 @@ test("normalizeGitHubActionsChatRunPayload preserves referenced threads", () => 
     workspace_repository: "Codeq8/Codeq8",
     worker_url: "main-codeq8.bojamal7.workers.dev/",
     prompt_text: "Fix it",
+    thread_title: "Untitled",
+    thread_title_source: "provisional_first_message",
     branch_context: {
       default_branch: "main",
       context_branch: "main",
@@ -44,6 +46,8 @@ test("normalizeGitHubActionsChatRunPayload preserves referenced threads", () => 
   });
 
   assert.equal(payload.worker_url, "https://main-codeq8.bojamal7.workers.dev");
+  assert.equal(payload.thread_title, "Untitled");
+  assert.equal(payload.thread_title_source, "provisional_first_message");
   assert.equal(payload.referenced_threads_json, '[{"thread_id":"wct_other"}]');
 });
 
@@ -99,6 +103,8 @@ test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => 
       message_id: "wcm_123",
       workspace_repository: "Codeq8/Codeq8",
       worker_url: "https://main-codeq8.bojamal7.workers.dev",
+      thread_title: "Untitled",
+      thread_title_source: "provisional_first_message",
       thread_spec: "Keep diffs narrow.",
       prompt_text: "Fix the failing run",
       branch_context: {
@@ -122,6 +128,8 @@ test("buildWebChatRunnerEnv maps referenced threads into the runner env", () => 
   );
   assert.equal(env.CODE_CHAT_REFERENCED_THREADS_JSON, '[{"thread_id":"wct_other"}]');
   assert.equal(env.CODE_CHAT_THREAD_SPEC_TEXT, "Keep diffs narrow.");
+  assert.equal(env.CODE_CHAT_THREAD_TITLE, "Untitled");
+  assert.equal(env.CODE_CHAT_THREAD_TITLE_SOURCE, "provisional_first_message");
 });
 
 test("buildWebChatRunnerEnv maps the dispatched GitHub web session cookie", () => {

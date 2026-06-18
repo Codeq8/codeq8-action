@@ -145,6 +145,9 @@ export function normalizeGitHubActionsChatRunPayload(value) {
     thread_title: normalizeText(
       normalized.thread_title || normalized.threadTitle || normalized.title,
     ),
+    thread_title_source: normalizeText(
+      normalized.thread_title_source || normalized.threadTitleSource,
+    ),
     source_type: normalizeSourceType(normalized.source_type || normalized.sourceType),
     github_login: normalizeText(normalized.github_login || normalized.githubLogin),
     github_web_session_cookie: normalizeText(
@@ -278,6 +281,7 @@ export function buildWebChatRunnerEnv({
       normalizedPayload.workspace_path || normalizeText(env.GITHUB_WORKSPACE || ""),
     CODE_CHAT_THREAD_ID: normalizedPayload.thread_id,
     CODE_CHAT_THREAD_TITLE: normalizedPayload.thread_title,
+    CODE_CHAT_THREAD_TITLE_SOURCE: normalizedPayload.thread_title_source,
     CODE_CHAT_MESSAGE_ID: normalizedPayload.message_id,
     CODE_CHAT_RUN_ID: normalizedPayload.run_id,
     CODE_CHAT_SOURCE_TYPE: normalizedPayload.source_type,

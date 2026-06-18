@@ -6282,6 +6282,7 @@ async function buildCodexPromptPayload({
   threadSpecText = "",
   promptText,
   recentChecksPromptText = "",
+  threadTitleSource = "",
   codeq8Cli,
   attachments = [],
   referencedThreads = [],
@@ -6299,6 +6300,7 @@ async function buildCodexPromptPayload({
       run_id: normalizeText(runId),
       message_id: normalizeText(messageId),
       thread_title: normalizeText(threadTitle),
+      thread_title_source: normalizeText(threadTitleSource),
       source_type: normalizeText(sourceType),
       branch_context: normalizeObject(branchContext),
       workspace_persistence_state: workspacePersistenceState || null,
@@ -6348,6 +6350,7 @@ async function buildResumePromptPayload({
   promptText,
   recentUserMessagesPromptText = "",
   recentChecksPromptText = "",
+  threadTitleSource = "",
   codeq8Cli,
   attachments = [],
   referencedThreads = [],
@@ -6366,6 +6369,7 @@ async function buildResumePromptPayload({
       run_id: normalizeText(runId),
       message_id: normalizeText(messageId),
       thread_title: "",
+      thread_title_source: normalizeText(threadTitleSource),
       source_type: normalizeText(sourceType),
       branch_context: normalizeObject(branchContext),
       workspace_persistence_state: workspacePersistenceState || null,
@@ -10048,6 +10052,7 @@ async function main() {
   const sourceType = normalizeText(process.env.CODE_CHAT_SOURCE_TYPE) || "default_branch";
   const githubLogin = normalizeText(process.env.CODE_CHAT_GITHUB_LOGIN);
   const threadTitle = normalizeText(process.env.CODE_CHAT_THREAD_TITLE);
+  const threadTitleSource = normalizeText(process.env.CODE_CHAT_THREAD_TITLE_SOURCE);
   const threadSpecText = normalizeText(process.env.CODE_CHAT_THREAD_SPEC_TEXT);
   const promptText = normalizeText(process.env.CODE_CHAT_PROMPT_TEXT);
   const recentUserMessagesPromptText = normalizeText(
@@ -10552,6 +10557,7 @@ async function main() {
               promptText,
               recentUserMessagesPromptText,
               recentChecksPromptText,
+              threadTitleSource,
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
               referencedThreads,
@@ -10577,6 +10583,7 @@ async function main() {
               threadSpecText,
               promptText,
               recentChecksPromptText,
+              threadTitleSource,
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
               referencedThreads,

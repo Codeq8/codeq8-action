@@ -2764,6 +2764,7 @@ test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
       webChatRunToken: "header.payload.signature",
       repository: "Codeq8/Codeq8",
       threadTitle: "Fix the runner",
+      threadTitleSource: "provisional_first_message",
       threadId: "wct_123",
       runId: "wcr_123",
       messageId: "wcm_123",
@@ -2798,6 +2799,8 @@ test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
     assert.equal(calls[0]?.body?.mode, "fresh");
     assert.equal(calls[0]?.body?.workspace_repository, "Codeq8/Codeq8");
     assert.equal(calls[0]?.body?.thread_id, "wct_123");
+    assert.equal(calls[0]?.body?.thread_title, "Fix the runner");
+    assert.equal(calls[0]?.body?.thread_title_source, "provisional_first_message");
     assert.equal(calls[0]?.body?.run_id, "wcr_123");
     assert.equal(calls[0]?.body?.message_id, "wcm_123");
     assert.equal(calls[0]?.body?.codeq8_cli_available, true);
@@ -2920,6 +2923,7 @@ test("buildResumePrompt fetches the server-owned resume prompt", async () => {
       publicBaseUrl: "https://codeq8.example.com",
       webChatRunToken: "header.payload.signature",
       repository: "Codeq8/Codeq8",
+      threadTitleSource: "provisional_first_message",
       threadId: "wct_123",
       runId: "wcr_123",
       messageId: "wcm_123",
@@ -2954,6 +2958,7 @@ test("buildResumePrompt fetches the server-owned resume prompt", async () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0]?.url, "https://codeq8.example.com/api/chat/runs/prompt");
     assert.equal(calls[0]?.body?.mode, "resume");
+    assert.equal(calls[0]?.body?.thread_title_source, "provisional_first_message");
     assert.equal(calls[0]?.body?.target_shift, true);
     assert.equal(calls[0]?.body?.codeq8_cli_available, true);
     assert.equal(calls[0]?.body?.recent_user_messages_prompt_text, "Recent user context");
