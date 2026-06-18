@@ -760,7 +760,7 @@ export async function ensureRunnerGlobalCliTools({
     );
   }
 
-  await repairLocalPackageBinaryShims({ env, cwd });
+  await repairLocalPackageBinaryShims({ force: true, env, cwd });
 
   let nextSnapshot = await resolveToolSnapshot({ env, cwd });
   let stillMissing = nextSnapshot.filter((tool) => !tool.binaryPath);

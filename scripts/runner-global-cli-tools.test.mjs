@@ -367,6 +367,71 @@ test("ensureRunnerGlobalCliTools repairs local package bins when npm global inst
   }
 });
 
+test("ensureRunnerGlobalCliTools overwrites npm-created local package bins during refresh", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-global-tools-local-bin-stale-"));
+  try {
+    const cwd = path.join(tempRoot, "action");
+    const managedPrefix = path.join(tempRoot, "managed");
+    const managedBinPath = path.join(managedPrefix, "bin");
+    const homePath = path.join(tempRoot, "home");
+    const stateFile = path.join(tempRoot, "state.json");
+    const npmPath = path.join(tempRoot, "npm");
+    await fs.mkdir(homePath, { recursive: true });
+    await writeMinimalActionPackages(cwd);
+    await writeExecutable(path.join(managedBinPath, "playwright-mcp"), "#!/bin/sh\nexit 0\n");
+    await writeExecutable(
+      npmPath,
+      [
+        "#!/bin/sh",
+        "if [ \"$1\" = \"install\" ] && [ \"$2\" = \"--global\" ]; then",
+        `  mkdir -p ${JSON.stringify(managedBinPath)}`,
+        `  printf '#!/bin/sh\\nif [ \"$1\" = \"threads\" ]; then echo old helper; exit 0; fi\\nexit 0\\n' > ${JSON.stringify(path.join(managedBinPath, "codeq8"))}`,
+        `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(managedBinPath, "playwright-mcp"))}`,
+        `  chmod +x ${JSON.stringify(path.join(managedBinPath, "codeq8"))}`,
+        `  chmod +x ${JSON.stringify(path.join(managedBinPath, "playwright-mcp"))}`,
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    await fs.writeFile(
+      stateFile,
+      `${JSON.stringify(
+        {
+          last_success_at: 1,
+          tool_versions: TOOL_VERSIONS,
+          local_package_fingerprints: {
+            "@codeq8/codeq8": "old-fingerprint",
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    const result = await ensureRunnerGlobalCliTools({
+      stateFile,
+      npmPath,
+      env: {
+        ...process.env,
+        HOME: homePath,
+        NPM_CONFIG_PREFIX: managedPrefix,
+        PATH: `${managedBinPath}:${process.env.PATH || ""}`,
+      },
+      cwd,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.refreshed, true);
+    const codeq8Shim = await fs.readFile(path.join(managedBinPath, "codeq8"), "utf8");
+    assert.match(codeq8Shim, /exec node /);
+    assert.doesNotMatch(codeq8Shim, /old helper/);
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("runner global tools do not install or pin Codex", async () => {
   await withGlobalToolFixture(async ({ stateFile, npmPath, env }) => {
     const npmArgsFile = path.join(path.dirname(npmPath), "npm-args");
