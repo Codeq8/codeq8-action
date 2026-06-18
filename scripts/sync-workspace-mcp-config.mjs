@@ -335,6 +335,42 @@ function stripManagedWorkspaceBlock(contents) {
   };
 }
 
+async function clearManagedWorkspaceBlock({ codexConfigPath, logger = null } = {}) {
+  const normalizedConfigPath = normalizeText(codexConfigPath);
+  if (!normalizedConfigPath || !(await pathExists(normalizedConfigPath))) {
+    return {
+      ok: true,
+      removed: 0,
+      changed: false,
+      reason: "",
+    };
+  }
+  const existingConfig = await fs.readFile(normalizedConfigPath, "utf8");
+  const strippedConfig = stripManagedWorkspaceBlock(existingConfig);
+  if (strippedConfig.removed === 0) {
+    return {
+      ok: true,
+      removed: 0,
+      changed: false,
+      reason: "",
+    };
+  }
+  await fs.writeFile(
+    normalizedConfigPath,
+    strippedConfig.contents ? `${strippedConfig.contents}\n` : "",
+    "utf8",
+  );
+  logger?.log?.(
+    `[codeq8-workspace-mcp-config] status=cleared capability=${WORKSPACE_MCP_CAPABILITY} config=${normalizedConfigPath} removed=${strippedConfig.removed}`,
+  );
+  return {
+    ok: true,
+    removed: strippedConfig.removed,
+    changed: true,
+    reason: "",
+  };
+}
+
 function hasUnmanagedServerTable(contents, serverId) {
   const escapedServerId = normalizeText(serverId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = new RegExp(
@@ -387,6 +423,7 @@ export async function syncWorkspaceMcpCodexConfig({
   const paths = resolveCodeq8PluginInstallPaths({ repoRoot, env });
   const resolvedWorkspacePath = resolveWorkspacePath({ workspacePath, env });
   const configPath = resolveWorkspaceConfigPath(resolvedWorkspacePath);
+  const codexConfigPath = paths.codexHome ? path.join(paths.codexHome, "config.toml") : "";
   if (!paths.codexHome) {
     return {
       ok: false,
@@ -400,6 +437,22 @@ export async function syncWorkspaceMcpCodexConfig({
     };
   }
   if (!resolvedWorkspacePath || !(await pathExists(resolvedWorkspacePath))) {
+    let clearResult = null;
+    try {
+      clearResult = await clearManagedWorkspaceBlock({ codexConfigPath, logger });
+    } catch (error) {
+      return {
+        ok: false,
+        status: "skipped",
+        code: "invalid_config",
+        reason: error instanceof Error ? error.message : String(error),
+        capability: WORKSPACE_MCP_CAPABILITY,
+        configPath,
+        codexConfigPath,
+        serverIds: [],
+        blockedEnvVars: [],
+      };
+    }
     return {
       ok: false,
       status: "skipped",
@@ -407,11 +460,29 @@ export async function syncWorkspaceMcpCodexConfig({
       reason: "Workspace path could not be resolved.",
       capability: WORKSPACE_MCP_CAPABILITY,
       configPath,
+      codexConfigPath,
       serverIds: [],
       blockedEnvVars: [],
+      clearedManagedBlocks: Number(clearResult?.removed || 0),
     };
   }
   if (!(await pathExists(configPath))) {
+    let clearResult = null;
+    try {
+      clearResult = await clearManagedWorkspaceBlock({ codexConfigPath, logger });
+    } catch (error) {
+      return {
+        ok: false,
+        status: "skipped",
+        code: "invalid_config",
+        reason: error instanceof Error ? error.message : String(error),
+        capability: WORKSPACE_MCP_CAPABILITY,
+        configPath,
+        codexConfigPath,
+        serverIds: [],
+        blockedEnvVars: [],
+      };
+    }
     return {
       ok: true,
       status: "skipped",
@@ -419,8 +490,10 @@ export async function syncWorkspaceMcpCodexConfig({
       reason: "Workspace Codex config is not present.",
       capability: WORKSPACE_MCP_CAPABILITY,
       configPath,
+      codexConfigPath,
       serverIds: [],
       blockedEnvVars: [],
+      clearedManagedBlocks: Number(clearResult?.removed || 0),
     };
   }
 
@@ -442,6 +515,22 @@ export async function syncWorkspaceMcpCodexConfig({
     };
   }
   if (sections.length === 0) {
+    let clearResult = null;
+    try {
+      clearResult = await clearManagedWorkspaceBlock({ codexConfigPath, logger });
+    } catch (error) {
+      return {
+        ok: false,
+        status: "skipped",
+        code: "invalid_config",
+        reason: error instanceof Error ? error.message : String(error),
+        capability: WORKSPACE_MCP_CAPABILITY,
+        configPath,
+        codexConfigPath,
+        serverIds: [],
+        blockedEnvVars: [],
+      };
+    }
     return {
       ok: true,
       status: "skipped",
@@ -449,8 +538,10 @@ export async function syncWorkspaceMcpCodexConfig({
       reason: "Workspace Codex config has no MCP server entries.",
       capability: WORKSPACE_MCP_CAPABILITY,
       configPath,
+      codexConfigPath,
       serverIds: [],
       blockedEnvVars: [],
+      clearedManagedBlocks: Number(clearResult?.removed || 0),
     };
   }
 
@@ -459,7 +550,6 @@ export async function syncWorkspaceMcpCodexConfig({
   );
   const serverIds = sanitizedSections.map((section) => section.serverId);
   const blockedEnvVars = sanitizedSections.flatMap((section) => section.blockedEnvVars);
-  const codexConfigPath = path.join(paths.codexHome, "config.toml");
   const existingConfig = (await pathExists(codexConfigPath))
     ? await fs.readFile(codexConfigPath, "utf8")
     : "";

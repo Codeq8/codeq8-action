@@ -296,6 +296,88 @@ test("sync workspace MCP config is idempotent and replaces only its managed bloc
   });
 });
 
+test("sync workspace MCP config clears stale managed block when workspace config is absent", async () => {
+  await withWorkspaceMcpFixture(async ({ codexHome, env, workspacePath }) => {
+    const configPath = path.join(codexHome, "config.toml");
+    await fs.writeFile(
+      configPath,
+      [
+        'model = "gpt-5"',
+        "",
+        CODEQ8_WORKSPACE_MCP_CONFIG_START,
+        "",
+        "# source = .codex/config.toml",
+        "",
+        "[mcp_servers.funplay]",
+        'transport = "streamable_http"',
+        'url = "http://127.0.0.1:8765/mcp"',
+        'cwd = "/tmp/stale-workspace"',
+        "",
+        CODEQ8_WORKSPACE_MCP_CONFIG_END,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = await syncWorkspaceMcpCodexConfig({
+      repoRoot: process.cwd(),
+      env,
+      workspacePath,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.code, "config_missing");
+    assert.equal(result.clearedManagedBlocks, 1);
+    const config = await fs.readFile(configPath, "utf8");
+    assert.match(config, /model = "gpt-5"/);
+    assert.doesNotMatch(config, new RegExp(CODEQ8_WORKSPACE_MCP_CONFIG_START));
+    assert.doesNotMatch(config, /\[mcp_servers\.funplay\]/);
+    assert.doesNotMatch(config, /\/tmp\/stale-workspace/);
+  });
+});
+
+test("sync workspace MCP config clears stale managed block when workspace config has no MCP servers", async () => {
+  await withWorkspaceMcpFixture(async ({ codexHome, env, workspacePath }) => {
+    await writeWorkspaceConfig(workspacePath, [
+      'model = "gpt-5"',
+      "",
+      "[tools]",
+      'web_search = "disabled"',
+      "",
+    ].join("\n"));
+    const configPath = path.join(codexHome, "config.toml");
+    await fs.writeFile(
+      configPath,
+      [
+        CODEQ8_WORKSPACE_MCP_CONFIG_START,
+        "",
+        "[mcp_servers.funplay]",
+        'transport = "streamable_http"',
+        'url = "http://127.0.0.1:8765/mcp"',
+        'cwd = "/tmp/stale-workspace"',
+        "",
+        CODEQ8_WORKSPACE_MCP_CONFIG_END,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = await syncWorkspaceMcpCodexConfig({
+      repoRoot: process.cwd(),
+      env,
+      workspacePath,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.code, "no_mcp_servers");
+    assert.equal(result.clearedManagedBlocks, 1);
+    const config = await fs.readFile(configPath, "utf8");
+    assert.doesNotMatch(config, new RegExp(CODEQ8_WORKSPACE_MCP_CONFIG_START));
+    assert.doesNotMatch(config, /\[mcp_servers\.funplay\]/);
+    assert.doesNotMatch(config, /cwd =/);
+  });
+});
+
 test("sync workspace MCP config refuses to overwrite unmarked existing MCP server tables", async () => {
   await withWorkspaceMcpFixture(async ({ codexHome, env, workspacePath }) => {
     await writeWorkspaceConfig(workspacePath, [
