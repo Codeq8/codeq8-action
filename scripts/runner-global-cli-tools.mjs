@@ -16,6 +16,7 @@ const GLOBAL_CLI_TOOLS = Object.freeze([
     desiredVersionPath: "codeq8-cli/package.json",
     localPackagePath: "codeq8-cli",
     requireManagedPrefix: true,
+    capabilityCheckArgs: ["threads", "--help"],
   },
   {
     label: "playwright-mcp",
@@ -200,6 +201,16 @@ function resolveManagedNpmBinPath(env = process.env) {
   return npmPrefix ? path.resolve(npmPrefix, "bin") : "";
 }
 
+async function resolveManagedBinaryPath(binaryName, managedNpmBinPath) {
+  const normalizedBinaryName = normalizeText(binaryName);
+  const normalizedManagedNpmBinPath = normalizeText(managedNpmBinPath);
+  if (!normalizedBinaryName || !normalizedManagedNpmBinPath) {
+    return "";
+  }
+  const candidate = path.join(normalizedManagedNpmBinPath, normalizedBinaryName);
+  return (await isExecutableFile(candidate)) ? candidate : "";
+}
+
 function isPathInsideDirectory(filePath, directoryPath) {
   const normalizedFilePath = normalizeText(filePath);
   const normalizedDirectoryPath = normalizeText(directoryPath);
@@ -211,6 +222,31 @@ function isPathInsideDirectory(filePath, directoryPath) {
     path.resolve(normalizedFilePath),
   );
   return Boolean(relativePath) && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
+}
+
+async function checkToolCapability({
+  tool,
+  binaryPath,
+  env = process.env,
+  cwd = process.cwd(),
+}) {
+  const args = Array.isArray(tool?.capabilityCheckArgs)
+    ? tool.capabilityCheckArgs.map((arg) => normalizeText(arg)).filter(Boolean)
+    : [];
+  if (args.length === 0) {
+    return { ok: true, reason: "" };
+  }
+  const normalizedBinaryPath = normalizeText(binaryPath);
+  if (!normalizedBinaryPath) {
+    return { ok: false, reason: "missing_binary" };
+  }
+  const result = await runProcessCapture(normalizedBinaryPath, args, { cwd, env });
+  return {
+    ok: result.ok,
+    reason: result.ok
+      ? ""
+      : normalizeText(result.stderr) || normalizeText(result.stdout) || result.reason,
+  };
 }
 
 async function readState(stateFilePath) {
@@ -329,22 +365,36 @@ async function resolveToolSnapshot({ env = process.env, cwd = process.cwd() } = 
   const snapshot = [];
   const managedNpmBinPath = resolveManagedNpmBinPath(env);
   for (const tool of GLOBAL_CLI_TOOLS) {
-    const discoveredBinaryPath = await resolveBinaryPath({
-      binaryName: tool.binaryName,
-      env,
-      cwd,
-    });
     const requiresManagedPrefix = Boolean(tool.requireManagedPrefix && managedNpmBinPath);
-    const binaryPath =
+    const managedBinaryPath = requiresManagedPrefix
+      ? await resolveManagedBinaryPath(tool.binaryName, managedNpmBinPath)
+      : "";
+    const discoveredBinaryPath =
+      managedBinaryPath ||
+      (await resolveBinaryPath({
+        binaryName: tool.binaryName,
+        env,
+        cwd,
+      }));
+    const prefixScopedBinaryPath =
       requiresManagedPrefix && !isPathInsideDirectory(discoveredBinaryPath, managedNpmBinPath)
         ? ""
         : discoveredBinaryPath;
+    const capability = await checkToolCapability({
+      tool,
+      binaryPath: prefixScopedBinaryPath,
+      env,
+      cwd,
+    });
+    const binaryPath = capability.ok ? prefixScopedBinaryPath : "";
     snapshot.push({
       ...tool,
       desiredVersion: await readDesiredToolVersion(tool, cwd),
       binaryPath,
       discoveredBinaryPath,
       managedNpmBinPath,
+      capabilityOk: capability.ok,
+      capabilityFailure: capability.reason,
     });
   }
   return snapshot;

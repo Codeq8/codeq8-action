@@ -7,7 +7,7 @@ import test from "node:test";
 import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
 
 const TOOL_VERSIONS = {
-  "@codeq8/codeq8": "0.2.3",
+  "@codeq8/codeq8": "0.2.4",
   "@playwright/mcp": "0.0.76",
 };
 
@@ -115,6 +115,67 @@ test("ensureRunnerGlobalCliTools refreshes when codeq8 resolves outside the mana
     assert.equal(result.refreshed, true);
     const codeq8Tool = result.tools.find((tool) => tool.packageName === "@codeq8/codeq8");
     assert.equal(codeq8Tool?.binaryPath, path.join(managedBinPath, "codeq8"));
+    const npmArgs = await fs.readFile(npmArgsFile, "utf8");
+    assert.match(npmArgs, /--global/);
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("ensureRunnerGlobalCliTools refreshes when managed codeq8 lacks threads support", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-global-tools-capability-"));
+  try {
+    const binPath = path.join(tempRoot, "bin");
+    const homePath = path.join(tempRoot, "home");
+    const stateFile = path.join(tempRoot, "state.json");
+    const npmPath = path.join(tempRoot, "npm");
+    const npmArgsFile = path.join(tempRoot, "npm-args");
+    await fs.mkdir(homePath, { recursive: true });
+    await writeExecutable(
+      path.join(binPath, "codeq8"),
+      [
+        "#!/bin/sh",
+        "if [ \"$1\" = \"threads\" ]; then",
+        "  echo 'codeq8: Unknown command: threads' >&2",
+        "  exit 1",
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    await writeExecutable(path.join(binPath, "playwright-mcp"), "#!/bin/sh\nexit 0\n");
+    await writeExecutable(
+      npmPath,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$@" >> ${JSON.stringify(npmArgsFile)}`,
+        "if [ \"$1\" = \"install\" ] && [ \"$2\" = \"--global\" ]; then",
+        `  mkdir -p ${JSON.stringify(binPath)}`,
+        `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(binPath, "codeq8"))}`,
+        `  chmod +x ${JSON.stringify(path.join(binPath, "codeq8"))}`,
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    await writeState(stateFile);
+
+    const result = await ensureRunnerGlobalCliTools({
+      stateFile,
+      npmPath,
+      env: {
+        ...process.env,
+        HOME: homePath,
+        NPM_CONFIG_PREFIX: tempRoot,
+        PATH: `${binPath}:${process.env.PATH || ""}`,
+      },
+      cwd: process.cwd(),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.refreshed, true);
+    const codeq8Tool = result.tools.find((tool) => tool.packageName === "@codeq8/codeq8");
+    assert.equal(codeq8Tool?.binaryPath, path.join(binPath, "codeq8"));
     const npmArgs = await fs.readFile(npmArgsFile, "utf8");
     assert.match(npmArgs, /--global/);
   } finally {
