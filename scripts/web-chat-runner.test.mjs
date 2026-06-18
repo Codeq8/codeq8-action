@@ -2571,6 +2571,260 @@ test("runCodex returns only the last AppServer agent message", async (t) => {
   assert.equal(result.output, "The attachment is a tiny cropped screenshot.");
 });
 
+test("runCodex runs hidden AppServer title pre-turn before the visible task turn", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-title-preturn-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  const originalFetch = globalThis.fetch;
+  const titleCalls = [];
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  globalThis.fetch = async (url, init = {}) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname === "/api/chat/runs/thread-title") {
+      const body = JSON.parse(String(init.body || "{}"));
+      titleCalls.push({
+        authorization: init.headers?.Authorization || init.headers?.authorization || "",
+        body,
+      });
+      return Response.json({
+        ok: true,
+        title: body.title,
+        updated: true,
+        thread: {
+          thread_id: body.target_thread_id,
+          title: body.title,
+          title_source: "manual",
+        },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import fs from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
+      "const requests = [];",
+      "const persistRequests = async () => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "let turnCount = 0;",
+      "rl.on('line', async (line) => {",
+      "  const message = JSON.parse(line);",
+      "  requests.push({ method: message.method, params: message.params || {} });",
+      "  await persistRequests();",
+      "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    turnCount += 1;",
+      "    const isTitleTurn = turnCount === 1;",
+      "    const turnId = isTitleTurn ? 'turn_title' : 'turn_main';",
+      "    const text = isTitleTurn ? 'Timeout contract' : 'Done.';",
+      "    send({ id: message.id, result: { turn: { id: turnId, status: 'inProgress' } } });",
+      "    send({ method: 'turn/started', params: { turn: { id: turnId } } });",
+      "    send({ method: 'item/started', params: { item: { id: `msg_${turnCount}`, type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: `msg_${turnCount}`, delta: text } });",
+      "    send({ method: 'item/completed', params: { item: { id: `msg_${turnCount}`, type: 'agent_message', text } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const progressEvents = [];
+  const diagnostics = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "visible work prompt",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "example-org/example-repo",
+      threadId: "wct_title",
+      runId: "wcr_title",
+      threadTitle: "Untitled",
+      threadTitleSource: "provisional_first_message",
+      promptText: "Fix the repeated 120 second timeout before rerunning tests.",
+      reportRunnerDiagnostic: async (diagnostic) => {
+        diagnostics.push(diagnostic);
+        return { ok: true, status: 200 };
+      },
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue(event) {
+            progressEvents.push(event);
+          },
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+      }),
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "Done.");
+  assert.equal(titleCalls.length, 1);
+  assert.match(titleCalls[0]?.authorization, /^Bearer /);
+  assert.equal(titleCalls[0]?.body?.workspace_repository, "example-org/example-repo");
+  assert.equal(titleCalls[0]?.body?.thread_id, "wct_title");
+  assert.equal(titleCalls[0]?.body?.run_id, "wcr_title");
+  assert.equal(titleCalls[0]?.body?.target_thread_id, "wct_title");
+  assert.equal(titleCalls[0]?.body?.title, "Timeout contract");
+  assert.deepEqual(progressEvents.map((event) => event.label), ["Done."]);
+  assert.equal(
+    diagnostics.some((diagnostic) => diagnostic.event === "runner_hidden_thread_title_preturn_finished"),
+    true,
+  );
+
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  const turnStarts = requests.filter((request) => request.method === "turn/start");
+  assert.equal(turnStarts.length, 2);
+  assert.match(turnStarts[0]?.params?.input?.[0]?.text, /Create a concise title/);
+  assert.match(turnStarts[0]?.params?.input?.[0]?.text, /120 second timeout/);
+  assert.equal(turnStarts[1]?.params?.input?.[0]?.text, "visible work prompt");
+});
+
+test("runCodex falls back when hidden AppServer title pre-turn times out", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-title-timeout-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  const originalFetch = globalThis.fetch;
+  const titleCalls = [];
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  globalThis.fetch = async (url, init = {}) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname === "/api/chat/runs/thread-title") {
+      const body = JSON.parse(String(init.body || "{}"));
+      titleCalls.push(body);
+      return Response.json({
+        ok: true,
+        title: body.title,
+        updated: true,
+        thread: {
+          thread_id: body.target_thread_id,
+          title: body.title,
+          title_source: "manual",
+        },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import fs from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
+      "const requests = [];",
+      "const persistRequests = async () => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "let turnCount = 0;",
+      "rl.on('line', async (line) => {",
+      "  const message = JSON.parse(line);",
+      "  requests.push({ method: message.method, params: message.params || {} });",
+      "  await persistRequests();",
+      "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/interrupt') {",
+      "    send({ id: message.id, result: { ok: true } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: message.params.turnId, status: 'cancelled' } } });",
+      "  }",
+      "  if (message.method === 'turn/start') {",
+      "    turnCount += 1;",
+      "    const isTitleTurn = turnCount === 1;",
+      "    const turnId = isTitleTurn ? 'turn_title_timeout' : 'turn_main';",
+      "    send({ id: message.id, result: { turn: { id: turnId, status: 'inProgress' } } });",
+      "    send({ method: 'turn/started', params: { turn: { id: turnId } } });",
+      "    if (isTitleTurn) return;",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_main', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_main', delta: 'Done.' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_main', type: 'agent_message', text: 'Done.' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const progressEvents = [];
+  const diagnostics = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "visible timeout prompt",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "example-org/example-repo",
+      threadId: "wct_title_timeout",
+      runId: "wcr_title_timeout",
+      threadTitle: "Untitled",
+      threadTitleSource: "provisional_first_message",
+      promptText: "Fix upload retry before running node tests.",
+      hiddenThreadTitlePreturnTimeoutMs: 20,
+      reportRunnerDiagnostic: async (diagnostic) => {
+        diagnostics.push(diagnostic);
+        return { ok: true, status: 200 };
+      },
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue(event) {
+            progressEvents.push(event);
+          },
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+      }),
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "Done.");
+  assert.equal(titleCalls.length, 1);
+  assert.equal(titleCalls[0]?.title, "Fix upload retry before");
+  assert.deepEqual(progressEvents.map((event) => event.label), ["Done."]);
+  assert.equal(
+    diagnostics.some((diagnostic) => diagnostic.event === "runner_hidden_thread_title_preturn_finished"),
+    true,
+  );
+
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  assert.equal(requests.filter((request) => request.method === "turn/start").length, 2);
+  assert.equal(requests.some((request) => request.method === "turn/interrupt"), true);
+});
+
 test("runCodex returns normal diagnostics for auth-like stderr", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-stderr-auth-text-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");

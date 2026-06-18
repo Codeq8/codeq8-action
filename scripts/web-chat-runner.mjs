@@ -73,7 +73,11 @@ const APP_SERVER_PROGRESS_HISTORY_MAX_EVENTS_PER_REQUEST = 10;
 const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
   "codex_app_server_attachment_turn_control";
 const CODEX_GOAL_UPDATE_PATH = "/api/chat/runs/goal";
+const RUNNER_THREAD_TITLE_PATH = "/api/chat/runs/thread-title";
 const CODEX_GOAL_OBJECTIVE_MAX_CHARS = 4000;
+const HIDDEN_THREAD_TITLE_PROMPT_MAX_CHARS = 2000;
+const HIDDEN_THREAD_TITLE_MAX_CHARS = 80;
+const HIDDEN_THREAD_TITLE_COMPLETION_TIMEOUT_MS = 12_000;
 const APP_SERVER_CONTROL_CAPABILITIES = Object.freeze([
   APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY,
 ]);
@@ -8408,6 +8412,176 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
   }
 }
 
+function isPlaceholderThreadTitle(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  return !normalized || normalized === "untitled" || normalized === "new thread";
+}
+
+function isFinalThreadTitleSource(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  return normalized === "manual" || normalized === "generated";
+}
+
+function shouldRunHiddenThreadTitlePreturn({
+  mode = "",
+  threadTitle = "",
+  threadTitleSource = "",
+  promptText = "",
+} = {}) {
+  if (normalizeText(mode).toLowerCase() !== "fresh") {
+    return false;
+  }
+  if (!normalizeText(promptText)) {
+    return false;
+  }
+  if (isFinalThreadTitleSource(threadTitleSource)) {
+    return false;
+  }
+  return (
+    isPlaceholderThreadTitle(threadTitle) ||
+    normalizeText(threadTitleSource).toLowerCase() === "provisional_first_message"
+  );
+}
+
+function buildHiddenThreadTitlePrompt({ promptText = "" } = {}) {
+  const normalizedPrompt = truncate(
+    normalizeText(promptText),
+    HIDDEN_THREAD_TITLE_PROMPT_MAX_CHARS,
+  );
+  return [
+    "Create a concise title for this Codeq8 chat thread.",
+    "",
+    "Rules:",
+    "- Output only the title text.",
+    "- Use 2-4 words in sentence case.",
+    "- Do not use tools, markdown, quotes, punctuation-only labels, or explanations.",
+    "",
+    "User request:",
+    normalizedPrompt || "(no user request text)",
+  ].join("\n");
+}
+
+function normalizeHiddenThreadTitle(value) {
+  let normalized =
+    normalizeText(value)
+      .split(/\r?\n/g)
+      .map((line) => normalizeText(line))
+      .filter(Boolean)[0] || "";
+  normalized = normalized
+    .replace(/^title\s*:\s*/i, "")
+    .replace(/^["'`*_]+|["'`*_]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  normalized = normalized.replace(/[.!?;:,\s]+$/g, "").trim();
+  if (!normalized || isPlaceholderThreadTitle(normalized)) {
+    return "";
+  }
+  if (normalized.length > HIDDEN_THREAD_TITLE_MAX_CHARS) {
+    normalized = normalizeText(normalized.slice(0, HIDDEN_THREAD_TITLE_MAX_CHARS));
+    normalized = normalizeText(normalized.replace(/\s+\S*$/, ""));
+  }
+  return normalized || "";
+}
+
+function buildFallbackThreadTitle(promptText = "") {
+  const cleaned = normalizeText(promptText)
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[`*_#>[\](){}"'“”‘’]/g, " ")
+    .replace(/[^A-Za-z0-9\s/-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const stopwords = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "can",
+    "could",
+    "do",
+    "does",
+    "for",
+    "from",
+    "have",
+    "help",
+    "how",
+    "i",
+    "is",
+    "it",
+    "me",
+    "of",
+    "on",
+    "or",
+    "please",
+    "that",
+    "the",
+    "this",
+    "to",
+    "we",
+    "what",
+    "why",
+    "with",
+    "you",
+  ]);
+  const words = cleaned
+    .split(/\s+/g)
+    .map((word) => word.replace(/^[-/]+|[-/]+$/g, ""))
+    .filter((word) => word.length > 1 && !stopwords.has(word.toLowerCase()))
+    .slice(0, 4);
+  const title = words.length > 0 ? words.join(" ") : "New chat";
+  return normalizeHiddenThreadTitle(title) || "New chat";
+}
+
+async function writeRunnerThreadTitle({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  title,
+}) {
+  const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
+  const normalizedToken = normalizeText(webChatRunToken);
+  const normalizedTitle = normalizeHiddenThreadTitle(title);
+  if (!normalizedToken || normalizedToken.split(".").length !== 3) {
+    throw new Error("A scoped CODE_WEB_CHAT_RUN_TOKEN is required to set the thread title.");
+  }
+  if (!normalizedTitle) {
+    throw new Error("A non-placeholder title is required.");
+  }
+
+  // Cost boundary: hidden title pre-turns write at most one current-thread title
+  // mutation per fresh placeholder run. The server route owns the single patch
+  // plus live-summary publish and idempotency for unchanged titles.
+  const response = await fetchJson(
+    new URL(RUNNER_THREAD_TITLE_PATH, normalizedPublicBaseUrl).toString(),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${normalizedToken}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({
+        workspace_repository: normalizeText(workspaceRepository),
+        thread_id: normalizeText(threadId),
+        run_id: normalizeText(runId),
+        target_thread_id: normalizeText(threadId),
+        title: normalizedTitle,
+      }),
+    },
+  );
+  if (!response.ok || response.payload?.ok === false) {
+    throw new Error(
+      normalizeText(response.payload?.error || response.payload?.message || response.textBody) ||
+        `Thread title request failed (${response.status}).`,
+    );
+  }
+  return {
+    ok: true,
+    title: normalizeText(response.payload?.title) || normalizedTitle,
+    updated: response.payload?.updated !== false,
+  };
+}
+
 async function runCodexAppServer({
   codexPath,
   model,
@@ -8427,6 +8601,16 @@ async function runCodexAppServer({
   const normalizedSessionId = normalizeCodexSessionId(sessionId);
   const normalizedCodexGoalState = normalizeCodexGoalState(codexGoalState);
   const goalsEnabled = Boolean(codexThreadGoalsEnabled);
+  const hiddenTitlePreturnEnabled = shouldRunHiddenThreadTitlePreturn({
+    mode: normalizedMode,
+    threadTitle: appServerContext?.threadTitle,
+    threadTitleSource: appServerContext?.threadTitleSource,
+    promptText: appServerContext?.promptText,
+  });
+  const hiddenTitleCompletionTimeoutMs = parsePositiveInteger(
+    appServerContext?.hiddenThreadTitlePreturnTimeoutMs,
+    HIDDEN_THREAD_TITLE_COMPLETION_TIMEOUT_MS,
+  );
   if (!normalizedTask) {
     return {
       ok: false,
@@ -8466,8 +8650,10 @@ async function runCodexAppServer({
     let settled = false;
     let appServerThreadId = "";
     let activeTurnId = "";
+    let activeTurnPurpose = "main";
     let nextRequestId = 1;
     let appServerTraceCount = 0;
+    let hiddenTitleTurnCompletion = null;
     const appServerNotificationCounts = new Map();
     const appServerRequestCounts = new Map();
     const actionsReasoningTranscript = createAppServerActionsReasoningTranscript();
@@ -8501,6 +8687,12 @@ async function runCodexAppServer({
     };
 
     const getAssistantOutput = () => lastAgentMessageOutput || currentAgentMessageOutput;
+    const resetAgentMessageCapture = () => {
+      currentAgentMessageItemId = "";
+      currentAgentMessageOutput = "";
+      currentAgentMessageProgressItemId = "";
+      lastAgentMessageOutput = "";
+    };
 
     const startAgentMessage = (params) => {
       agentMessageSequence += 1;
@@ -8650,6 +8842,163 @@ async function runCodexAppServer({
       child.stdin?.write(`${JSON.stringify({ method, id, params })}\n`);
     });
 
+    const reportHiddenTitleDiagnostic = async ({
+      event,
+      ok = false,
+      severity = "warning",
+      error = "",
+      details = {},
+    }) => {
+      await maybeReportRunnerDiagnostic(appServerContext?.reportRunnerDiagnostic, {
+        event,
+        failureClass: event,
+        severity,
+        ok,
+        details: {
+          error: extractErrorMessage(error),
+          fallback_used: Boolean(details.fallback_used),
+          title_written: Boolean(details.title_written),
+        },
+      });
+    };
+
+    const waitForHiddenTitleTurnCompletion = () =>
+      new Promise((resolve) => {
+        let settled = false;
+        const timeoutHandle = setTimeout(() => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          hiddenTitleTurnCompletion = null;
+          resolve({ ok: false, output: "", status: "timeout", timeout: true });
+        }, hiddenTitleCompletionTimeoutMs);
+        timeoutHandle.unref?.();
+        hiddenTitleTurnCompletion = (result) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timeoutHandle);
+          hiddenTitleTurnCompletion = null;
+          resolve(result);
+        };
+      });
+
+    const completeHiddenTitleTurn = (result) => {
+      const resolve = hiddenTitleTurnCompletion;
+      hiddenTitleTurnCompletion = null;
+      if (typeof resolve === "function") {
+        resolve(result);
+      }
+    };
+
+    const runHiddenThreadTitlePreturn = async () => {
+      if (!hiddenTitlePreturnEnabled) {
+        return null;
+      }
+      const fallbackTitle = buildFallbackThreadTitle(appServerContext?.promptText);
+      let title = "";
+      let usedFallback = false;
+      let hiddenTitleTurnId = "";
+      activeTurnPurpose = "hidden_thread_title";
+      resetAgentMessageCapture();
+      try {
+        const completionPromise = waitForHiddenTitleTurnCompletion();
+        const turnResult = await sendRequest("turn/start", {
+          threadId: appServerThreadId,
+          input: [
+            {
+              type: "text",
+              text: buildHiddenThreadTitlePrompt({
+                promptText: appServerContext?.promptText,
+              }),
+            },
+          ],
+          cwd: workspacePath,
+          model: normalizedModel,
+          approvalPolicy: "never",
+          sandboxPolicy: {
+            type: "dangerFullAccess",
+          },
+          effort: DEFAULT_CODEX_REASONING_EFFORT,
+        });
+        hiddenTitleTurnId = extractAppServerTurnId(turnResult) || activeTurnId;
+        activeTurnId = hiddenTitleTurnId || activeTurnId;
+        const completion = await completionPromise;
+        if (completion?.timeout && (hiddenTitleTurnId || activeTurnId)) {
+          try {
+            await sendRequest("turn/interrupt", {
+              threadId: appServerThreadId,
+              turnId: hiddenTitleTurnId || activeTurnId,
+            });
+          } catch (interruptError) {
+            await reportHiddenTitleDiagnostic({
+              event: "runner_hidden_thread_title_interrupt_failed",
+              error: interruptError,
+              details: { fallback_used: true },
+            });
+          }
+        }
+        title = normalizeHiddenThreadTitle(completion?.output);
+        if (!completion?.ok || !title) {
+          usedFallback = true;
+          title = fallbackTitle;
+        }
+      } catch (error) {
+        usedFallback = true;
+        title = fallbackTitle;
+        await reportHiddenTitleDiagnostic({
+          event: "runner_hidden_thread_title_preturn_failed",
+          error,
+          details: { fallback_used: true },
+        });
+      } finally {
+        activeTurnPurpose = "main";
+        activeTurnId = "";
+        resetAgentMessageCapture();
+      }
+
+      try {
+        const result = await writeRunnerThreadTitle({
+          publicBaseUrl: appServerContext?.publicBaseUrl,
+          webChatRunToken: appServerContext?.webChatRunToken,
+          workspaceRepository: appServerContext?.workspaceRepository,
+          threadId: appServerContext?.threadId,
+          runId: appServerContext?.runId,
+          title,
+        });
+        log(
+          "Prepared hidden Codeq8 thread title before main Codex turn",
+          `updated=${result.updated ? "true" : "false"} fallback=${usedFallback ? "true" : "false"}`,
+        );
+        await reportHiddenTitleDiagnostic({
+          event: "runner_hidden_thread_title_preturn_finished",
+          ok: true,
+          severity: "trace",
+          details: {
+            fallback_used: usedFallback,
+            title_written: true,
+          },
+        });
+        return result;
+      } catch (error) {
+        await reportHiddenTitleDiagnostic({
+          event: "runner_hidden_thread_title_write_failed",
+          error,
+          details: { fallback_used: usedFallback },
+        });
+        log(
+          "WARN",
+          "Hidden Codeq8 thread title write failed; continuing main Codex turn",
+          extractErrorMessage(error),
+        );
+        return null;
+      } finally {
+        resetAgentMessageCapture();
+      }
+    };
+
     const maybeReportGoalSyncFailure = async ({
       event,
       error,
@@ -8753,8 +9102,11 @@ async function runCodexAppServer({
     const handleNotification = (method, params) => {
       const normalizedMethod = normalizeAppServerMethod(method);
       incrementCount(appServerNotificationCounts, normalizedMethod);
-      actionsReasoningTranscript.recordNotification(normalizedMethod, params);
-      if (shouldTraceAppServerNotification(normalizedMethod)) {
+      const hiddenTitleTurnActive = activeTurnPurpose === "hidden_thread_title";
+      if (!hiddenTitleTurnActive) {
+        actionsReasoningTranscript.recordNotification(normalizedMethod, params);
+      }
+      if (!hiddenTitleTurnActive && shouldTraceAppServerNotification(normalizedMethod)) {
         logAppServerTrace(
           "Codex app-server notification received",
           describeAppServerNotificationTrace(normalizedMethod, params),
@@ -8808,7 +9160,7 @@ async function runCodexAppServer({
             itemId: completedItemId,
             label: getAssistantOutput(),
           });
-          if (progressEvent) {
+          if (!hiddenTitleTurnActive && progressEvent) {
             currentAgentMessageProgressItemId = completedItemId;
             progressReporter.enqueue(progressEvent);
           }
@@ -8817,6 +9169,14 @@ async function runCodexAppServer({
       if (normalizedMethod === "turn/completed") {
         const status = extractAppServerTurnStatus(params);
         const ok = !/failed|error|cancel/i.test(status);
+        if (hiddenTitleTurnActive) {
+          completeHiddenTitleTurn({
+            ok,
+            output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
+            status,
+          });
+          return;
+        }
         void finishAfterTurnCompleted({
           ok,
           output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
@@ -8967,6 +9327,7 @@ async function runCodexAppServer({
         throw new Error("Codex app-server did not return a thread id.");
       }
       await synchronizeInitialCodexGoal();
+      await runHiddenThreadTitlePreturn();
       controlListener = firestoreBridge?.createControlListener?.({
         sendRequest,
         getAppServerThreadId: () => appServerThreadId,
@@ -10715,6 +11076,9 @@ async function main() {
             workspaceRepository: activeWorkspaceRepository,
             threadId,
             runId,
+            threadTitle: activeThreadTitle,
+            threadTitleSource,
+            promptText,
             workerUrl,
             adminToken,
             attachmentRootPath: path.join(attemptRunRuntime.homePath, "control-attachments"),
