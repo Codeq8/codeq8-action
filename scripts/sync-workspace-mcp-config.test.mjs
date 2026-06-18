@@ -133,6 +133,26 @@ test("sanitizeWorkspaceMcpSection adds workspace cwd and filters dangerous forwa
   ]);
 });
 
+test("sanitizeWorkspaceMcpSection omits cwd for streamable_http MCP servers", () => {
+  const section = extractWorkspaceMcpSections([
+    "[mcp_servers.funplay]",
+    'transport = "streamable_http"',
+    'url = "http://127.0.0.1:8765/mcp"',
+    'cwd = "./Tools"',
+    "",
+  ].join("\n"))[0];
+
+  const sanitized = sanitizeWorkspaceMcpSection(section, {
+    workspacePath: "/tmp/example-workspace",
+  });
+  const output = sanitized.lines.join("\n");
+
+  assert.match(output, /\[mcp_servers\.funplay\]/);
+  assert.match(output, /transport = "streamable_http"/);
+  assert.match(output, /url = "http:\/\/127\.0\.0\.1:8765\/mcp"/);
+  assert.doesNotMatch(output, /^\s*cwd\s*=/m);
+});
+
 test("sync workspace MCP config skips when workspace config is absent", async () => {
   await withWorkspaceMcpFixture(async ({ env, workspacePath }) => {
     const result = await syncWorkspaceMcpCodexConfig({

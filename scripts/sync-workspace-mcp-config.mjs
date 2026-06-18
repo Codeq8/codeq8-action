@@ -182,6 +182,21 @@ function parseTomlStringValue(line) {
   return match[2];
 }
 
+function resolveMcpTransport(section) {
+  for (const line of section.lines.slice(1)) {
+    if (!/^\s*transport\s*=/.test(line)) {
+      continue;
+    }
+    return normalizeText(parseTomlStringValue(line)).toLowerCase();
+  }
+  return "";
+}
+
+function mcpServerSupportsCwd(section) {
+  const transport = resolveMcpTransport(section);
+  return !transport || transport === "stdio";
+}
+
 function parseTomlStringLiterals(value) {
   const source = String(value || "");
   const results = [];
@@ -232,11 +247,15 @@ export function sanitizeWorkspaceMcpSection(section, { workspacePath }) {
   const normalizedWorkspacePath = path.resolve(normalizeText(workspacePath));
   const outputLines = [`[mcp_servers.${section.serverId}]`];
   const blockedEnvVars = [];
+  const supportsCwd = mcpServerSupportsCwd(section);
   let sawCwd = false;
   const bodyLines = section.lines.slice(1);
   for (let index = 0; index < bodyLines.length; index += 1) {
     const line = bodyLines[index];
     if (/^\s*cwd\s*=/.test(line)) {
+      if (!supportsCwd) {
+        continue;
+      }
       const cwdValue = parseTomlStringValue(line);
       if (cwdValue !== null) {
         const resolvedCwd = path.isAbsolute(cwdValue)
@@ -266,7 +285,7 @@ export function sanitizeWorkspaceMcpSection(section, { workspacePath }) {
     }
     outputLines.push(line);
   }
-  if (!sawCwd) {
+  if (!sawCwd && supportsCwd) {
     outputLines.splice(1, 0, `cwd = ${tomlString(normalizedWorkspacePath)}`);
   }
   return {
