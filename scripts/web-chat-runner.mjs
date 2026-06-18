@@ -6071,27 +6071,22 @@ async function prepareGitHubCliAuth({
 
 async function prepareCodeq8Cli({
   commandEnv,
-  runtimeHomePath,
 }) {
-  const normalizedRuntimeHomePath = path.resolve(runtimeHomePath);
-  const wrapperBinPath = path.join(normalizedRuntimeHomePath, "bin");
-  const wrapperPath = path.join(wrapperBinPath, "codeq8");
-  const helperScriptPath = path.resolve(
-    path.dirname(new URL(import.meta.url).pathname),
-    "web-chat-runner-codeq8-cli.mjs",
-  );
-  await ensureDirectory(wrapperBinPath);
-  const wrapperScript = [
-    "#!/bin/sh",
-    `exec node ${quoteShellArgument(helperScriptPath)} "$@"`,
-    "",
-  ].join("\n");
-  await fs.writeFile(wrapperPath, wrapperScript, { mode: 0o755 });
-  await fs.chmod(wrapperPath, 0o755);
-  prependCommandPath(commandEnv, wrapperBinPath);
+  const whichResult = await runProcessCapture("/bin/bash", ["-c", "command -v codeq8"], {
+    cwd: process.cwd(),
+    env: commandEnv,
+  });
+  const resolvedPath = whichResult.ok ? normalizeText(whichResult.stdout) : "";
+  if (!resolvedPath || !(await isExecutableFile(resolvedPath))) {
+    return {
+      available: false,
+      reason: "codeq8 executable was not found. Ensure runner-global-cli-tools installed @codeq8/codeq8 first.",
+    };
+  }
+
   return {
     available: true,
-    binPath: wrapperPath,
+    binPath: resolvedPath,
     githubLogin: "",
   };
 }

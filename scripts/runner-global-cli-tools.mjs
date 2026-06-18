@@ -14,6 +14,7 @@ const GLOBAL_CLI_TOOLS = Object.freeze([
     packageName: "@codeq8/codeq8",
     binaryName: "codeq8",
     desiredVersionPath: "codeq8-cli/package.json",
+    localPackagePath: "codeq8-cli",
   },
   {
     label: "playwright-mcp",
@@ -222,6 +223,88 @@ async function readDesiredToolVersion(tool, cwd = process.cwd()) {
   }
 }
 
+async function prepareLocalPackageInstallTarget({
+  tool,
+  npmPath,
+  env = process.env,
+  cwd = process.cwd(),
+}) {
+  const localPackagePath = normalizeText(tool?.localPackagePath);
+  if (!localPackagePath) {
+    return "";
+  }
+
+  const packagePath = path.resolve(cwd, localPackagePath);
+  const packageJsonPath = path.join(packagePath, "package.json");
+  try {
+    await fs.access(packageJsonPath);
+  } catch {
+    throw new Error(`Local package target is missing package.json: ${packageJsonPath}`);
+  }
+
+  const install = await runProcessCapture(
+    npmPath,
+    ["install", "--no-audit", "--no-fund"],
+    {
+      cwd: packagePath,
+      env: {
+        ...env,
+        npm_config_update_notifier: "false",
+      },
+    },
+  );
+  if (!install.ok) {
+    throw new Error(
+      `Unable to install ${tool.packageName} local package dependencies (${install.reason || `exit_code=${install.code}`}). ${
+        normalizeText(install.stderr) || normalizeText(install.stdout) || "No install output."
+      }`,
+    );
+  }
+
+  const build = await runProcessCapture(npmPath, ["run", "build"], {
+    cwd: packagePath,
+    env: {
+      ...env,
+      npm_config_update_notifier: "false",
+    },
+  });
+  if (!build.ok) {
+    throw new Error(
+      `Unable to build ${tool.packageName} local package (${build.reason || `exit_code=${build.code}`}). ${
+        normalizeText(build.stderr) || normalizeText(build.stdout) || "No build output."
+      }`,
+    );
+  }
+
+  return packagePath;
+}
+
+async function buildInstallTargets({
+  toolSnapshot,
+  npmPath,
+  env = process.env,
+  cwd = process.cwd(),
+}) {
+  const targets = [];
+  for (const tool of GLOBAL_CLI_TOOLS) {
+    const desiredVersion = normalizeText(
+      toolSnapshot.find((entry) => entry.packageName === tool.packageName)?.desiredVersion,
+    );
+    const localTarget = await prepareLocalPackageInstallTarget({
+      tool,
+      npmPath,
+      env,
+      cwd,
+    });
+    if (localTarget) {
+      targets.push(localTarget);
+      continue;
+    }
+    targets.push(desiredVersion ? `${tool.packageName}@${desiredVersion}` : tool.packageName);
+  }
+  return targets;
+}
+
 async function resolveToolSnapshot({ env = process.env, cwd = process.cwd() } = {}) {
   const snapshot = [];
   for (const tool of GLOBAL_CLI_TOOLS) {
@@ -286,11 +369,11 @@ export async function ensureRunnerGlobalCliTools({
     `force=${force ? "yes" : "no"} missing=${missingTools.map((tool) => tool.label).join(",") || "none"} version_mismatch=${versionMismatchTools.map((tool) => tool.label).join(",") || "none"}`,
   );
 
-  const installTargets = GLOBAL_CLI_TOOLS.map((tool) => {
-    const desiredVersion = normalizeText(
-      toolSnapshot.find((entry) => entry.packageName === tool.packageName)?.desiredVersion,
-    );
-    return desiredVersion ? `${tool.packageName}@${desiredVersion}` : tool.packageName;
+  const installTargets = await buildInstallTargets({
+    toolSnapshot,
+    npmPath: resolvedNpmPath,
+    env,
+    cwd,
   });
 
   const install = await runProcessCapture(

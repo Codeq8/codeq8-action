@@ -7,7 +7,7 @@ import test from "node:test";
 import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
 
 const TOOL_VERSIONS = {
-  "@codeq8/codeq8": "0.2.1",
+  "@codeq8/codeq8": "0.2.2",
   "@playwright/mcp": "0.0.76",
 };
 
@@ -169,7 +169,7 @@ test("ensureRunnerGlobalCliTools fails hard when a required refresh fails", asyn
         env,
         cwd: process.cwd(),
       }),
-      /Unable to install required global CLI tools.*registry unavailable/,
+      /Unable to install @codeq8\/codeq8 local package dependencies.*registry unavailable/,
     );
   });
 });

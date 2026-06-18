@@ -1,6 +1,6 @@
 {
   "name": "@codeq8/codeq8",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Codeq8 CLI",
   "license": "MIT",
   "private": false,
@@ -10,6 +10,7 @@
   },
   "files": [
     "bin",
+    "dist",
     "src",
     "README.md"
   ],
@@ -20,6 +21,11 @@
     "access": "public"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 ./test/*.test.mjs"
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "npm run build && node --test --test-concurrency=1 ./test/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5"
   }
 }

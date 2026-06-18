@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { handleRunnerCodeq8Cli } from "./web-chat-runner-codeq8-cli.mjs";
+import { handleRunnerCodeq8Cli } from "../dist/runner-helper.js";
 
 function testEnv() {
   return {
@@ -597,7 +597,7 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.doesNotMatch(text, /threads steer/);
 
   const cliSource = await fs.readFile(
-    new URL("./web-chat-runner-codeq8-cli.mjs", import.meta.url),
+    new URL("../src/runner-helper.ts", import.meta.url),
     "utf8",
   );
   assert.doesNotMatch(cliSource, /command === "steer"/);
