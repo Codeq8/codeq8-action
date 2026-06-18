@@ -21,13 +21,16 @@ runs:
           exit 1
         fi
         codeq8_action_repo_root="$(cd "$GITHUB_ACTION_PATH" && pwd)"
+        machine_path="${PATH}"
         npm_global_prefix="${HOME}/.npm-global"
         playwright_browsers_path="${HOME}/.cache/codeq8/ms-playwright"
         mkdir -p "${npm_global_prefix}/bin"
         mkdir -p "${playwright_browsers_path}"
+        export CODEQ8_MACHINE_PATH="${machine_path}"
         export NPM_CONFIG_PREFIX="${npm_global_prefix}"
         export PLAYWRIGHT_BROWSERS_PATH="${playwright_browsers_path}"
         export PATH="${npm_global_prefix}/bin:${PATH}"
+        echo "CODEQ8_MACHINE_PATH=${machine_path}" >> "$GITHUB_ENV"
         echo "NPM_CONFIG_PREFIX=${npm_global_prefix}" >> "$GITHUB_ENV"
         echo "PLAYWRIGHT_BROWSERS_PATH=${playwright_browsers_path}" >> "$GITHUB_ENV"
         echo "${npm_global_prefix}/bin" >> "$GITHUB_PATH"

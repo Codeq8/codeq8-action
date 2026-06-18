@@ -7,7 +7,6 @@ import test from "node:test";
 import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
 
 const TOOL_VERSIONS = {
-  "@openai/codex": "0.140.0",
   "@codeq8/codeq8": "0.2.1",
   "@playwright/mcp": "0.0.76",
 };
@@ -25,7 +24,7 @@ async function withGlobalToolFixture(fn) {
     const homePath = path.join(tempRoot, "home");
     const stateFile = path.join(tempRoot, "state.json");
     const npmPath = path.join(tempRoot, "npm");
-    for (const binaryName of ["codex", "codeq8", "playwright-mcp"]) {
+    for (const binaryName of ["codeq8", "playwright-mcp"]) {
       await writeExecutable(path.join(binPath, binaryName), "#!/bin/sh\nexit 0\n");
     }
     await fs.mkdir(homePath, { recursive: true });
@@ -68,6 +67,37 @@ test("runner global tools include the pinned Playwright MCP package", async () =
 
   assert.equal(manifest.name, "@playwright/mcp");
   assert.equal(manifest.version, TOOL_VERSIONS["@playwright/mcp"]);
+});
+
+test("runner global tools do not install or pin Codex", async () => {
+  await withGlobalToolFixture(async ({ stateFile, npmPath, env }) => {
+    const npmArgsFile = path.join(path.dirname(npmPath), "npm-args");
+    await writeExecutable(
+      npmPath,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(npmArgsFile)}\nexit 0\n`,
+    );
+    await writeState(stateFile, {
+      ...TOOL_VERSIONS,
+      "@playwright/mcp": "0.0.1",
+    });
+
+    const result = await ensureRunnerGlobalCliTools({
+      stateFile,
+      npmPath,
+      env,
+      cwd: process.cwd(),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(
+      result.tools.some((tool) => tool.packageName === "@openai/codex"),
+      false,
+    );
+    const npmArgs = await fs.readFile(npmArgsFile, "utf8");
+    assert.equal(npmArgs.includes("@openai/codex"), false);
+    const nextState = JSON.parse(await fs.readFile(stateFile, "utf8"));
+    assert.equal(Object.hasOwn(nextState.tool_versions, "@openai/codex"), false);
+  });
 });
 
 test("ensureRunnerGlobalCliTools skips npm install when binaries and pinned versions match", async () => {

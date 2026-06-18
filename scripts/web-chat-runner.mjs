@@ -6405,7 +6405,7 @@ async function buildResumePrompt(args) {
   return (await buildResumePromptPayload(args)).prompt;
 }
 
-async function resolveCodexPath(commandEnv, { fallbackCandidates = null } = {}) {
+async function resolveCodexPath(commandEnv) {
   const explicitSource = Object.hasOwn(normalizeObject(commandEnv), "CODEX_PATH")
     ? commandEnv.CODEX_PATH
     : process.env.CODEX_PATH;
@@ -6414,9 +6414,18 @@ async function resolveCodexPath(commandEnv, { fallbackCandidates = null } = {}) 
     return explicit;
   }
 
+  const machinePath = normalizeText(
+    commandEnv.CODEQ8_MACHINE_PATH ||
+      process.env.CODEQ8_MACHINE_PATH ||
+      commandEnv.PATH ||
+      process.env.PATH,
+  );
   const whichResult = await runProcessCapture("/bin/bash", ["-c", "command -v codex"], {
     cwd: process.cwd(),
-    env: commandEnv,
+    env: {
+      ...commandEnv,
+      PATH: machinePath,
+    },
   });
   if (whichResult.ok) {
     const resolved = normalizeText(whichResult.stdout);
@@ -6425,21 +6434,7 @@ async function resolveCodexPath(commandEnv, { fallbackCandidates = null } = {}) 
     }
   }
 
-  const homeDirectory = normalizeText(commandEnv.HOME || process.env.HOME || os.homedir());
-  const candidates = Array.isArray(fallbackCandidates)
-    ? fallbackCandidates
-    : [
-        homeDirectory ? path.join(homeDirectory, ".local", "bin", "codex") : "",
-        "/opt/homebrew/bin/codex",
-      ];
-  for (const candidate of candidates) {
-    const normalized = normalizeText(candidate);
-    if (normalized && (await isExecutableFile(normalized))) {
-      return normalized;
-    }
-  }
-
-  throw new Error("codex executable was not found. Install codex or set CODEX_PATH.");
+  throw new Error("codex executable was not found on the runner machine PATH. Install codex on the runner or set CODEX_PATH.");
 }
 
 async function listCodexSessionEntries(codexHome) {

@@ -10,12 +10,6 @@ import { pathToFileURL } from "node:url";
 
 const GLOBAL_CLI_TOOLS = Object.freeze([
   {
-    label: "codex",
-    packageName: "@openai/codex",
-    binaryName: "codex",
-    desiredVersionPath: "codex-cli/package.json",
-  },
-  {
     label: "codeq8",
     packageName: "@codeq8/codeq8",
     binaryName: "codeq8",

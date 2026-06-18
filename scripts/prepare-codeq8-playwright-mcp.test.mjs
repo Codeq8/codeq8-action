@@ -210,6 +210,8 @@ test("public action prepares global tools before Playwright MCP browser payload"
   assert.notEqual(playwrightPrepIndex, -1);
   assert.equal(pluginInstallIndex < globalToolsIndex, true);
   assert.equal(globalToolsIndex < playwrightPrepIndex, true);
+  assert.match(actionSource, /machine_path="\$\{PATH\}"/);
+  assert.match(actionSource, /CODEQ8_MACHINE_PATH=\$\{machine_path\}/);
   assert.match(actionSource, /NPM_CONFIG_PREFIX=\$\{npm_global_prefix\}/);
   assert.match(actionSource, /PLAYWRIGHT_BROWSERS_PATH=\$\{playwright_browsers_path\}/);
 });

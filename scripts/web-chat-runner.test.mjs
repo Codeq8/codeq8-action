@@ -518,33 +518,29 @@ test("runCodex applies dedicated Node options only to the Codex process env", as
   assert.equal(commandEnv.NODE_OPTIONS, "");
 });
 
-test("resolveCodexPath honors the prepared PATH before stale fallback binaries", async (t) => {
+test("resolveCodexPath uses the runner machine PATH before Codeq8-managed npm tools", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-path-"));
-  const freshBinPath = path.join(workspacePath, "fresh-bin");
-  const staleBinPath = path.join(workspacePath, "stale-bin");
-  const freshCodexPath = path.join(freshBinPath, "codex");
-  const staleCodexPath = path.join(staleBinPath, "codex");
+  const machineBinPath = path.join(workspacePath, "machine-bin");
+  const managedBinPath = path.join(workspacePath, "managed-bin");
+  const machineCodexPath = path.join(machineBinPath, "codex");
+  const managedCodexPath = path.join(managedBinPath, "codex");
   t.after(async () => {
     await fs.rm(workspacePath, { recursive: true, force: true });
   });
 
-  await fs.mkdir(freshBinPath, { recursive: true });
-  await fs.mkdir(staleBinPath, { recursive: true });
-  await fs.writeFile(freshCodexPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  await fs.writeFile(staleCodexPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.mkdir(machineBinPath, { recursive: true });
+  await fs.mkdir(managedBinPath, { recursive: true });
+  await fs.writeFile(machineCodexPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(managedCodexPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
-  const resolved = await resolveCodexPath(
-    {
-      ...process.env,
-      CODEX_PATH: "",
-      PATH: `${freshBinPath}:${process.env.PATH || ""}`,
-    },
-    {
-      fallbackCandidates: [staleCodexPath],
-    },
-  );
+  const resolved = await resolveCodexPath({
+    ...process.env,
+    CODEX_PATH: "",
+    CODEQ8_MACHINE_PATH: machineBinPath,
+    PATH: `${managedBinPath}:${machineBinPath}:${process.env.PATH || ""}`,
+  });
 
-  assert.equal(resolved, freshCodexPath);
+  assert.equal(resolved, machineCodexPath);
 });
 
 test("runCodex allows Git metadata writes without approval prompts", async (t) => {
