@@ -361,6 +361,43 @@ async function buildInstallTargets({
   return targets;
 }
 
+async function removeStaleManagedTools({
+  tools,
+  npmPath,
+  env = process.env,
+  cwd = process.cwd(),
+  logger = () => {},
+}) {
+  const packageNames = [
+    ...new Set(
+      tools
+        .map((tool) => normalizeText(tool.packageName))
+        .filter(Boolean),
+    ),
+  ];
+  if (packageNames.length === 0) {
+    return;
+  }
+
+  const uninstall = await runProcessCapture(
+    npmPath,
+    ["uninstall", "--global", "--no-audit", "--no-fund", ...packageNames],
+    {
+      cwd,
+      env: {
+        ...env,
+        npm_config_update_notifier: "false",
+      },
+    },
+  );
+  if (!uninstall.ok) {
+    logger(
+      "Stale runner global CLI uninstall failed; continuing with install",
+      normalizeText(uninstall.stderr) || normalizeText(uninstall.stdout) || uninstall.reason,
+    );
+  }
+}
+
 async function resolveToolSnapshot({ env = process.env, cwd = process.cwd() } = {}) {
   const snapshot = [];
   const managedNpmBinPath = resolveManagedNpmBinPath(env);
@@ -448,6 +485,14 @@ export async function ensureRunnerGlobalCliTools({
     `force=${force ? "yes" : "no"} missing=${missingTools.map((tool) => tool.label).join(",") || "none"} version_mismatch=${versionMismatchTools.map((tool) => tool.label).join(",") || "none"}`,
   );
 
+  await removeStaleManagedTools({
+    tools: [...missingTools, ...versionMismatchTools],
+    npmPath: resolvedNpmPath,
+    env,
+    cwd,
+    logger,
+  });
+
   const installTargets = await buildInstallTargets({
     toolSnapshot,
     npmPath: resolvedNpmPath,
@@ -484,10 +529,19 @@ export async function ensureRunnerGlobalCliTools({
   const nextSnapshot = await resolveToolSnapshot({ env, cwd });
   const stillMissing = nextSnapshot.filter((tool) => !tool.binaryPath);
   if (stillMissing.length > 0) {
+    const missingDetails = stillMissing
+      .map((tool) => {
+        const discovered = normalizeText(tool.discoveredBinaryPath) || "<none>";
+        const capabilityFailure = normalizeText(tool.capabilityFailure);
+        return `${tool.binaryName} discovered=${discovered}${
+          capabilityFailure ? ` capability=${capabilityFailure}` : ""
+        }`;
+      })
+      .join("; ");
     throw new Error(
       `Global CLI refresh completed but these binaries are still missing: ${stillMissing
         .map((tool) => tool.binaryName)
-        .join(", ")}.`,
+        .join(", ")}.${missingDetails ? ` ${missingDetails}` : ""}`,
     );
   }
 

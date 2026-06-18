@@ -7,7 +7,7 @@ import test from "node:test";
 import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
 
 const TOOL_VERSIONS = {
-  "@codeq8/codeq8": "0.2.5",
+  "@codeq8/codeq8": "0.2.6",
   "@playwright/mcp": "0.0.76",
 };
 
@@ -177,6 +177,7 @@ test("ensureRunnerGlobalCliTools refreshes when managed codeq8 lacks threads sup
     const codeq8Tool = result.tools.find((tool) => tool.packageName === "@codeq8/codeq8");
     assert.equal(codeq8Tool?.binaryPath, path.join(binPath, "codeq8"));
     const npmArgs = await fs.readFile(npmArgsFile, "utf8");
+    assert.match(npmArgs, /uninstall/);
     assert.match(npmArgs, /--global/);
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
