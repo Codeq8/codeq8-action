@@ -17,6 +17,11 @@ made available during Codeq8 chat runs.
 - Treat plugin capabilities as availability signals, not permission grants.
 - Keep public action `main`, the private pinned public action SHA, production,
   and public `v1` as separate rollout checkpoints.
+- Codeq8-owned skills or skill-maintenance behavior meant to affect normal
+  Codeq8 runs across repositories must live in the Codeq8 plugin installed by
+  public `Codeq8/codeq8-action`. A private app-repo `.codex/skills` change can
+  guide internal development, but it is not a shipped runner capability for
+  customer repositories.
 
 ## Current Capability
 

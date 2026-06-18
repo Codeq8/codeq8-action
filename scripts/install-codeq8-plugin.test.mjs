@@ -23,6 +23,28 @@ const CODEQ8_PLUGIN_CAPABILITIES = [
   CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY,
 ];
 
+test("Codeq8 plugin skill documents public runtime ownership for bundled skills", async () => {
+  const skillSource = await fs.readFile(
+    path.join(
+      process.cwd(),
+      CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH,
+      "skills",
+      "codeq8-plugin",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+
+  assert.match(
+    skillSource,
+    /Codeq8-owned skills or skill-maintenance behavior meant to affect normal\s+Codeq8 runs across repositories must live in the Codeq8 plugin/,
+  );
+  assert.match(
+    skillSource,
+    /A private app-repo `\.codex\/skills` change can\s+guide internal development, but it is not a shipped runner capability/,
+  );
+});
+
 async function pathExists(targetPath) {
   try {
     await fs.access(targetPath);
