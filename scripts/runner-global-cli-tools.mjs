@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -264,6 +265,15 @@ async function writeState(stateFilePath, payload) {
   await fs.writeFile(stateFilePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+async function readJsonFile(filePath) {
+  const raw = await fs.readFile(filePath, "utf8");
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Expected JSON object in ${filePath}`);
+  }
+  return parsed;
+}
+
 async function readDesiredToolVersion(tool, cwd = process.cwd()) {
   const relativePath = normalizeText(tool?.desiredVersionPath);
   if (!relativePath) {
@@ -271,12 +281,68 @@ async function readDesiredToolVersion(tool, cwd = process.cwd()) {
   }
   try {
     const packageJsonPath = path.resolve(cwd, relativePath);
-    const raw = await fs.readFile(packageJsonPath, "utf8");
-    const parsed = JSON.parse(raw);
+    const parsed = await readJsonFile(packageJsonPath);
     return normalizeText(parsed?.version);
   } catch {
     return "";
   }
+}
+
+async function listFingerprintFiles(rootPath, relativePath = "") {
+  const absolutePath = path.join(rootPath, relativePath);
+  let stats;
+  try {
+    stats = await fs.stat(absolutePath);
+  } catch {
+    return [];
+  }
+
+  if (stats.isFile()) {
+    return [relativePath];
+  }
+  if (!stats.isDirectory()) {
+    return [];
+  }
+
+  const entries = await fs.readdir(absolutePath, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (entry.name === "node_modules" || entry.name === "dist" || entry.name.startsWith(".")) {
+      continue;
+    }
+    const childRelativePath = path.join(relativePath, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await listFingerprintFiles(rootPath, childRelativePath)));
+      continue;
+    }
+    if (entry.isFile()) {
+      files.push(childRelativePath);
+    }
+  }
+  return files.sort();
+}
+
+async function readLocalPackageFingerprint(tool, cwd = process.cwd()) {
+  const localPackagePath = normalizeText(tool?.localPackagePath);
+  if (!localPackagePath) {
+    return "";
+  }
+
+  const packagePath = path.resolve(cwd, localPackagePath);
+  const files = await listFingerprintFiles(packagePath);
+  if (files.length === 0) {
+    return "";
+  }
+
+  const hash = crypto.createHash("sha256");
+  for (const relativePath of files) {
+    const absolutePath = path.join(packagePath, relativePath);
+    hash.update(relativePath);
+    hash.update("\0");
+    hash.update(await fs.readFile(absolutePath));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
 }
 
 async function prepareLocalPackageInstallTarget({
@@ -333,6 +399,62 @@ async function prepareLocalPackageInstallTarget({
   }
 
   return packagePath;
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+async function resolveLocalPackageBinarySourcePath({ tool, cwd = process.cwd() }) {
+  const localPackagePath = normalizeText(tool?.localPackagePath);
+  const binaryName = normalizeText(tool?.binaryName);
+  if (!localPackagePath || !binaryName) {
+    return "";
+  }
+
+  const packagePath = path.resolve(cwd, localPackagePath);
+  const packageJson = await readJsonFile(path.join(packagePath, "package.json"));
+  const bin = packageJson.bin;
+  const relativeBinPath =
+    typeof bin === "string"
+      ? bin
+      : bin && typeof bin === "object" && !Array.isArray(bin)
+        ? normalizeText(bin[binaryName])
+        : "";
+  if (!relativeBinPath) {
+    return "";
+  }
+
+  const sourcePath = path.resolve(packagePath, relativeBinPath);
+  if (!(await isExecutableFile(sourcePath))) {
+    throw new Error(`Local package binary is not executable: ${sourcePath}`);
+  }
+  return sourcePath;
+}
+
+async function repairLocalPackageBinaryShims({ env = process.env, cwd = process.cwd() } = {}) {
+  const managedNpmBinPath = resolveManagedNpmBinPath(env);
+  if (!managedNpmBinPath) {
+    return;
+  }
+
+  await ensureDirectory(managedNpmBinPath);
+  for (const tool of GLOBAL_CLI_TOOLS) {
+    if (!tool.localPackagePath || !tool.requireManagedPrefix) {
+      continue;
+    }
+
+    const sourcePath = await resolveLocalPackageBinarySourcePath({ tool, cwd });
+    if (!sourcePath) {
+      continue;
+    }
+
+    const targetPath = path.join(managedNpmBinPath, tool.binaryName);
+    const shimSource = `#!/bin/sh\nexec node ${shellSingleQuote(sourcePath)} "$@"\n`;
+    await fs.rm(targetPath, { force: true });
+    await fs.writeFile(targetPath, shimSource, "utf8");
+    await fs.chmod(targetPath, 0o755);
+  }
 }
 
 async function buildInstallTargets({
@@ -427,6 +549,7 @@ async function resolveToolSnapshot({ env = process.env, cwd = process.cwd() } = 
     snapshot.push({
       ...tool,
       desiredVersion: await readDesiredToolVersion(tool, cwd),
+      localPackageFingerprint: await readLocalPackageFingerprint(tool, cwd),
       binaryPath,
       discoveredBinaryPath,
       managedNpmBinPath,
@@ -462,9 +585,29 @@ export async function ensureRunnerGlobalCliTools({
     }
     return normalizeText(previousToolVersions[tool.packageName]) !== normalizeText(tool.desiredVersion);
   });
+  const previousLocalPackageFingerprints =
+    previousState.local_package_fingerprints &&
+    typeof previousState.local_package_fingerprints === "object" &&
+    !Array.isArray(previousState.local_package_fingerprints)
+      ? previousState.local_package_fingerprints
+      : {};
+  const localPackageMismatchTools = toolSnapshot.filter((tool) => {
+    if (!normalizeText(tool.localPackageFingerprint)) {
+      return false;
+    }
+    return (
+      normalizeText(previousLocalPackageFingerprints[tool.packageName]) !==
+      normalizeText(tool.localPackageFingerprint)
+    );
+  });
   const lastSuccessAt = parsePositiveInteger(previousState.last_success_at, 0);
 
-  if (!force && missingTools.length === 0 && versionMismatchTools.length === 0) {
+  if (
+    !force &&
+    missingTools.length === 0 &&
+    versionMismatchTools.length === 0 &&
+    localPackageMismatchTools.length === 0
+  ) {
     return {
       ok: true,
       refreshed: false,
@@ -482,7 +625,7 @@ export async function ensureRunnerGlobalCliTools({
   });
   logger(
     "Refreshing runner global CLI tools",
-    `force=${force ? "yes" : "no"} missing=${missingTools.map((tool) => tool.label).join(",") || "none"} version_mismatch=${versionMismatchTools.map((tool) => tool.label).join(",") || "none"}`,
+    `force=${force ? "yes" : "no"} missing=${missingTools.map((tool) => tool.label).join(",") || "none"} version_mismatch=${versionMismatchTools.map((tool) => tool.label).join(",") || "none"} local_package_mismatch=${localPackageMismatchTools.map((tool) => tool.label).join(",") || "none"}`,
   );
 
   await removeStaleManagedTools({
@@ -526,6 +669,8 @@ export async function ensureRunnerGlobalCliTools({
     );
   }
 
+  await repairLocalPackageBinaryShims({ env, cwd });
+
   const nextSnapshot = await resolveToolSnapshot({ env, cwd });
   const stillMissing = nextSnapshot.filter((tool) => !tool.binaryPath);
   if (stillMissing.length > 0) {
@@ -553,12 +698,18 @@ export async function ensureRunnerGlobalCliTools({
         .map((tool) => [tool.packageName, normalizeText(tool.desiredVersion)])
         .filter((entry) => entry[1]),
     ),
+    local_package_fingerprints: Object.fromEntries(
+      nextSnapshot
+        .map((tool) => [tool.packageName, normalizeText(tool.localPackageFingerprint)])
+        .filter((entry) => entry[1]),
+    ),
     tools: nextSnapshot.map((tool) => ({
       label: tool.label,
       package_name: tool.packageName,
       binary_name: tool.binaryName,
       binary_path: tool.binaryPath,
       desired_version: normalizeText(tool.desiredVersion),
+      local_package_fingerprint: normalizeText(tool.localPackageFingerprint),
     })),
   });
 
