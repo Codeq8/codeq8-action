@@ -77,6 +77,8 @@ runs:
           --npm-path "$npm_bin"
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/install-codeq8-plugin.mjs" \
           --repo-root "$codeq8_action_repo_root"
+        "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/prepare-codeq8-python-tools.mjs" \
+          --repo-root "$codeq8_action_repo_root"
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/runner-global-cli-tools.mjs"
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/prepare-codeq8-playwright-mcp.mjs" \
           --repo-root "$codeq8_action_repo_root"
