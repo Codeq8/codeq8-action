@@ -55,6 +55,7 @@ import {
   readWebChatCodexSessionState,
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
+  resolveCodexPath,
   runCodex,
   sessionContainsWebChatRunMarker,
   shouldContinueAfterCodexSessionPersistenceFailure,
@@ -515,6 +516,35 @@ test("runCodex applies dedicated Node options only to the Codex process env", as
   assert.equal(result.output, "env ok");
   assert.equal(await fs.readFile(envOutputPath, "utf8"), "--no-warnings");
   assert.equal(commandEnv.NODE_OPTIONS, "");
+});
+
+test("resolveCodexPath honors the prepared PATH before stale fallback binaries", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-path-"));
+  const freshBinPath = path.join(workspacePath, "fresh-bin");
+  const staleBinPath = path.join(workspacePath, "stale-bin");
+  const freshCodexPath = path.join(freshBinPath, "codex");
+  const staleCodexPath = path.join(staleBinPath, "codex");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.mkdir(freshBinPath, { recursive: true });
+  await fs.mkdir(staleBinPath, { recursive: true });
+  await fs.writeFile(freshCodexPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(staleCodexPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  const resolved = await resolveCodexPath(
+    {
+      ...process.env,
+      CODEX_PATH: "",
+      PATH: `${freshBinPath}:${process.env.PATH || ""}`,
+    },
+    {
+      fallbackCandidates: [staleCodexPath],
+    },
+  );
+
+  assert.equal(resolved, freshCodexPath);
 });
 
 test("runCodex allows Git metadata writes without approval prompts", async (t) => {

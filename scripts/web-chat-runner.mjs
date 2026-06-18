@@ -6405,25 +6405,16 @@ async function buildResumePrompt(args) {
   return (await buildResumePromptPayload(args)).prompt;
 }
 
-async function resolveCodexPath(commandEnv) {
-  const explicit = normalizeText(commandEnv.CODEX_PATH || process.env.CODEX_PATH);
+async function resolveCodexPath(commandEnv, { fallbackCandidates = null } = {}) {
+  const explicitSource = Object.hasOwn(normalizeObject(commandEnv), "CODEX_PATH")
+    ? commandEnv.CODEX_PATH
+    : process.env.CODEX_PATH;
+  const explicit = normalizeText(explicitSource);
   if (explicit && (await isExecutableFile(explicit))) {
     return explicit;
   }
 
-  const homeDirectory = normalizeText(process.env.HOME || os.homedir());
-  const candidates = [
-    homeDirectory ? path.join(homeDirectory, ".local", "bin", "codex") : "",
-    "/opt/homebrew/bin/codex",
-  ];
-  for (const candidate of candidates) {
-    const normalized = normalizeText(candidate);
-    if (normalized && (await isExecutableFile(normalized))) {
-      return normalized;
-    }
-  }
-
-  const whichResult = await runProcessCapture("/bin/bash", ["-lc", "command -v codex"], {
+  const whichResult = await runProcessCapture("/bin/bash", ["-c", "command -v codex"], {
     cwd: process.cwd(),
     env: commandEnv,
   });
@@ -6431,6 +6422,20 @@ async function resolveCodexPath(commandEnv) {
     const resolved = normalizeText(whichResult.stdout);
     if (resolved && (await isExecutableFile(resolved))) {
       return resolved;
+    }
+  }
+
+  const homeDirectory = normalizeText(commandEnv.HOME || process.env.HOME || os.homedir());
+  const candidates = Array.isArray(fallbackCandidates)
+    ? fallbackCandidates
+    : [
+        homeDirectory ? path.join(homeDirectory, ".local", "bin", "codex") : "",
+        "/opt/homebrew/bin/codex",
+      ];
+  for (const candidate of candidates) {
+    const normalized = normalizeText(candidate);
+    if (normalized && (await isExecutableFile(normalized))) {
+      return normalized;
     }
   }
 
@@ -11494,6 +11499,7 @@ export {
   requestWebChatRunnerRuntimeManifest,
   readBranchDivergenceCounts,
   resolveEffectiveWriteBranch,
+  resolveCodexPath,
   resolveGitIdentityFromGitHubUserToken,
   resolvePreferredGitIdentity,
   resolveGitHubCliPath,
