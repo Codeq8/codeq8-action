@@ -307,11 +307,16 @@ test("ensureRunnerGlobalCliTools repairs local package bins when npm global inst
     await fs.mkdir(homePath, { recursive: true });
     await writeMinimalActionPackages(cwd);
     await writeExecutable(
+      path.join(managedBinPath, "codeq8"),
+      "#!/bin/sh\necho 'codeq8: Unknown command: threads' >&2\nexit 1\n",
+    );
+    await writeExecutable(
       npmPath,
       [
         "#!/bin/sh",
         `printf '%s\\n' "$@" >> ${JSON.stringify(npmArgsFile)}`,
         "if [ \"$1\" = \"install\" ] && [ \"$2\" = \"--global\" ]; then",
+        `  if [ -e ${JSON.stringify(path.join(managedBinPath, "codeq8"))} ]; then echo stale codeq8 was not removed >&2; exit 1; fi`,
         `  mkdir -p ${JSON.stringify(managedBinPath)}`,
         `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(managedBinPath, "playwright-mcp"))}`,
         `  chmod +x ${JSON.stringify(path.join(managedBinPath, "playwright-mcp"))}`,
@@ -410,7 +415,16 @@ test("ensureRunnerGlobalCliTools skips npm install when binaries and pinned vers
     const npmInvocationFile = path.join(path.dirname(npmPath), "npm-invoked");
     await writeExecutable(
       npmPath,
-      `#!/bin/sh\ntouch ${JSON.stringify(npmInvocationFile)}\nexit 0\n`,
+      [
+        "#!/bin/sh",
+        `touch ${JSON.stringify(npmInvocationFile)}`,
+        "if [ \"$1\" = \"install\" ] && [ \"$2\" = \"--global\" ]; then",
+        `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(path.dirname(npmPath), "bin", "playwright-mcp"))}`,
+        `  chmod +x ${JSON.stringify(path.join(path.dirname(npmPath), "bin", "playwright-mcp"))}`,
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
     );
     await writeState(stateFile);
 

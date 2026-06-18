@@ -582,6 +582,24 @@ async function removeStaleManagedTools({
   }
 }
 
+async function removeManagedBinaryFiles({ tools, env = process.env } = {}) {
+  const managedNpmBinPath = resolveManagedNpmBinPath(env);
+  if (!managedNpmBinPath) {
+    return;
+  }
+
+  const binaryNames = [
+    ...new Set(
+      tools
+        .map((tool) => normalizeText(tool.binaryName))
+        .filter(Boolean),
+    ),
+  ];
+  for (const binaryName of binaryNames) {
+    await fs.rm(path.join(managedNpmBinPath, binaryName), { force: true });
+  }
+}
+
 async function resolveToolSnapshot({ env = process.env, cwd = process.cwd() } = {}) {
   const snapshot = [];
   const managedNpmBinPath = resolveManagedNpmBinPath(env);
@@ -691,11 +709,15 @@ export async function ensureRunnerGlobalCliTools({
   );
 
   await removeStaleManagedTools({
-    tools: [...missingTools, ...versionMismatchTools],
+    tools: [...missingTools, ...versionMismatchTools, ...localPackageMismatchTools],
     npmPath: resolvedNpmPath,
     env,
     cwd,
     logger,
+  });
+  await removeManagedBinaryFiles({
+    tools: [...missingTools, ...versionMismatchTools, ...localPackageMismatchTools],
+    env,
   });
 
   const installTargets = await buildInstallTargets({

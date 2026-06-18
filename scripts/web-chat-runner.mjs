@@ -8654,6 +8654,7 @@ async function runCodexAppServer({
     let nextRequestId = 1;
     let appServerTraceCount = 0;
     let hiddenTitleTurnCompletion = null;
+    const ignoredHiddenTitleTurnIds = new Set();
     const appServerNotificationCounts = new Map();
     const appServerRequestCounts = new Map();
     const actionsReasoningTranscript = createAppServerActionsReasoningTranscript();
@@ -8927,6 +8928,7 @@ async function runCodexAppServer({
         activeTurnId = hiddenTitleTurnId || activeTurnId;
         const completion = await completionPromise;
         if (completion?.timeout && (hiddenTitleTurnId || activeTurnId)) {
+          ignoredHiddenTitleTurnIds.add(hiddenTitleTurnId || activeTurnId);
           try {
             await sendRequest("turn/interrupt", {
               threadId: appServerThreadId,
@@ -8954,6 +8956,9 @@ async function runCodexAppServer({
           details: { fallback_used: true },
         });
       } finally {
+        if (hiddenTitleTurnId) {
+          ignoredHiddenTitleTurnIds.add(hiddenTitleTurnId);
+        }
         activeTurnPurpose = "main";
         activeTurnId = "";
         resetAgentMessageCapture();
@@ -9102,6 +9107,16 @@ async function runCodexAppServer({
     const handleNotification = (method, params) => {
       const normalizedMethod = normalizeAppServerMethod(method);
       incrementCount(appServerNotificationCounts, normalizedMethod);
+      const notificationTurnId =
+        normalizedMethod.startsWith("turn/") ? extractAppServerTurnId(params) : "";
+      if (
+        normalizedMethod === "turn/completed" &&
+        notificationTurnId &&
+        ignoredHiddenTitleTurnIds.has(notificationTurnId)
+      ) {
+        ignoredHiddenTitleTurnIds.delete(notificationTurnId);
+        return;
+      }
       const hiddenTitleTurnActive = activeTurnPurpose === "hidden_thread_title";
       if (!hiddenTitleTurnActive) {
         actionsReasoningTranscript.recordNotification(normalizedMethod, params);
