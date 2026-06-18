@@ -462,14 +462,19 @@ async function resolveLocalPackageBinarySourcePath({ tool, cwd = process.cwd() }
   return sourcePath;
 }
 
-async function repairLocalPackageBinaryShims({ env = process.env, cwd = process.cwd() } = {}) {
+async function repairLocalPackageBinaryShims({
+  tools = GLOBAL_CLI_TOOLS,
+  force = false,
+  env = process.env,
+  cwd = process.cwd(),
+} = {}) {
   const managedNpmBinPath = resolveManagedNpmBinPath(env);
   if (!managedNpmBinPath) {
     return;
   }
 
   await ensureDirectory(managedNpmBinPath);
-  for (const tool of GLOBAL_CLI_TOOLS) {
+  for (const tool of tools) {
     if (!tool.localPackagePath || !tool.requireManagedPrefix) {
       continue;
     }
@@ -480,14 +485,16 @@ async function repairLocalPackageBinaryShims({ env = process.env, cwd = process.
     }
 
     const targetPath = path.join(managedNpmBinPath, tool.binaryName);
-    const existingCapability = await checkToolCapability({
-      tool,
-      binaryPath: targetPath,
-      env,
-      cwd,
-    });
-    if (existingCapability.ok) {
-      continue;
+    if (!force) {
+      const existingCapability = await checkToolCapability({
+        tool,
+        binaryPath: targetPath,
+        env,
+        cwd,
+      });
+      if (existingCapability.ok) {
+        continue;
+      }
     }
 
     const shimSource = `#!/bin/sh\nexec node ${shellSingleQuote(sourcePath)} "$@"\n`;
@@ -755,8 +762,19 @@ export async function ensureRunnerGlobalCliTools({
 
   await repairLocalPackageBinaryShims({ env, cwd });
 
-  const nextSnapshot = await resolveToolSnapshot({ env, cwd });
-  const stillMissing = nextSnapshot.filter((tool) => !tool.binaryPath);
+  let nextSnapshot = await resolveToolSnapshot({ env, cwd });
+  let stillMissing = nextSnapshot.filter((tool) => !tool.binaryPath);
+  const missingLocalPackageTools = stillMissing.filter((tool) => tool.localPackagePath);
+  if (missingLocalPackageTools.length > 0) {
+    await repairLocalPackageBinaryShims({
+      tools: missingLocalPackageTools,
+      force: true,
+      env,
+      cwd,
+    });
+    nextSnapshot = await resolveToolSnapshot({ env, cwd });
+    stillMissing = nextSnapshot.filter((tool) => !tool.binaryPath);
+  }
   if (stillMissing.length > 0) {
     const missingDetails = stillMissing
       .map((tool) => {
