@@ -225,6 +225,36 @@ function isPathInsideDirectory(filePath, directoryPath) {
   return Boolean(relativePath) && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
 }
 
+function isPathInsideOrEqualDirectory(filePath, directoryPath) {
+  const normalizedFilePath = normalizeText(filePath);
+  const normalizedDirectoryPath = normalizeText(directoryPath);
+  if (!normalizedFilePath || !normalizedDirectoryPath) {
+    return false;
+  }
+  const relativePath = path.relative(
+    path.resolve(normalizedDirectoryPath),
+    path.resolve(normalizedFilePath),
+  );
+  return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+function resolveManagedPackagePath(packageName, managedPrefix) {
+  const normalizedPackageName = normalizeText(packageName);
+  const normalizedManagedPrefix = normalizeText(managedPrefix);
+  if (!normalizedPackageName || !normalizedManagedPrefix) {
+    return "";
+  }
+  const nodeModulesPath = path.resolve(normalizedManagedPrefix, "lib", "node_modules");
+  if (normalizedPackageName.startsWith("@")) {
+    const [scope, name] = normalizedPackageName.split("/");
+    if (!scope || !name) {
+      return "";
+    }
+    return path.join(nodeModulesPath, scope, name);
+  }
+  return path.join(nodeModulesPath, normalizedPackageName);
+}
+
 async function checkToolCapability({
   tool,
   binaryPath,
@@ -450,6 +480,16 @@ async function repairLocalPackageBinaryShims({ env = process.env, cwd = process.
     }
 
     const targetPath = path.join(managedNpmBinPath, tool.binaryName);
+    const existingCapability = await checkToolCapability({
+      tool,
+      binaryPath: targetPath,
+      env,
+      cwd,
+    });
+    if (existingCapability.ok) {
+      continue;
+    }
+
     const shimSource = `#!/bin/sh\nexec node ${shellSingleQuote(sourcePath)} "$@"\n`;
     await fs.rm(targetPath, { force: true });
     await fs.writeFile(targetPath, shimSource, "utf8");
@@ -490,13 +530,13 @@ async function removeStaleManagedTools({
   cwd = process.cwd(),
   logger = () => {},
 }) {
-  const packageNames = [
-    ...new Set(
-      tools
-        .map((tool) => normalizeText(tool.packageName))
-        .filter(Boolean),
-    ),
-  ];
+  const staleTools = tools
+    .map((tool) => ({
+      packageName: normalizeText(tool.packageName),
+      binaryName: normalizeText(tool.binaryName),
+    }))
+    .filter((tool) => tool.packageName || tool.binaryName);
+  const packageNames = [...new Set(staleTools.map((tool) => tool.packageName).filter(Boolean))];
   if (packageNames.length === 0) {
     return;
   }
@@ -517,6 +557,28 @@ async function removeStaleManagedTools({
       "Stale runner global CLI uninstall failed; continuing with install",
       normalizeText(uninstall.stderr) || normalizeText(uninstall.stdout) || uninstall.reason,
     );
+  }
+
+  const managedPrefix = normalizeText(env.NPM_CONFIG_PREFIX);
+  if (!managedPrefix) {
+    return;
+  }
+  const managedBinPath = resolveManagedNpmBinPath(env);
+  const managedNodeModulesPath = path.resolve(managedPrefix, "lib", "node_modules");
+  for (const tool of staleTools) {
+    const packagePath = resolveManagedPackagePath(tool.packageName, managedPrefix);
+    const binaryPath =
+      tool.binaryName && managedBinPath ? path.join(managedBinPath, tool.binaryName) : "";
+    const removalTargets = [
+      { targetPath: packagePath, rootPath: managedNodeModulesPath },
+      { targetPath: binaryPath, rootPath: managedBinPath },
+    ];
+    for (const { targetPath, rootPath } of removalTargets) {
+      if (!targetPath || !rootPath || !isPathInsideOrEqualDirectory(targetPath, rootPath)) {
+        continue;
+      }
+      await fs.rm(targetPath, { recursive: true, force: true });
+    }
   }
 }
 

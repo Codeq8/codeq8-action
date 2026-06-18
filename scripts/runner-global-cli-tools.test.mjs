@@ -228,6 +228,16 @@ test("ensureRunnerGlobalCliTools refreshes when managed codeq8 lacks threads sup
     const stateFile = path.join(tempRoot, "state.json");
     const npmPath = path.join(tempRoot, "npm");
     const npmArgsFile = path.join(tempRoot, "npm-args");
+    const stalePackageMarker = path.join(
+      tempRoot,
+      "lib",
+      "node_modules",
+      "@codeq8",
+      "codeq8",
+      "stale.txt",
+    );
+    await fs.mkdir(path.dirname(stalePackageMarker), { recursive: true });
+    await fs.writeFile(stalePackageMarker, "stale", "utf8");
     await fs.mkdir(homePath, { recursive: true });
     await writeExecutable(
       path.join(binPath, "codeq8"),
@@ -249,6 +259,7 @@ test("ensureRunnerGlobalCliTools refreshes when managed codeq8 lacks threads sup
         `printf '%s\\n' "$@" >> ${JSON.stringify(npmArgsFile)}`,
         "if [ \"$1\" = \"install\" ] && [ \"$2\" = \"--global\" ]; then",
         `  mkdir -p ${JSON.stringify(binPath)}`,
+        `  if [ -e ${JSON.stringify(path.join(binPath, "codeq8"))} ]; then exit 0; fi`,
         `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(binPath, "codeq8"))}`,
         `  chmod +x ${JSON.stringify(path.join(binPath, "codeq8"))}`,
         "fi",
@@ -277,6 +288,7 @@ test("ensureRunnerGlobalCliTools refreshes when managed codeq8 lacks threads sup
     const npmArgs = await fs.readFile(npmArgsFile, "utf8");
     assert.match(npmArgs, /uninstall/);
     assert.match(npmArgs, /--global/);
+    await assert.rejects(fs.access(stalePackageMarker));
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
@@ -355,7 +367,19 @@ test("runner global tools do not install or pin Codex", async () => {
     const npmArgsFile = path.join(path.dirname(npmPath), "npm-args");
     await writeExecutable(
       npmPath,
-      `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(npmArgsFile)}\nexit 0\n`,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$@" > ${JSON.stringify(npmArgsFile)}`,
+        "if [ \"$1\" = \"install\" ] && [ \"$2\" = \"--global\" ]; then",
+        `  mkdir -p ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin"))}`,
+        `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin", "codeq8"))}`,
+        `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin", "playwright-mcp"))}`,
+        `  chmod +x ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin", "codeq8"))}`,
+        `  chmod +x ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin", "playwright-mcp"))}`,
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
     );
     await writeState(stateFile, {
       ...TOOL_VERSIONS,
@@ -413,7 +437,19 @@ test("ensureRunnerGlobalCliTools refreshes when Playwright MCP pinned version ch
     const npmInvocationFile = path.join(path.dirname(npmPath), "npm-invoked");
     await writeExecutable(
       npmPath,
-      `#!/bin/sh\ntouch ${JSON.stringify(npmInvocationFile)}\nexit 0\n`,
+      [
+        "#!/bin/sh",
+        `touch ${JSON.stringify(npmInvocationFile)}`,
+        "if [ \"$1\" = \"install\" ] && [ \"$2\" = \"--global\" ]; then",
+        `  mkdir -p ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin"))}`,
+        `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin", "codeq8"))}`,
+        `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin", "playwright-mcp"))}`,
+        `  chmod +x ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin", "codeq8"))}`,
+        `  chmod +x ${JSON.stringify(path.join(env.NPM_CONFIG_PREFIX, "bin", "playwright-mcp"))}`,
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
     );
     await writeState(stateFile, {
       ...TOOL_VERSIONS,
