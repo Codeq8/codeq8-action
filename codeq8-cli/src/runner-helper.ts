@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -38,7 +37,9 @@ import {
   writeCompactThreadList,
   writeJson,
 } from "./runner-helper-support.js";
-function buildThreadInspectSnapshot(payload) {
+import type { FileCommandOptions, JsonRecord, RunnerCliOptions, StdoutLike, ThreadCommandOptions } from "./runner-helper-support.js";
+
+function buildThreadInspectSnapshot(payload: JsonRecord): JsonRecord {
   const thread = payloadObject(payload.thread);
   const branchContext = readThreadBranchContext(thread);
   const pullRequest = readThreadPullRequest(thread);
@@ -177,7 +178,7 @@ function buildThreadInspectSnapshot(payload) {
   };
 }
 
-function writeThreadInspect(stdout, snapshot) {
+function writeThreadInspect(stdout: StdoutLike, snapshot: JsonRecord): void {
   const thread = payloadObject(snapshot.thread);
   const run = payloadObject(snapshot.run);
   const checks = payloadObject(snapshot.checks);
@@ -259,7 +260,8 @@ function writeThreadInspect(stdout, snapshot) {
   if (recentMessages.length === 0) {
     stdout.write("- (none returned)\n");
   } else {
-    for (const message of recentMessages) {
+    for (const entry of recentMessages) {
+      const message = payloadObject(entry);
       const createdAt = message.created_at ? `${formatTimestamp(message.created_at)} ` : "";
       stdout.write(
         `- ${createdAt}${message.role || "message"}: ${message.preview || "(empty)"}\n`,
@@ -282,7 +284,7 @@ function writeThreadInspect(stdout, snapshot) {
   }
 }
 
-function writeDelegatedThreadCreate(stdout, snapshot) {
+function writeDelegatedThreadCreate(stdout: StdoutLike, snapshot: JsonRecord): void {
   const thread = payloadObject(snapshot.thread);
   const run = payloadObject(snapshot.run);
   const message = payloadObject(snapshot.message);
@@ -322,7 +324,7 @@ function writeDelegatedThreadCreate(stdout, snapshot) {
   );
 }
 
-function printHelp(stdout) {
+function printHelp(stdout: StdoutLike): void {
   stdout.write(
     [
       "Codeq8 runner helper",
@@ -353,7 +355,12 @@ function printHelp(stdout) {
   );
 }
 
-async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
+async function handleThreadsCommand({
+  args,
+  context,
+  fetchImpl,
+  stdout,
+}: ThreadCommandOptions): Promise<number> {
   const [command, ...rest] = args;
   if (!command || command === "--help" || command === "help") {
     printHelp(stdout);
@@ -738,11 +745,11 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
   throw new Error(`Unknown threads command: ${command}.`);
 }
 
-function decodeBase64Url(value) {
+function decodeBase64Url(value: unknown): Buffer {
   return Buffer.from(normalizeText(value), "base64url");
 }
 
-function sanitizeFileName(value, fallback = "attachment") {
+function sanitizeFileName(value: unknown, fallback = "attachment"): string {
   const normalized = normalizeText(value || fallback)
     .replace(/[\\/]+/g, "-")
     .replace(/[\u0000-\u001f]/g, "")
@@ -751,7 +758,7 @@ function sanitizeFileName(value, fallback = "attachment") {
   return normalized || fallback;
 }
 
-function extensionForContentType(contentType) {
+function extensionForContentType(contentType: unknown): string {
   const normalized = normalizeText(contentType).toLowerCase();
   if (normalized === "image/png") return ".png";
   if (normalized === "image/jpeg" || normalized === "image/jpg") return ".jpg";
@@ -761,7 +768,7 @@ function extensionForContentType(contentType) {
   return "";
 }
 
-function ensureFileNameExtension(name, contentType) {
+function ensureFileNameExtension(name: unknown, contentType: unknown): string {
   const normalizedName = sanitizeFileName(name);
   if (path.extname(normalizedName)) {
     return normalizedName;
@@ -773,7 +780,11 @@ async function writeGitHubIssueAttachmentFiles({
   attachments,
   outputDir,
   cwd,
-}) {
+}: {
+  attachments: JsonRecord[];
+  outputDir: string;
+  cwd: string;
+}): Promise<JsonRecord[]> {
   const resolvedOutputDir = path.resolve(cwd, outputDir);
   await fs.mkdir(resolvedOutputDir, { recursive: true });
   const usedNames = new Set();
@@ -811,7 +822,13 @@ async function writeGitHubIssueAttachmentFiles({
   return materialized;
 }
 
-async function handleAttachmentsCommand({ args, context, fetchImpl, stdout, cwd }) {
+async function handleAttachmentsCommand({
+  args,
+  context,
+  fetchImpl,
+  stdout,
+  cwd,
+}: FileCommandOptions): Promise<number> {
   const [command, ...rest] = args;
   if (!command || command === "--help" || command === "help") {
     printHelp(stdout);
@@ -862,7 +879,13 @@ async function handleAttachmentsCommand({ args, context, fetchImpl, stdout, cwd 
   return 0;
 }
 
-async function handleGitHubCommand({ args, context, fetchImpl, stdout, cwd }) {
+async function handleGitHubCommand({
+  args,
+  context,
+  fetchImpl,
+  stdout,
+  cwd,
+}: FileCommandOptions): Promise<number> {
   const [resource, command, ...rest] = args;
   if (!resource || resource === "--help" || resource === "help") {
     printHelp(stdout);
@@ -932,9 +955,8 @@ export async function handleRunnerCodeq8Cli({
   env = process.env,
   fetchImpl = globalThis.fetch,
   stdout = process.stdout,
-  stderr = process.stderr,
   cwd = process.cwd(),
-} = {}) {
+}: RunnerCliOptions = {}): Promise<number> {
   const args = Array.isArray(argv) ? argv.map((entry) => normalizeText(entry)).filter(Boolean) : [];
   if (args.length === 0 || hasFlag(args, ["--help", "-h"]) || args[0] === "help") {
     printHelp(stdout);

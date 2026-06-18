@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import test from "node:test";
 
 import { handleRunnerCodeq8Cli } from "../dist/runner-helper.js";
@@ -603,4 +601,3 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.doesNotMatch(cliSource, /command === "steer"/);
   assert.doesNotMatch(cliSource, /threads steer/);
 });
-

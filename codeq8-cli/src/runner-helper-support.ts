@@ -1,30 +1,64 @@
-// @ts-nocheck
-
 import process from "node:process";
 
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
 const DEFAULT_CODE_WORKER_URL = "https://control.codeq8.com";
 
-export function normalizeText(value) {
+export type JsonRecord = Record<string, unknown>;
+export type StdoutLike = {
+  write(chunk: string): unknown;
+};
+export type RunnerContext = {
+  publicBaseUrl: string;
+  workerUrl: string;
+  token: string;
+  githubSessionCookie: string;
+  workspaceRepository: string;
+  threadId: string;
+  runId: string;
+};
+export type RunnerFetch = (
+  input: string | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+export type ThreadCommandOptions = {
+  args: string[];
+  context: RunnerContext;
+  fetchImpl: RunnerFetch;
+  stdout: StdoutLike;
+};
+export type FileCommandOptions = ThreadCommandOptions & {
+  cwd: string;
+};
+export type RunnerCliOptions = {
+  argv?: string[];
+  env?: NodeJS.ProcessEnv;
+  fetchImpl?: RunnerFetch;
+  stdout?: StdoutLike;
+  cwd?: string;
+};
+
+type FlagNames = string | string[];
+
+export function normalizeText(value: unknown): string {
   return String(value || "").trim();
 }
 
-export function normalizeInteger(value, fallback = 0) {
+export function normalizeInteger(value: unknown, fallback = 0): number {
   const parsed = Number.parseInt(String(value || "").trim(), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function normalizeNumber(value, fallback = 0) {
+export function normalizeNumber(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function normalizeBaseUrl(value, fallback = "") {
+export function normalizeBaseUrl(value: unknown, fallback = ""): string {
   const normalized = normalizeText(value || fallback).replace(/\/+$/, "");
   return normalized;
 }
 
-export function readFlag(args, names, fallback = "") {
+export function readFlag(args: string[], names: FlagNames, fallback = ""): string {
   const aliases = Array.isArray(names) ? names : [names];
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -40,12 +74,16 @@ export function readFlag(args, names, fallback = "") {
   return fallback;
 }
 
-export function hasFlag(args, names) {
+export function hasFlag(args: string[], names: FlagNames): boolean {
   const aliases = Array.isArray(names) ? names : [names];
   return args.some((arg) => aliases.includes(arg));
 }
 
-export function removeFlags(args, flagNamesWithValues = [], booleanFlagNames = []) {
+export function removeFlags(
+  args: string[],
+  flagNamesWithValues: string[] = [],
+  booleanFlagNames: string[] = [],
+): string[] {
   const valueFlags = new Set(flagNamesWithValues);
   const booleanFlags = new Set(booleanFlagNames);
   const positional = [];
@@ -66,7 +104,7 @@ export function removeFlags(args, flagNamesWithValues = [], booleanFlagNames = [
   return positional;
 }
 
-export function buildContext(env = process.env) {
+export function buildContext(env: NodeJS.ProcessEnv = process.env): RunnerContext {
   const publicBaseUrl = normalizeBaseUrl(
     env.CODE_PUBLIC_BASE_URL || env.CODEQ8_PUBLIC_BASE_URL,
     DEFAULT_CODE_PUBLIC_URL,
@@ -86,8 +124,8 @@ export function buildContext(env = process.env) {
   };
 }
 
-export function requireContext(context) {
-  const missing = [];
+export function requireContext(context: RunnerContext): void {
+  const missing: string[] = [];
   if (!context.publicBaseUrl) missing.push("CODE_PUBLIC_BASE_URL");
   if (!context.workerUrl) missing.push("CODE_WORKER_URL");
   if (!context.token) missing.push("CODE_WEB_CHAT_RUN_TOKEN");
@@ -99,8 +137,11 @@ export function requireContext(context) {
   }
 }
 
-export function buildHeaders(context, extra = {}) {
-  const headers = {
+export function buildHeaders(
+  context: RunnerContext,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  const headers: Record<string, string> = {
     Authorization: `Bearer ${context.token}`,
     Accept: "application/json",
     ...extra,
@@ -111,13 +152,13 @@ export function buildHeaders(context, extra = {}) {
   return headers;
 }
 
-export function appendParentQuery(searchParams, context) {
+export function appendParentQuery(searchParams: URLSearchParams, context: RunnerContext): void {
   searchParams.set("workspace_repository", context.workspaceRepository);
   searchParams.set("thread_id", context.threadId);
   searchParams.set("run_id", context.runId);
 }
 
-export function parentBody(context, extra = {}) {
+export function parentBody(context: RunnerContext, extra: JsonRecord = {}): JsonRecord {
   return {
     workspace_repository: context.workspaceRepository,
     thread_id: context.threadId,
@@ -134,7 +175,15 @@ export async function requestJson({
   method = "GET",
   query = null,
   body = null,
-}) {
+}: {
+  context: RunnerContext;
+  fetchImpl: RunnerFetch;
+  routeBase?: "worker" | "public";
+  path: string;
+  method?: string;
+  query?: URLSearchParams | null;
+  body?: JsonRecord | null;
+}): Promise<JsonRecord> {
   const base = routeBase === "worker" ? context.workerUrl : context.publicBaseUrl;
   const url = new URL(routePath, `${base}/`);
   if (query instanceof URLSearchParams) {
@@ -149,7 +198,7 @@ export async function requestJson({
     headers: buildHeaders(context, body ? { "Content-Type": "application/json" } : {}),
     body: body ? JSON.stringify(body) : undefined,
   });
-  let payload = {};
+  let payload: JsonRecord = {};
   try {
     payload = await response.json();
   } catch {
@@ -164,15 +213,15 @@ export async function requestJson({
   return payload;
 }
 
-export function payloadObject(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+export function payloadObject(value: unknown): JsonRecord {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
 
-export function payloadArray(value) {
+export function payloadArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-export function firstText(...values) {
+export function firstText(...values: unknown[]): string {
   for (const value of values) {
     const normalized = normalizeText(value);
     if (normalized) {
@@ -182,7 +231,7 @@ export function firstText(...values) {
   return "";
 }
 
-export function firstPositiveNumber(...values) {
+export function firstPositiveNumber(...values: unknown[]): number {
   for (const value of values) {
     const normalized = normalizeNumber(value, 0);
     if (normalized > 0) {
@@ -192,17 +241,17 @@ export function firstPositiveNumber(...values) {
   return 0;
 }
 
-export function normalizeEpochMs(value) {
+export function normalizeEpochMs(value: unknown): number {
   const parsed = Number.parseInt(String(value || "").trim(), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
-export function formatTimestamp(value) {
+export function formatTimestamp(value: unknown): string {
   const epochMs = normalizeEpochMs(value);
   return epochMs > 0 ? new Date(epochMs).toISOString() : "";
 }
 
-export function formatThreadTarget(thread) {
+export function formatThreadTarget(thread: JsonRecord): string {
   const branchContext = payloadObject(thread.branch_context || thread.branchContext);
   const pullRequestNumber = normalizeInteger(
     branchContext.pull_request_number || branchContext.pullRequestNumber,
@@ -218,7 +267,7 @@ export function formatThreadTarget(thread) {
   );
 }
 
-export function formatThreadRunStatus(thread) {
+export function formatThreadRunStatus(thread: JsonRecord): string {
   return (
     normalizeText(thread.latest_run_status || thread.latestRunStatus) ||
     normalizeText(payloadObject(thread.latest_run || thread.latestRun).status) ||
@@ -226,7 +275,7 @@ export function formatThreadRunStatus(thread) {
   );
 }
 
-export function formatThreadUpdatedAt(thread) {
+export function formatThreadUpdatedAt(thread: JsonRecord): string {
   return formatTimestamp(
     thread.updated_at ||
       thread.updatedAt ||
@@ -237,20 +286,20 @@ export function formatThreadUpdatedAt(thread) {
   );
 }
 
-export function readThreadParentThreadId(thread) {
+export function readThreadParentThreadId(thread: JsonRecord): string {
   return firstText(thread.parent_thread_id, thread.parentThreadId);
 }
 
-export function formatThreadRelation(thread) {
+export function formatThreadRelation(thread: JsonRecord): string {
   const parentThreadId = readThreadParentThreadId(thread);
   return parentThreadId ? `child-of:${parentThreadId}` : "top-level";
 }
 
 export function writeCompactThreadList(
-  stdout,
-  payload,
+  stdout: StdoutLike,
+  payload: JsonRecord,
   { assignedLabel = "me", childrenOfThreadId = "", showRelationColumn = false, status = "" } = {},
-) {
+): void {
   const threads = payloadArray(payload.threads);
   const repository = normalizeText(payload.repository);
   const normalizedStatus = normalizeText(status || payload.status || "");
@@ -318,7 +367,7 @@ export function writeCompactThreadList(
   }
 }
 
-export function truncateText(value, maxLength = 240) {
+export function truncateText(value: unknown, maxLength = 240): string {
   const normalized = redactSensitiveText(normalizeText(value).replace(/\s+/g, " "));
   if (normalized.length <= maxLength) {
     return normalized;
@@ -326,7 +375,7 @@ export function truncateText(value, maxLength = 240) {
   return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
 }
 
-export function isSensitiveOutputKey(key) {
+export function isSensitiveOutputKey(key: string): boolean {
   const normalized = normalizeText(key).toLowerCase().replace(/[^a-z0-9]+/g, "_");
   if (
     new Set([
@@ -353,7 +402,7 @@ export function isSensitiveOutputKey(key) {
   );
 }
 
-export function redactSensitiveText(value) {
+export function redactSensitiveText(value: unknown): string {
   return normalizeText(value)
     .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, "[redacted]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]")
@@ -363,12 +412,12 @@ export function redactSensitiveText(value) {
     );
 }
 
-export function sanitizeForOutput(value) {
+export function sanitizeForOutput(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map((entry) => sanitizeForOutput(entry));
   }
   if (value && typeof value === "object") {
-    const sanitized = {};
+    const sanitized: JsonRecord = {};
     for (const [key, entry] of Object.entries(value)) {
       if (isSensitiveOutputKey(key)) {
         continue;
@@ -383,12 +432,12 @@ export function sanitizeForOutput(value) {
   return value;
 }
 
-export function writeJson(stdout, payload) {
+export function writeJson(stdout: StdoutLike, payload: unknown): void {
   stdout.write(`${JSON.stringify(sanitizeForOutput(payload), null, 2)}\n`);
 }
 
-export function compactObject(entries) {
-  const output = {};
+export function compactObject(entries: JsonRecord): JsonRecord {
+  const output: JsonRecord = {};
   for (const [key, value] of Object.entries(entries)) {
     if (value === undefined || value === null || value === "") {
       continue;
@@ -401,7 +450,7 @@ export function compactObject(entries) {
   return output;
 }
 
-export function summarizeThreadForOutput(thread, payload = {}) {
+export function summarizeThreadForOutput(thread: unknown, payload: JsonRecord = {}): JsonRecord {
   const normalized = payloadObject(thread);
   const summary = compactObject({
     thread_id: firstText(
@@ -430,39 +479,39 @@ export function summarizeThreadForOutput(thread, payload = {}) {
     ),
     updated_at: normalizeEpochMs(normalized.updated_at || normalized.updatedAt),
   });
-  return sanitizeForOutput(summary);
+  return payloadObject(sanitizeForOutput(summary));
 }
 
-export function summarizeRunForOutput(run) {
+export function summarizeRunForOutput(run: unknown): JsonRecord {
   const normalized = payloadObject(run);
-  return sanitizeForOutput(
+  return payloadObject(sanitizeForOutput(
     compactObject({
       run_id: firstText(normalized.run_id, normalized.runId),
       status: firstText(normalized.status),
       started_at: normalizeEpochMs(normalized.started_at || normalized.startedAt),
       updated_at: normalizeEpochMs(normalized.updated_at || normalized.updatedAt),
     }),
-  );
+  ));
 }
 
-export function summarizeMessageForOutput(message) {
+export function summarizeMessageForOutput(message: unknown): JsonRecord {
   const summary = summarizeThreadMessage(message);
-  return sanitizeForOutput(compactObject(summary));
+  return payloadObject(sanitizeForOutput(compactObject(summary)));
 }
 
-export function summarizeGoalForOutput(goal) {
+export function summarizeGoalForOutput(goal: unknown): JsonRecord {
   const normalized = payloadObject(goal);
-  return sanitizeForOutput(
+  return payloadObject(sanitizeForOutput(
     compactObject({
       objective: truncateText(firstText(normalized.objective), 240),
       status: firstText(normalized.status),
       created_at: normalizeEpochMs(normalized.created_at || normalized.createdAt),
       updated_at: normalizeEpochMs(normalized.updated_at || normalized.updatedAt),
     }),
-  );
+  ));
 }
 
-export function parentSummaryFields(payload) {
+export function parentSummaryFields(payload: JsonRecord): JsonRecord {
   const runnerParentThreadId = firstText(
     payload.runner_parent_thread_id,
     payload.runnerParentThreadId,
@@ -492,7 +541,7 @@ export function parentSummaryFields(payload) {
   });
 }
 
-export function readThreadOutputId(payload, fallback = "") {
+export function readThreadOutputId(payload: JsonRecord, fallback = ""): string {
   const thread = payloadObject(payload.thread);
   return firstText(
     payload.child_thread_id,
@@ -509,7 +558,7 @@ export function readThreadOutputId(payload, fallback = "") {
   );
 }
 
-export function readDelegatedDispatchState(payload) {
+export function readDelegatedDispatchState(payload: JsonRecord): string {
   if (payload.delegated_dispatch_failed || payload.delegatedDispatchFailed) {
     return "failed";
   }
@@ -522,7 +571,7 @@ export function readDelegatedDispatchState(payload) {
   return "";
 }
 
-export function buildDelegatedThreadCreateOutput(payload) {
+export function buildDelegatedThreadCreateOutput(payload: JsonRecord): JsonRecord {
   const thread = summarizeThreadForOutput(payload.thread, payload);
   const threadId = readThreadOutputId(payload);
   const message = summarizeMessageForOutput(payload.message);
@@ -545,7 +594,10 @@ export function buildDelegatedThreadCreateOutput(payload) {
   });
 }
 
-export function buildDelegatedThreadMessageOutput(payload, fallbackThreadId) {
+export function buildDelegatedThreadMessageOutput(
+  payload: JsonRecord,
+  fallbackThreadId: string,
+): JsonRecord {
   const thread = summarizeThreadForOutput(payload.thread, payload);
   const threadId = readThreadOutputId(payload, fallbackThreadId);
   const message = summarizeMessageForOutput(payload.message);
@@ -560,7 +612,7 @@ export function buildDelegatedThreadMessageOutput(payload, fallbackThreadId) {
   });
 }
 
-export function buildAssignedThreadOutput(payload, fallbackThreadId) {
+export function buildAssignedThreadOutput(payload: JsonRecord, fallbackThreadId: string): JsonRecord {
   return compactObject({
     ok: Boolean(payload.ok),
     assigned: Boolean(payload.assigned),
@@ -574,7 +626,7 @@ export function buildAssignedThreadOutput(payload, fallbackThreadId) {
   });
 }
 
-export function buildThreadGoalOutput(payload, fallbackThreadId) {
+export function buildThreadGoalOutput(payload: JsonRecord, fallbackThreadId: string): JsonRecord {
   return compactObject({
     ok: Boolean(payload.ok),
     updated: payload.updated !== false,
@@ -587,7 +639,11 @@ export function buildThreadGoalOutput(payload, fallbackThreadId) {
   });
 }
 
-export function buildThreadTitleOutput(payload, fallbackThreadId, fallbackTitle) {
+export function buildThreadTitleOutput(
+  payload: JsonRecord,
+  fallbackThreadId: string,
+  fallbackTitle: string,
+): JsonRecord {
   const thread = payloadObject(payload.thread);
   return compactObject({
     ok: Boolean(payload.ok),
@@ -602,15 +658,15 @@ export function buildThreadTitleOutput(payload, fallbackThreadId, fallbackTitle)
   });
 }
 
-export function readThreadBranchContext(thread) {
+export function readThreadBranchContext(thread: JsonRecord): JsonRecord {
   return payloadObject(thread.branch_context || thread.branchContext);
 }
 
-export function readThreadGitHubContext(thread) {
+export function readThreadGitHubContext(thread: JsonRecord): JsonRecord {
   return payloadObject(thread.github_context || thread.githubContext);
 }
 
-export function readThreadPullRequest(thread) {
+export function readThreadPullRequest(thread: JsonRecord): JsonRecord {
   const branchContext = readThreadBranchContext(thread);
   const githubContext = readThreadGitHubContext(thread);
   const githubPullRequest = payloadObject(
@@ -643,7 +699,7 @@ export function readThreadPullRequest(thread) {
   };
 }
 
-export function readThreadRepository(thread, payload) {
+export function readThreadRepository(thread: JsonRecord, payload: JsonRecord): string {
   const githubContext = readThreadGitHubContext(thread);
   const repository = payloadObject(githubContext.repository);
   return firstText(
@@ -655,7 +711,7 @@ export function readThreadRepository(thread, payload) {
   );
 }
 
-export function summarizeThreadMessage(message) {
+export function summarizeThreadMessage(message: unknown): JsonRecord {
   const normalized = payloadObject(message);
   return {
     message_id: firstText(normalized.message_id, normalized.messageId),
@@ -673,7 +729,7 @@ export function summarizeThreadMessage(message) {
   };
 }
 
-export function readProgressCandidate(value) {
+export function readProgressCandidate(value: unknown): JsonRecord | null {
   const candidate = payloadObject(value);
   if (Object.keys(candidate).length === 0) {
     return null;
@@ -726,7 +782,7 @@ export function readProgressCandidate(value) {
   };
 }
 
-export function readThreadProgressFacts(payload, thread) {
+export function readThreadProgressFacts(payload: JsonRecord, thread: JsonRecord): JsonRecord | null {
   const threadAppServer = payloadObject(thread.app_server || thread.appServer);
   const payloadAppServer = payloadObject(payload.app_server || payload.appServer);
   const candidates = [
@@ -753,4 +809,3 @@ export function readThreadProgressFacts(payload, thread) {
   }
   return null;
 }
-
