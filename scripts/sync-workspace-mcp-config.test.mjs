@@ -153,6 +153,45 @@ test("sanitizeWorkspaceMcpSection omits cwd for streamable_http MCP servers", ()
   assert.doesNotMatch(output, /^\s*cwd\s*=/m);
 });
 
+test("sanitizeWorkspaceMcpSection omits cwd for URL-only MCP servers", () => {
+  const section = extractWorkspaceMcpSections([
+    "[mcp_servers.funplay]",
+    'url = "http://127.0.0.1:8765/"',
+    "startup_timeout_sec = 5",
+    "tool_timeout_sec = 120",
+    "enabled = true",
+    "",
+  ].join("\n"))[0];
+
+  const sanitized = sanitizeWorkspaceMcpSection(section, {
+    workspacePath: "/tmp/example-workspace",
+  });
+  const output = sanitized.lines.join("\n");
+
+  assert.match(output, /\[mcp_servers\.funplay\]/);
+  assert.match(output, /url = "http:\/\/127\.0\.0\.1:8765\/"/);
+  assert.match(output, /startup_timeout_sec = 5/);
+  assert.match(output, /tool_timeout_sec = 120/);
+  assert.doesNotMatch(output, /^\s*cwd\s*=/m);
+});
+
+test("sanitizeWorkspaceMcpSection drops explicit cwd from URL MCP servers", () => {
+  const section = extractWorkspaceMcpSections([
+    "[mcp_servers.funplay]",
+    'url = "http://127.0.0.1:8765/"',
+    'cwd = "./Tools"',
+    "",
+  ].join("\n"))[0];
+
+  const sanitized = sanitizeWorkspaceMcpSection(section, {
+    workspacePath: "/tmp/example-workspace",
+  });
+  const output = sanitized.lines.join("\n");
+
+  assert.match(output, /url = "http:\/\/127\.0\.0\.1:8765\/"/);
+  assert.doesNotMatch(output, /^\s*cwd\s*=/m);
+});
+
 test("sync workspace MCP config skips when workspace config is absent", async () => {
   await withWorkspaceMcpFixture(async ({ env, workspacePath }) => {
     const result = await syncWorkspaceMcpCodexConfig({

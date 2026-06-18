@@ -192,7 +192,14 @@ function resolveMcpTransport(section) {
   return "";
 }
 
+function mcpServerHasUrl(section) {
+  return section.lines.slice(1).some((line) => /^\s*url\s*=/.test(line));
+}
+
 function mcpServerSupportsCwd(section) {
+  if (mcpServerHasUrl(section)) {
+    return false;
+  }
   const transport = resolveMcpTransport(section);
   return !transport || transport === "stdio";
 }
