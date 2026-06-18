@@ -22,6 +22,11 @@ const CODEQ8_PLUGIN_CAPABILITIES = [
   CODEQ8_PLUGIN_CAPABILITY,
   CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY,
 ];
+const CODEQ8_PLUGIN_SKILLS = [
+  "codeq8-child-threads",
+  "codeq8-plugin",
+  "codeq8-skill-stewardship",
+];
 
 test("Codeq8 plugin skill documents public runtime ownership for bundled skills", async () => {
   const skillSource = await fs.readFile(
@@ -110,7 +115,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
     assert.equal(pluginMarker.artifact_hash, expectedArtifactHash);
     assert.equal(pluginMarker.target_kind, "plugin");
 
-    for (const skillName of ["codeq8-child-threads", "codeq8-plugin"]) {
+    for (const skillName of CODEQ8_PLUGIN_SKILLS) {
       const skillPath = path.join(codexHome, "skills", skillName);
       const skillMarker = await readJson(path.join(skillPath, CODEQ8_PLUGIN_MARKER_FILE));
       assert.equal(skillMarker.target_kind, "skill");
@@ -202,6 +207,9 @@ test("Codeq8 plugin install updates marked marker source fields idempotently", a
     const childThreadsSkillMarker = await readJson(
       path.join(codexHome, "skills", "codeq8-child-threads", CODEQ8_PLUGIN_MARKER_FILE),
     );
+    const stewardshipSkillMarker = await readJson(
+      path.join(codexHome, "skills", "codeq8-skill-stewardship", CODEQ8_PLUGIN_MARKER_FILE),
+    );
     const marketplaceMarker = await readJson(
       path.join(homePath, ".agents", "plugins", CODEQ8_PLUGIN_MARKETPLACE_ENTRY_MARKER_FILE),
     );
@@ -209,6 +217,7 @@ test("Codeq8 plugin install updates marked marker source fields idempotently", a
     assert.equal(pluginMarker.source_ref, "public-action-sha-new");
     assert.equal(pluginSkillMarker.source_ref, "public-action-sha-new");
     assert.equal(childThreadsSkillMarker.source_ref, "public-action-sha-new");
+    assert.equal(stewardshipSkillMarker.source_ref, "public-action-sha-new");
     assert.equal(marketplaceMarker.source_ref, "public-action-sha-new");
   });
 });
@@ -425,4 +434,26 @@ test("Codeq8 plugin Child Threads skill is public runtime guidance", async () =>
   assert.doesNotMatch(skillSource, /Codeq8\/Codeq8/);
   assert.doesNotMatch(skillSource, /\.codex\/skills/);
   assert.doesNotMatch(skillSource, /main-staging|production branch/i);
+});
+
+test("Codeq8 plugin Skill Stewardship skill is public runtime guidance", async () => {
+  const skillSource = await fs.readFile(
+    path.join(
+      process.cwd(),
+      "plugins",
+      "codeq8",
+      "skills",
+      "codeq8-skill-stewardship",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+
+  assert.match(skillSource, /^name: codeq8-skill-stewardship$/m);
+  assert.match(skillSource, /user correction, repeated failure, new workflow discovery/);
+  assert.match(skillSource, /Be proactive and aggressive about maintaining skills/);
+  assert.match(skillSource, /Codeq8 plugin\/public\s+action runtime first/);
+  assert.match(skillSource, /Do not replace product-runtime work with a workspace-local skill/);
+  assert.doesNotMatch(skillSource, /Abdul|aalzanki/i);
+  assert.doesNotMatch(skillSource, /Codeq8\/Codeq8/);
 });
