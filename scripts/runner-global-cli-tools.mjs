@@ -15,12 +15,14 @@ const GLOBAL_CLI_TOOLS = Object.freeze([
     binaryName: "codeq8",
     desiredVersionPath: "codeq8-cli/package.json",
     localPackagePath: "codeq8-cli",
+    requireManagedPrefix: true,
   },
   {
     label: "playwright-mcp",
     packageName: "@playwright/mcp",
     binaryName: "playwright-mcp",
     desiredVersionPath: "playwright-mcp/package.json",
+    requireManagedPrefix: true,
   },
 ]);
 
@@ -144,7 +146,7 @@ async function resolveNpmPath({
     return localCandidate;
   }
 
-  const whichResult = await runProcessCapture("/bin/bash", ["-lc", "command -v npm"], {
+  const whichResult = await runProcessCapture("/bin/bash", ["-c", "command -v npm"], {
     cwd,
     env,
   });
@@ -168,7 +170,7 @@ async function resolveBinaryPath({
 
   const whichResult = await runProcessCapture(
     "/bin/bash",
-    ["-lc", `command -v ${normalizedBinaryName}`],
+    ["-c", `command -v ${normalizedBinaryName}`],
     {
       cwd,
       env,
@@ -191,6 +193,24 @@ async function resolveBinaryPath({
   }
 
   return "";
+}
+
+function resolveManagedNpmBinPath(env = process.env) {
+  const npmPrefix = normalizeText(env.NPM_CONFIG_PREFIX);
+  return npmPrefix ? path.resolve(npmPrefix, "bin") : "";
+}
+
+function isPathInsideDirectory(filePath, directoryPath) {
+  const normalizedFilePath = normalizeText(filePath);
+  const normalizedDirectoryPath = normalizeText(directoryPath);
+  if (!normalizedFilePath || !normalizedDirectoryPath) {
+    return false;
+  }
+  const relativePath = path.relative(
+    path.resolve(normalizedDirectoryPath),
+    path.resolve(normalizedFilePath),
+  );
+  return Boolean(relativePath) && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
 }
 
 async function readState(stateFilePath) {
@@ -307,15 +327,24 @@ async function buildInstallTargets({
 
 async function resolveToolSnapshot({ env = process.env, cwd = process.cwd() } = {}) {
   const snapshot = [];
+  const managedNpmBinPath = resolveManagedNpmBinPath(env);
   for (const tool of GLOBAL_CLI_TOOLS) {
+    const discoveredBinaryPath = await resolveBinaryPath({
+      binaryName: tool.binaryName,
+      env,
+      cwd,
+    });
+    const requiresManagedPrefix = Boolean(tool.requireManagedPrefix && managedNpmBinPath);
+    const binaryPath =
+      requiresManagedPrefix && !isPathInsideDirectory(discoveredBinaryPath, managedNpmBinPath)
+        ? ""
+        : discoveredBinaryPath;
     snapshot.push({
       ...tool,
       desiredVersion: await readDesiredToolVersion(tool, cwd),
-      binaryPath: await resolveBinaryPath({
-        binaryName: tool.binaryName,
-        env,
-        cwd,
-      }),
+      binaryPath,
+      discoveredBinaryPath,
+      managedNpmBinPath,
     });
   }
   return snapshot;

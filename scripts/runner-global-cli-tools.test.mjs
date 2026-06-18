@@ -7,7 +7,7 @@ import test from "node:test";
 import { ensureRunnerGlobalCliTools } from "./runner-global-cli-tools.mjs";
 
 const TOOL_VERSIONS = {
-  "@codeq8/codeq8": "0.2.2",
+  "@codeq8/codeq8": "0.2.3",
   "@playwright/mcp": "0.0.76",
 };
 
@@ -37,6 +37,7 @@ async function withGlobalToolFixture(fn) {
       env: {
         ...process.env,
         HOME: homePath,
+        NPM_CONFIG_PREFIX: tempRoot,
         PATH: `${binPath}:${process.env.PATH || ""}`,
       },
     });
@@ -67,6 +68,58 @@ test("runner global tools include the pinned Playwright MCP package", async () =
 
   assert.equal(manifest.name, "@playwright/mcp");
   assert.equal(manifest.version, TOOL_VERSIONS["@playwright/mcp"]);
+});
+
+test("ensureRunnerGlobalCliTools refreshes when codeq8 resolves outside the managed npm prefix", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-global-tools-prefix-"));
+  try {
+    const managedPrefix = path.join(tempRoot, "managed");
+    const managedBinPath = path.join(managedPrefix, "bin");
+    const machineBinPath = path.join(tempRoot, "machine-bin");
+    const homePath = path.join(tempRoot, "home");
+    const stateFile = path.join(tempRoot, "state.json");
+    const npmPath = path.join(tempRoot, "npm");
+    const npmArgsFile = path.join(tempRoot, "npm-args");
+    await fs.mkdir(homePath, { recursive: true });
+    await writeExecutable(path.join(machineBinPath, "codeq8"), "#!/bin/sh\nexit 0\n");
+    await writeExecutable(path.join(managedBinPath, "playwright-mcp"), "#!/bin/sh\nexit 0\n");
+    await writeExecutable(
+      npmPath,
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$@" >> ${JSON.stringify(npmArgsFile)}`,
+        "if [ \"$1\" = \"install\" ] && [ \"$2\" = \"--global\" ]; then",
+        `  mkdir -p ${JSON.stringify(managedBinPath)}`,
+        `  printf '#!/bin/sh\\nexit 0\\n' > ${JSON.stringify(path.join(managedBinPath, "codeq8"))}`,
+        `  chmod +x ${JSON.stringify(path.join(managedBinPath, "codeq8"))}`,
+        "fi",
+        "exit 0",
+        "",
+      ].join("\n"),
+    );
+    await writeState(stateFile);
+
+    const result = await ensureRunnerGlobalCliTools({
+      stateFile,
+      npmPath,
+      env: {
+        ...process.env,
+        HOME: homePath,
+        NPM_CONFIG_PREFIX: managedPrefix,
+        PATH: `${managedBinPath}:${machineBinPath}:${process.env.PATH || ""}`,
+      },
+      cwd: process.cwd(),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.refreshed, true);
+    const codeq8Tool = result.tools.find((tool) => tool.packageName === "@codeq8/codeq8");
+    assert.equal(codeq8Tool?.binaryPath, path.join(managedBinPath, "codeq8"));
+    const npmArgs = await fs.readFile(npmArgsFile, "utf8");
+    assert.match(npmArgs, /--global/);
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("runner global tools do not install or pin Codex", async () => {
