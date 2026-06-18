@@ -21,16 +21,19 @@ async function writeExecutable(filePath, source) {
 async function withGlobalToolFixture(fn) {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-global-tools-"));
   try {
+    const cwd = path.join(tempRoot, "action");
     const binPath = path.join(tempRoot, "bin");
     const homePath = path.join(tempRoot, "home");
     const stateFile = path.join(tempRoot, "state.json");
     const npmPath = path.join(tempRoot, "npm");
+    await writeMinimalActionPackages(cwd);
     for (const binaryName of ["codeq8", "playwright-mcp"]) {
       await writeExecutable(path.join(binPath, binaryName), "#!/bin/sh\nexit 0\n");
     }
     await fs.mkdir(homePath, { recursive: true });
     await fn({
       tempRoot,
+      cwd,
       binPath,
       homePath,
       stateFile,
@@ -171,6 +174,7 @@ test("runner global tools include the pinned Playwright MCP package", async () =
 test("ensureRunnerGlobalCliTools refreshes when codeq8 resolves outside the managed npm prefix", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-global-tools-prefix-"));
   try {
+    const cwd = path.join(tempRoot, "action");
     const managedPrefix = path.join(tempRoot, "managed");
     const managedBinPath = path.join(managedPrefix, "bin");
     const machineBinPath = path.join(tempRoot, "machine-bin");
@@ -178,6 +182,7 @@ test("ensureRunnerGlobalCliTools refreshes when codeq8 resolves outside the mana
     const stateFile = path.join(tempRoot, "state.json");
     const npmPath = path.join(tempRoot, "npm");
     const npmArgsFile = path.join(tempRoot, "npm-args");
+    await writeMinimalActionPackages(cwd);
     await fs.mkdir(homePath, { recursive: true });
     await writeExecutable(path.join(machineBinPath, "codeq8"), "#!/bin/sh\nexit 0\n");
     await writeExecutable(path.join(managedBinPath, "playwright-mcp"), "#!/bin/sh\nexit 0\n");
@@ -195,7 +200,7 @@ test("ensureRunnerGlobalCliTools refreshes when codeq8 resolves outside the mana
         "",
       ].join("\n"),
     );
-    await writeState(stateFile);
+    await writeState(stateFile, TOOL_VERSIONS, { cwd });
 
     const result = await ensureRunnerGlobalCliTools({
       stateFile,
@@ -206,7 +211,7 @@ test("ensureRunnerGlobalCliTools refreshes when codeq8 resolves outside the mana
         NPM_CONFIG_PREFIX: managedPrefix,
         PATH: `${managedBinPath}:${machineBinPath}:${process.env.PATH || ""}`,
       },
-      cwd: process.cwd(),
+      cwd,
     });
 
     assert.equal(result.ok, true);
@@ -223,6 +228,7 @@ test("ensureRunnerGlobalCliTools refreshes when codeq8 resolves outside the mana
 test("ensureRunnerGlobalCliTools refreshes when managed codeq8 lacks threads support", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-global-tools-capability-"));
   try {
+    const cwd = path.join(tempRoot, "action");
     const binPath = path.join(tempRoot, "bin");
     const homePath = path.join(tempRoot, "home");
     const stateFile = path.join(tempRoot, "state.json");
@@ -236,6 +242,7 @@ test("ensureRunnerGlobalCliTools refreshes when managed codeq8 lacks threads sup
       "codeq8",
       "stale.txt",
     );
+    await writeMinimalActionPackages(cwd);
     await fs.mkdir(path.dirname(stalePackageMarker), { recursive: true });
     await fs.writeFile(stalePackageMarker, "stale", "utf8");
     await fs.mkdir(homePath, { recursive: true });
@@ -267,7 +274,7 @@ test("ensureRunnerGlobalCliTools refreshes when managed codeq8 lacks threads sup
         "",
       ].join("\n"),
     );
-    await writeState(stateFile);
+    await writeState(stateFile, TOOL_VERSIONS, { cwd });
 
     const result = await ensureRunnerGlobalCliTools({
       stateFile,
@@ -278,7 +285,7 @@ test("ensureRunnerGlobalCliTools refreshes when managed codeq8 lacks threads sup
         NPM_CONFIG_PREFIX: tempRoot,
         PATH: `${binPath}:${process.env.PATH || ""}`,
       },
-      cwd: process.cwd(),
+      cwd,
     });
 
     assert.equal(result.ok, true);
@@ -433,7 +440,7 @@ test("ensureRunnerGlobalCliTools overwrites npm-created local package bins durin
 });
 
 test("runner global tools do not install or pin Codex", async () => {
-  await withGlobalToolFixture(async ({ stateFile, npmPath, env }) => {
+  await withGlobalToolFixture(async ({ cwd, stateFile, npmPath, env }) => {
     const npmArgsFile = path.join(path.dirname(npmPath), "npm-args");
     await writeExecutable(
       npmPath,
@@ -451,16 +458,20 @@ test("runner global tools do not install or pin Codex", async () => {
         "",
       ].join("\n"),
     );
-    await writeState(stateFile, {
-      ...TOOL_VERSIONS,
-      "@playwright/mcp": "0.0.1",
-    });
+    await writeState(
+      stateFile,
+      {
+        ...TOOL_VERSIONS,
+        "@playwright/mcp": "0.0.1",
+      },
+      { cwd },
+    );
 
     const result = await ensureRunnerGlobalCliTools({
       stateFile,
       npmPath,
       env,
-      cwd: process.cwd(),
+      cwd,
     });
 
     assert.equal(result.ok, true);
@@ -476,7 +487,7 @@ test("runner global tools do not install or pin Codex", async () => {
 });
 
 test("ensureRunnerGlobalCliTools skips npm install when binaries and pinned versions match", async () => {
-  await withGlobalToolFixture(async ({ stateFile, npmPath, env }) => {
+  await withGlobalToolFixture(async ({ cwd, stateFile, npmPath, env }) => {
     const npmInvocationFile = path.join(path.dirname(npmPath), "npm-invoked");
     await writeExecutable(
       npmPath,
@@ -491,13 +502,13 @@ test("ensureRunnerGlobalCliTools skips npm install when binaries and pinned vers
         "",
       ].join("\n"),
     );
-    await writeState(stateFile);
+    await writeState(stateFile, TOOL_VERSIONS, { cwd });
 
     const result = await ensureRunnerGlobalCliTools({
       stateFile,
       npmPath,
       env,
-      cwd: process.cwd(),
+      cwd,
     });
 
     assert.equal(result.ok, true);
@@ -512,7 +523,7 @@ test("ensureRunnerGlobalCliTools skips npm install when binaries and pinned vers
 });
 
 test("ensureRunnerGlobalCliTools refreshes when Playwright MCP pinned version changes", async () => {
-  await withGlobalToolFixture(async ({ stateFile, npmPath, env }) => {
+  await withGlobalToolFixture(async ({ cwd, stateFile, npmPath, env }) => {
     const npmInvocationFile = path.join(path.dirname(npmPath), "npm-invoked");
     await writeExecutable(
       npmPath,
@@ -530,16 +541,20 @@ test("ensureRunnerGlobalCliTools refreshes when Playwright MCP pinned version ch
         "",
       ].join("\n"),
     );
-    await writeState(stateFile, {
-      ...TOOL_VERSIONS,
-      "@playwright/mcp": "0.0.1",
-    });
+    await writeState(
+      stateFile,
+      {
+        ...TOOL_VERSIONS,
+        "@playwright/mcp": "0.0.1",
+      },
+      { cwd },
+    );
 
     const result = await ensureRunnerGlobalCliTools({
       stateFile,
       npmPath,
       env,
-      cwd: process.cwd(),
+      cwd,
     });
 
     assert.equal(result.ok, true);
@@ -551,19 +566,23 @@ test("ensureRunnerGlobalCliTools refreshes when Playwright MCP pinned version ch
 });
 
 test("ensureRunnerGlobalCliTools fails hard when a required refresh fails", async () => {
-  await withGlobalToolFixture(async ({ stateFile, npmPath, env }) => {
+  await withGlobalToolFixture(async ({ cwd, stateFile, npmPath, env }) => {
     await writeExecutable(npmPath, "#!/bin/sh\necho registry unavailable >&2\nexit 1\n");
-    await writeState(stateFile, {
-      ...TOOL_VERSIONS,
-      "@playwright/mcp": "0.0.1",
-    });
+    await writeState(
+      stateFile,
+      {
+        ...TOOL_VERSIONS,
+        "@playwright/mcp": "0.0.1",
+      },
+      { cwd },
+    );
 
     await assert.rejects(
       ensureRunnerGlobalCliTools({
         stateFile,
         npmPath,
         env,
-        cwd: process.cwd(),
+        cwd,
       }),
       /Unable to install @codeq8\/codeq8 local package dependencies.*registry unavailable/,
     );
