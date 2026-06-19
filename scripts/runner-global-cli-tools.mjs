@@ -467,6 +467,7 @@ async function repairLocalPackageBinaryShims({
   force = false,
   env = process.env,
   cwd = process.cwd(),
+  logger = () => {},
 } = {}) {
   const managedNpmBinPath = resolveManagedNpmBinPath(env);
   if (!managedNpmBinPath) {
@@ -484,6 +485,20 @@ async function repairLocalPackageBinaryShims({
       continue;
     }
 
+    const sourceCapability = await checkToolCapability({
+      tool,
+      binaryPath: sourcePath,
+      env,
+      cwd,
+    });
+    if (!sourceCapability.ok) {
+      throw new Error(
+        `Local package binary failed capability check: ${tool.binaryName} source=${sourcePath} capability=${
+          sourceCapability.reason || "failed"
+        }`,
+      );
+    }
+
     const targetPath = path.join(managedNpmBinPath, tool.binaryName);
     if (!force) {
       const existingCapability = await checkToolCapability({
@@ -499,8 +514,29 @@ async function repairLocalPackageBinaryShims({
 
     const shimSource = `#!/bin/sh\nexec node ${shellSingleQuote(sourcePath)} "$@"\n`;
     await fs.rm(targetPath, { force: true });
-    await fs.writeFile(targetPath, shimSource, "utf8");
-    await fs.chmod(targetPath, 0o755);
+    const handle = await fs.open(targetPath, "wx", 0o755);
+    try {
+      await handle.writeFile(shimSource, "utf8");
+    } finally {
+      await handle.close();
+    }
+    const targetCapability = await checkToolCapability({
+      tool,
+      binaryPath: targetPath,
+      env,
+      cwd,
+    });
+    if (!targetCapability.ok) {
+      throw new Error(
+        `Managed local package shim failed capability check: ${tool.binaryName} target=${targetPath} source=${sourcePath} capability=${
+          targetCapability.reason || "failed"
+        }`,
+      );
+    }
+    logger(
+      "Repaired local package CLI shim",
+      `${tool.binaryName} target=${targetPath} source=${sourcePath}`,
+    );
   }
 }
 
@@ -760,7 +796,7 @@ export async function ensureRunnerGlobalCliTools({
     );
   }
 
-  await repairLocalPackageBinaryShims({ force: true, env, cwd });
+  await repairLocalPackageBinaryShims({ force: true, env, cwd, logger });
 
   let nextSnapshot = await resolveToolSnapshot({ env, cwd });
   let stillMissing = nextSnapshot.filter((tool) => !tool.binaryPath);
@@ -771,6 +807,7 @@ export async function ensureRunnerGlobalCliTools({
       force: true,
       env,
       cwd,
+      logger,
     });
     nextSnapshot = await resolveToolSnapshot({ env, cwd });
     stillMissing = nextSnapshot.filter((tool) => !tool.binaryPath);
