@@ -240,29 +240,16 @@ function formatThreadUpdatedAt(thread) {
   );
 }
 
-function readThreadParentThreadId(thread) {
-  return firstText(thread.parent_thread_id, thread.parentThreadId);
-}
-
-function formatThreadRelation(thread) {
-  const parentThreadId = readThreadParentThreadId(thread);
-  return parentThreadId ? `child-of:${parentThreadId}` : "top-level";
-}
-
 function writeCompactThreadList(
   stdout,
   payload,
-  { assignedLabel = "me", childrenOfThreadId = "", showRelationColumn = false, status = "" } = {},
+  { assignedLabel = "me", status = "" } = {},
 ) {
   const threads = payloadArray(payload.threads);
   const repository = normalizeText(payload.repository);
   const normalizedStatus = normalizeText(status || payload.status || "");
   stdout.write(`Repository: ${repository || "(unknown)"}\n`);
-  if (childrenOfThreadId) {
-    stdout.write(`Children of: ${childrenOfThreadId}\n`);
-  } else {
-    stdout.write(`Assigned: ${assignedLabel || "me"}\n`);
-  }
+  stdout.write(`Assigned: ${assignedLabel || "me"}\n`);
   if (normalizedStatus) {
     stdout.write(`Status: ${normalizedStatus}\n`);
   }
@@ -273,32 +260,19 @@ function writeCompactThreadList(
   const lifecycleNote = firstText(payload.lifecycle_note, payload.lifecycleNote);
   if (lifecycleNote) {
     stdout.write(`Lifecycle note: ${lifecycleNote}\n`);
-  } else if (childrenOfThreadId) {
-    stdout.write("Lifecycle note: Child thread listing currently supports the active/open lifecycle only.\n");
   }
   stdout.write("\n");
 
   if (threads.length === 0) {
-    stdout.write(
-      childrenOfThreadId
-        ? "No open child threads.\n"
-        : "No matching assigned threads.\n",
-    );
+    stdout.write("No matching assigned threads.\n");
   } else {
-    stdout.write(
-      showRelationColumn
-        ? "thread_id\tstatus\trelation\trun\ttarget\tupdated_at\ttitle\n"
-        : "thread_id\tstatus\trun\ttarget\tupdated_at\ttitle\n",
-    );
+    stdout.write("thread_id\tstatus\trun\ttarget\tupdated_at\ttitle\n");
     for (const entry of threads) {
       const thread = payloadObject(entry);
       const columns = [
         normalizeText(thread.thread_id || thread.threadId),
         normalizeText(thread.status),
       ];
-      if (showRelationColumn) {
-        columns.push(formatThreadRelation(thread));
-      }
       columns.push(
         formatThreadRunStatus(thread),
         formatThreadTarget(thread),
@@ -410,19 +384,12 @@ function summarizeThreadForOutput(thread, payload = {}) {
     thread_id: firstText(
       normalized.thread_id,
       normalized.threadId,
-      payload.child_thread_id,
       payload.target_thread_id,
       payload.thread_id,
     ),
     repository: readThreadRepository(normalized, payload),
     title: truncateText(firstText(normalized.title), 160),
     title_source: firstText(normalized.title_source, normalized.titleSource),
-    parent_thread_id: firstText(
-      normalized.parent_thread_id,
-      normalized.parentThreadId,
-      payload.target_parent_thread_id,
-      payload.targetParentThreadId,
-    ),
     status: firstText(normalized.status, payload.status),
     aggregate_status: firstText(normalized.aggregate_status, normalized.aggregateStatus),
     source_type: firstText(normalized.source_type, normalized.sourceType),
@@ -488,18 +455,12 @@ function parentSummaryFields(payload) {
     runner_parent_thread_id: runnerParentThreadId,
     runner_parent_run_id: runnerParentRunId,
     runner_parent_workspace_repository: runnerParentRepository,
-    // Backward-compatible aliases for callers that still read parent_*.
-    parent_thread_id: runnerParentThreadId,
-    parent_run_id: runnerParentRunId,
-    parent_workspace_repository: runnerParentRepository,
   });
 }
 
 function readThreadOutputId(payload, fallback = "") {
   const thread = payloadObject(payload.thread);
   return firstText(
-    payload.child_thread_id,
-    payload.childThreadId,
     payload.target_thread_id,
     payload.targetThreadId,
     payload.assigned_thread_id,
@@ -535,7 +496,7 @@ function buildDelegatedThreadCreateOutput(payload) {
   return compactObject({
     ok: Boolean(payload.ok),
     delegated: Boolean(payload.delegated),
-    child_thread_id: threadId,
+    target_thread_id: threadId,
     delegated_dispatch_failed: payload.delegated_dispatch_failed ? true : undefined,
     dispatch_state: readDelegatedDispatchState(payload),
     ...parentSummaryFields(payload),
@@ -555,7 +516,7 @@ function buildDelegatedThreadMessageOutput(payload, fallbackThreadId) {
   return compactObject({
     ok: Boolean(payload.ok),
     delegated: Boolean(payload.delegated),
-    child_thread_id: threadId,
+    target_thread_id: threadId,
     ...parentSummaryFields(payload),
     thread,
     message,
@@ -764,7 +725,6 @@ function buildThreadInspectSnapshot(payload) {
   const progress = readThreadProgressFacts(payload, thread);
   const targetThreadId = firstText(
     payload.target_thread_id,
-    payload.child_thread_id,
     payload.thread_id,
     thread.thread_id,
     thread.threadId,
@@ -786,12 +746,6 @@ function buildThreadInspectSnapshot(payload) {
     payload.runnerParentWorkspaceRepository,
     payload.parent_workspace_repository,
     payload.parentWorkspaceRepository,
-  );
-  const targetParentThreadId = firstText(
-    payload.target_parent_thread_id,
-    payload.targetParentThreadId,
-    thread.parent_thread_id,
-    thread.parentThreadId,
   );
   const latestRunId = firstText(
     thread.latest_run_id,
@@ -824,13 +778,11 @@ function buildThreadInspectSnapshot(payload) {
     runner_parent_thread_id: runnerParentThreadId,
     runner_parent_run_id: runnerParentRunId,
     runner_parent_workspace_repository: runnerParentRepository,
-    target_parent_thread_id: targetParentThreadId,
     target_thread_id: targetThreadId,
     thread: {
       thread_id: targetThreadId,
       repository: readThreadRepository(thread, payload),
       title: truncateText(thread.title || "(untitled)", 160),
-      parent_thread_id: targetParentThreadId,
       status: firstText(thread.status),
       aggregate_status: firstText(thread.aggregate_status, thread.aggregateStatus),
       source_type: firstText(thread.source_type, thread.sourceType),
@@ -930,11 +882,6 @@ function writeThreadInspect(stdout, snapshot) {
       ].filter(Boolean).join(" ") || "(unknown)"}\n`,
     );
   }
-  if (thread.parent_thread_id || snapshot.target_parent_thread_id) {
-    stdout.write(`Target parent: ${thread.parent_thread_id || snapshot.target_parent_thread_id}\n`);
-  } else {
-    stdout.write("Target parent: (none)\n");
-  }
   const pullRequestLabel = pullRequest.number
     ? `PR #${pullRequest.number}${pullRequest.url ? ` ${pullRequest.url}` : ""}`
     : "";
@@ -1005,7 +952,7 @@ function writeDelegatedThreadCreate(stdout, snapshot) {
   const thread = payloadObject(snapshot.thread);
   const run = payloadObject(snapshot.run);
   const message = payloadObject(snapshot.message);
-  const threadId = snapshot.child_thread_id || thread.thread_id || "(unknown)";
+  const threadId = snapshot.target_thread_id || thread.thread_id || "(unknown)";
   const statusLine = [
     thread.status ? `status=${thread.status}` : "",
     run.status ? `run=${run.status}` : "",
@@ -1014,15 +961,8 @@ function writeDelegatedThreadCreate(stdout, snapshot) {
 
   stdout.write(`Created thread: ${threadId}\n`);
   stdout.write(`Title: ${thread.title || "(untitled)"}\n`);
-  stdout.write(`Repository: ${thread.repository || snapshot.parent_workspace_repository || "(unknown)"}\n`);
+  stdout.write(`Repository: ${thread.repository || snapshot.runner_parent_workspace_repository || "(unknown)"}\n`);
   stdout.write(`State: ${statusLine || "(unknown)"}\n`);
-  if (snapshot.parent_thread_id || snapshot.parent_run_id) {
-    stdout.write(
-      `Parent: ${[snapshot.parent_thread_id, snapshot.parent_run_id ? `run=${snapshot.parent_run_id}` : ""]
-        .filter(Boolean)
-        .join(" ")}\n`,
-    );
-  }
   if (message.preview || message.message_id || message.role) {
     stdout.write(
       `Initial message: ${[
@@ -1049,7 +989,6 @@ function printHelp(stdout) {
       "Usage:",
       "  codeq8 threads mine [--status active|all] [--limit 25]",
       "  codeq8 threads search [--search text] [--status active|all] [--limit 25]",
-      "  codeq8 threads children [parent-thread-id] [--status active] [--limit 25] [--json]",
       "  codeq8 threads context <thread-id> [--limit 20]",
       "  codeq8 threads inspect <thread-id> [--limit 12] [--json]",
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
@@ -1065,8 +1004,6 @@ function printHelp(stdout) {
       "  codeq8 github issue attachments <url|number> [--repo owner/repo] [--comments] --output-dir dir",
       "",
       "Authentication is read from the Codeq8 runner environment. Tokens are never printed.",
-      "Assigned thread lists label child rows as child-of:<parent-thread-id>.",
-      "Child thread listing defaults to the current parent thread and currently supports the active/open lifecycle only.",
       "",
     ].join("\n"),
   );
@@ -1098,7 +1035,6 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
     });
     writeCompactThreadList(stdout, payload, {
       assignedLabel: "me",
-      showRelationColumn: true,
       status,
     });
     return 0;
@@ -1124,47 +1060,6 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
         query,
       }),
     );
-    return 0;
-  }
-
-  if (command === "children" || command === "child-list") {
-    const positional = removeFlags(rest, [
-      "--status",
-      "--limit",
-      "--before-updated-at",
-      "--before-thread-id",
-    ], ["--json"]);
-    const parentThreadId = normalizeText(positional[0]) || context.threadId;
-    const status = readFlag(rest, "--status", "active");
-    if (status && status.toLowerCase() !== "active") {
-      throw new Error("codeq8 threads children currently supports --status active only.");
-    }
-    const query = new URLSearchParams();
-    appendParentQuery(query, context);
-    query.set("children_of_thread_id", parentThreadId);
-    query.set("status", status);
-    query.set("limit", readFlag(rest, "--limit", "25"));
-    query.set("before_updated_at", readFlag(rest, "--before-updated-at"));
-    query.set("before_thread_id", readFlag(rest, "--before-thread-id"));
-    const payload = await requestJson({
-      context,
-      fetchImpl,
-      routeBase: "public",
-      path: "/api/chat/runs/thread-search",
-      query,
-    });
-    if (hasFlag(rest, "--json")) {
-      writeJson(stdout, payload);
-    } else {
-      writeCompactThreadList(stdout, payload, {
-        childrenOfThreadId: firstText(
-          payload.children_of_thread_id,
-          payload.childrenOfThreadId,
-          parentThreadId,
-        ),
-        status,
-      });
-    }
     return 0;
   }
 
@@ -1199,13 +1094,13 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       ["--limit", "--before-created-at", "--before-message-id"],
       ["--json"],
     );
-    const childThreadId = normalizeText(positional[0]);
-    if (!childThreadId) {
+    const targetThreadId = normalizeText(positional[0]);
+    if (!targetThreadId) {
       throw new Error("thread id is required.");
     }
     const query = new URLSearchParams();
     appendParentQuery(query, context);
-    query.set("child_thread_id", childThreadId);
+    query.set("target_thread_id", targetThreadId);
     query.set("limit", readFlag(rest, "--limit", "12"));
     query.set("before_created_at", readFlag(rest, "--before-created-at"));
     query.set("before_message_id", readFlag(rest, "--before-message-id"));
@@ -1286,9 +1181,9 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
 
   if (command === "message" || command === "send") {
     const positional = removeFlags(rest, ["--text", "--message"]);
-    const childThreadId = normalizeText(positional[0]);
+    const targetThreadId = normalizeText(positional[0]);
     const content = readFlag(rest, ["--text", "--message"]);
-    if (!childThreadId) {
+    if (!targetThreadId) {
       throw new Error("thread id is required.");
     }
     if (!content) {
@@ -1301,12 +1196,12 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       path: "/api/chat/runs/delegated-thread-messages",
       method: "POST",
       body: parentBody(context, {
-        child_thread_id: childThreadId,
+        target_thread_id: targetThreadId,
         content,
         role: "user",
       }),
     });
-    writeJson(stdout, buildDelegatedThreadMessageOutput(payload, childThreadId));
+    writeJson(stdout, buildDelegatedThreadMessageOutput(payload, targetThreadId));
     return 0;
   }
 
@@ -1431,13 +1326,13 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
 
   if (command === "state") {
     const positional = removeFlags(rest, ["--limit", "--before-created-at", "--before-message-id"]);
-    const childThreadId = normalizeText(positional[0]);
-    if (!childThreadId) {
+    const targetThreadId = normalizeText(positional[0]);
+    if (!targetThreadId) {
       throw new Error("thread id is required.");
     }
     const query = new URLSearchParams();
     appendParentQuery(query, context);
-    query.set("child_thread_id", childThreadId);
+    query.set("target_thread_id", targetThreadId);
     query.set("limit", readFlag(rest, "--limit", "50"));
     query.set("before_created_at", readFlag(rest, "--before-created-at"));
     query.set("before_message_id", readFlag(rest, "--before-message-id"));

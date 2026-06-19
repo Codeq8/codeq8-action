@@ -21,6 +21,9 @@ export const CODEQ8_PLUGIN_SOURCE_REPOSITORY = "Codeq8/codeq8-action";
 export const CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH = "plugins/codeq8";
 export const CODEQ8_PLUGIN_MARKETPLACE_ENTRY_MARKER_FILE =
   "codeq8.marketplace-entry.codeq8-managed.json";
+export const OBSOLETE_CODEQ8_PLUGIN_SKILLS = [
+  "codeq8-child-threads",
+];
 
 const MARKER_SCHEMA_VERSION = 1;
 const OPTIONAL_SKIP_STATUSES = new Set(["source_missing", "collision", "invalid_source"]);
@@ -347,6 +350,27 @@ async function replaceManagedDirectory({ sourcePath, targetPath, marker }) {
   await fs.rename(tempPath, targetPath);
 }
 
+async function removeObsoleteManagedSkills({ skillInstallRoot, activeSkills }) {
+  const activeSkillNames = new Set(activeSkills.map((skill) => skill.name));
+  const removed = [];
+  for (const skillName of OBSOLETE_CODEQ8_PLUGIN_SKILLS) {
+    if (activeSkillNames.has(skillName)) {
+      continue;
+    }
+    const targetPath = path.join(skillInstallRoot, skillName);
+    if (!(await pathExists(targetPath))) {
+      continue;
+    }
+    const marker = await readManagedMarker(targetPath);
+    if (!marker) {
+      continue;
+    }
+    await fs.rm(targetPath, { recursive: true, force: true });
+    removed.push(skillName);
+  }
+  return removed;
+}
+
 async function updateMarketplaceEntry({ marketplacePath, markerPath, state, marker, sourcePath }) {
   const marketplace = {
     ...state.marketplace,
@@ -543,6 +567,14 @@ export async function syncCodeq8PluginInstall({
       }),
     });
     targets.push(`skill:${skill.name}`);
+  }
+
+  const removedObsoleteSkills = await removeObsoleteManagedSkills({
+    skillInstallRoot: paths.skillInstallRoot,
+    activeSkills: skills,
+  });
+  for (const skillName of removedObsoleteSkills) {
+    targets.push(`removed-skill:${skillName}`);
   }
 
   await updateMarketplaceEntry({
