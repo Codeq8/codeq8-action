@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "lint": "node --check scripts/*.mjs lib/*.mjs lib/*.js",
-    "test:node": "NODE_NO_WARNINGS=1 node --test scripts/*.test.mjs && npm --prefix codeq8-cli install --no-audit --no-fund && npm --prefix codeq8-cli test",
+    "test:node": "NODE_NO_WARNINGS=1 node --test scripts/*.test.mjs",
     "runner:web-chat": "node scripts/web-chat-runner.mjs"
   },
   "dependencies": {

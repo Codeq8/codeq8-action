@@ -5,47 +5,766 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
-import {
-  appendParentQuery,
-  buildAssignedThreadOutput,
-  buildContext,
-  buildDelegatedThreadCreateOutput,
-  buildDelegatedThreadMessageOutput,
-  buildThreadGoalOutput,
-  buildThreadTitleOutput,
-  firstText,
-  formatTimestamp,
-  formatThreadRunStatus,
-  formatThreadTarget,
-  hasFlag,
-  normalizeEpochMs,
-  normalizeInteger,
-  normalizeText,
-  parentBody,
-  payloadArray,
-  payloadObject,
-  readFlag,
-  requireContext,
-  readThreadBranchContext,
-  readThreadProgressFacts,
-  readThreadPullRequest,
-  readThreadRepository,
-  removeFlags,
-  requestJson,
-  summarizeThreadMessage,
-  truncateText,
-  writeCompactThreadList,
-  writeJson,
-} from "./runner-helper-support.js";
-import type { FileCommandOptions, JsonRecord, RunnerCliOptions, StdoutLike, ThreadCommandOptions } from "./runner-helper-support.js";
+const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
+const DEFAULT_CODE_WORKER_URL = "https://control.codeq8.com";
 
-function buildThreadInspectSnapshot(payload: JsonRecord): JsonRecord {
+function normalizeText(value) {
+  return String(value || "").trim();
+}
+
+function normalizeInteger(value, fallback = 0) {
+  const parsed = Number.parseInt(String(value || "").trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeBaseUrl(value, fallback = "") {
+  const normalized = normalizeText(value || fallback).replace(/\/+$/, "");
+  return normalized;
+}
+
+function readFlag(args, names, fallback = "") {
+  const aliases = Array.isArray(names) ? names : [names];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    for (const name of aliases) {
+      if (arg === name) {
+        return normalizeText(args[index + 1]);
+      }
+      if (arg.startsWith(`${name}=`)) {
+        return normalizeText(arg.slice(name.length + 1));
+      }
+    }
+  }
+  return fallback;
+}
+
+function hasFlag(args, names) {
+  const aliases = Array.isArray(names) ? names : [names];
+  return args.some((arg) => aliases.includes(arg));
+}
+
+function removeFlags(args, flagNamesWithValues = [], booleanFlagNames = []) {
+  const valueFlags = new Set(flagNamesWithValues);
+  const booleanFlags = new Set(booleanFlagNames);
+  const positional = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (valueFlags.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if ([...valueFlags].some((flag) => arg.startsWith(`${flag}=`))) {
+      continue;
+    }
+    if (booleanFlags.has(arg)) {
+      continue;
+    }
+    positional.push(arg);
+  }
+  return positional;
+}
+
+function buildContext(env = process.env) {
+  const publicBaseUrl = normalizeBaseUrl(
+    env.CODE_PUBLIC_BASE_URL || env.CODEQ8_PUBLIC_BASE_URL,
+    DEFAULT_CODE_PUBLIC_URL,
+  );
+  const workerUrl = normalizeBaseUrl(
+    env.CODE_WORKER_URL || env.CODE_WORKER_CANONICAL_URL,
+    DEFAULT_CODE_WORKER_URL,
+  );
+  return {
+    publicBaseUrl,
+    workerUrl,
+    token: normalizeText(env.CODE_WEB_CHAT_RUN_TOKEN),
+    githubSessionCookie: normalizeText(env.CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE),
+    workspaceRepository: normalizeText(env.CODE_WORKSPACE_REPOSITORY),
+    threadId: normalizeText(env.CODE_CHAT_THREAD_ID),
+    runId: normalizeText(env.CODE_CHAT_RUN_ID),
+  };
+}
+
+function requireContext(context) {
+  const missing = [];
+  if (!context.publicBaseUrl) missing.push("CODE_PUBLIC_BASE_URL");
+  if (!context.workerUrl) missing.push("CODE_WORKER_URL");
+  if (!context.token) missing.push("CODE_WEB_CHAT_RUN_TOKEN");
+  if (!context.workspaceRepository) missing.push("CODE_WORKSPACE_REPOSITORY");
+  if (!context.threadId) missing.push("CODE_CHAT_THREAD_ID");
+  if (!context.runId) missing.push("CODE_CHAT_RUN_ID");
+  if (missing.length > 0) {
+    throw new Error(`Missing Codeq8 runner environment: ${missing.join(", ")}.`);
+  }
+}
+
+function buildHeaders(context, extra = {}) {
+  const headers = {
+    Authorization: `Bearer ${context.token}`,
+    Accept: "application/json",
+    ...extra,
+  };
+  if (context.githubSessionCookie) {
+    headers.Cookie = `code_github_session=${context.githubSessionCookie}`;
+  }
+  return headers;
+}
+
+function appendParentQuery(searchParams, context) {
+  searchParams.set("workspace_repository", context.workspaceRepository);
+  searchParams.set("thread_id", context.threadId);
+  searchParams.set("run_id", context.runId);
+}
+
+function parentBody(context, extra = {}) {
+  return {
+    workspace_repository: context.workspaceRepository,
+    thread_id: context.threadId,
+    run_id: context.runId,
+    ...extra,
+  };
+}
+
+async function requestJson({
+  context,
+  fetchImpl,
+  routeBase,
+  path: routePath,
+  method = "GET",
+  query = null,
+  body = null,
+}) {
+  const base = routeBase === "worker" ? context.workerUrl : context.publicBaseUrl;
+  const url = new URL(routePath, `${base}/`);
+  if (query instanceof URLSearchParams) {
+    for (const [key, value] of query.entries()) {
+      if (normalizeText(value)) {
+        url.searchParams.set(key, value);
+      }
+    }
+  }
+  const response = await fetchImpl(url.toString(), {
+    method,
+    headers: buildHeaders(context, body ? { "Content-Type": "application/json" } : {}),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
+  if (!response.ok || payload?.ok === false) {
+    throw new Error(
+      normalizeText(payload?.error) ||
+        `Codeq8 request failed (${response.status || 0}) for ${routePath}.`,
+    );
+  }
+  return payload;
+}
+
+function payloadObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function payloadArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function firstText(...values) {
+  for (const value of values) {
+    const normalized = normalizeText(value);
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function firstPositiveNumber(...values) {
+  for (const value of values) {
+    const normalized = normalizeNumber(value, 0);
+    if (normalized > 0) {
+      return normalized;
+    }
+  }
+  return 0;
+}
+
+function normalizeEpochMs(value) {
+  const parsed = Number.parseInt(String(value || "").trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function formatTimestamp(value) {
+  const epochMs = normalizeEpochMs(value);
+  return epochMs > 0 ? new Date(epochMs).toISOString() : "";
+}
+
+function formatThreadTarget(thread) {
+  const branchContext = payloadObject(thread.branch_context || thread.branchContext);
+  const pullRequestNumber = normalizeInteger(
+    branchContext.pull_request_number || branchContext.pullRequestNumber,
+    0,
+  );
+  if (pullRequestNumber > 0) {
+    return `#${pullRequestNumber}`;
+  }
+  return (
+    normalizeText(branchContext.context_branch || branchContext.contextBranch) ||
+    normalizeText(branchContext.base_branch || branchContext.baseBranch) ||
+    normalizeText(thread.source_type || thread.sourceType)
+  );
+}
+
+function formatThreadRunStatus(thread) {
+  return (
+    normalizeText(thread.latest_run_status || thread.latestRunStatus) ||
+    normalizeText(payloadObject(thread.latest_run || thread.latestRun).status) ||
+    normalizeText(payloadObject(thread.run || {}).status)
+  );
+}
+
+function formatThreadUpdatedAt(thread) {
+  return formatTimestamp(
+    thread.updated_at ||
+      thread.updatedAt ||
+      thread.last_message_at ||
+      thread.lastMessageAt ||
+      thread.created_at ||
+      thread.createdAt,
+  );
+}
+
+function readThreadParentThreadId(thread) {
+  return firstText(thread.parent_thread_id, thread.parentThreadId);
+}
+
+function formatThreadRelation(thread) {
+  const parentThreadId = readThreadParentThreadId(thread);
+  return parentThreadId ? `child-of:${parentThreadId}` : "top-level";
+}
+
+function writeCompactThreadList(
+  stdout,
+  payload,
+  { assignedLabel = "me", childrenOfThreadId = "", showRelationColumn = false, status = "" } = {},
+) {
+  const threads = payloadArray(payload.threads);
+  const repository = normalizeText(payload.repository);
+  const normalizedStatus = normalizeText(status || payload.status || "");
+  stdout.write(`Repository: ${repository || "(unknown)"}\n`);
+  if (childrenOfThreadId) {
+    stdout.write(`Children of: ${childrenOfThreadId}\n`);
+  } else {
+    stdout.write(`Assigned: ${assignedLabel || "me"}\n`);
+  }
+  if (normalizedStatus) {
+    stdout.write(`Status: ${normalizedStatus}\n`);
+  }
+  const lifecycleFilter = firstText(payload.lifecycle_filter, payload.lifecycleFilter);
+  if (lifecycleFilter) {
+    stdout.write(`Lifecycle filter: ${lifecycleFilter}\n`);
+  }
+  const lifecycleNote = firstText(payload.lifecycle_note, payload.lifecycleNote);
+  if (lifecycleNote) {
+    stdout.write(`Lifecycle note: ${lifecycleNote}\n`);
+  } else if (childrenOfThreadId) {
+    stdout.write("Lifecycle note: Child thread listing currently supports the active/open lifecycle only.\n");
+  }
+  stdout.write("\n");
+
+  if (threads.length === 0) {
+    stdout.write(
+      childrenOfThreadId
+        ? "No open child threads.\n"
+        : "No matching assigned threads.\n",
+    );
+  } else {
+    stdout.write(
+      showRelationColumn
+        ? "thread_id\tstatus\trelation\trun\ttarget\tupdated_at\ttitle\n"
+        : "thread_id\tstatus\trun\ttarget\tupdated_at\ttitle\n",
+    );
+    for (const entry of threads) {
+      const thread = payloadObject(entry);
+      const columns = [
+        normalizeText(thread.thread_id || thread.threadId),
+        normalizeText(thread.status),
+      ];
+      if (showRelationColumn) {
+        columns.push(formatThreadRelation(thread));
+      }
+      columns.push(
+        formatThreadRunStatus(thread),
+        formatThreadTarget(thread),
+        formatThreadUpdatedAt(thread),
+        normalizeText(thread.title || "(untitled)").replace(/\s+/g, " "),
+      );
+      stdout.write(columns.join("\t") + "\n");
+    }
+  }
+
+  stdout.write("\n");
+  stdout.write(`Page count: ${normalizeInteger(payload.page_count || payload.pageCount, 0)}\n`);
+  stdout.write(`Has more: ${payload.has_more || payload.hasMore ? "yes" : "no"}\n`);
+  const nextUpdatedAt = normalizeEpochMs(payload.next_before_updated_at || payload.nextBeforeUpdatedAt);
+  const nextThreadId = normalizeText(payload.next_before_thread_id || payload.nextBeforeThreadId);
+  if (nextUpdatedAt || nextThreadId) {
+    stdout.write(
+      `Next: --before-updated-at ${nextUpdatedAt || ""} --before-thread-id ${nextThreadId}\n`,
+    );
+  }
+}
+
+function truncateText(value, maxLength = 240) {
+  const normalized = redactSensitiveText(normalizeText(value).replace(/\s+/g, " "));
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function isSensitiveOutputKey(key) {
+  const normalized = normalizeText(key).toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (
+    new Set([
+      "token_budget",
+      "tokenbudget",
+      "tokens_used",
+      "tokensused",
+      "token_usage",
+      "tokenusage",
+      "token_usage_updates",
+      "tokenusageupdates",
+    ]).has(normalized)
+  ) {
+    return false;
+  }
+  return (
+    /(^|_)(authorization|cookie|credential|handoff|password|secret|session|token)($|_)/i.test(
+      normalized,
+    ) ||
+    /(^|_)api_?key($|_)/i.test(normalized) ||
+    /(^|_)private_?key($|_)/i.test(normalized) ||
+    normalized === "session_bundle_key" ||
+    normalized === "bundle_storage_key"
+  );
+}
+
+function redactSensitiveText(value) {
+  return normalizeText(value)
+    .replace(/gh[pousr]_[A-Za-z0-9_]{20,}/g, "[redacted]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]")
+    .replace(
+      /\b(thread_stream_token|thread_record_handoff|run_record_handoff|repository_access_handoff|codex_session_state|github_web_session_cookie|session_id|session_file_relative_path|session_bundle_key|bundle_storage_key|authorization|cookie|credential|handoff|token|secret|password|api_key|private_key)\b\s*[:=]\s*("[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$1=[redacted]",
+    );
+}
+
+function sanitizeForOutput(value) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeForOutput(entry));
+  }
+  if (value && typeof value === "object") {
+    const sanitized = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (isSensitiveOutputKey(key)) {
+        continue;
+      }
+      sanitized[key] = sanitizeForOutput(entry);
+    }
+    return sanitized;
+  }
+  if (typeof value === "string") {
+    return redactSensitiveText(value);
+  }
+  return value;
+}
+
+function writeJson(stdout, payload) {
+  stdout.write(`${JSON.stringify(sanitizeForOutput(payload), null, 2)}\n`);
+}
+
+function compactObject(entries) {
+  const output = {};
+  for (const [key, value] of Object.entries(entries)) {
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+    if (typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0) {
+      continue;
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
+function summarizeThreadForOutput(thread, payload = {}) {
+  const normalized = payloadObject(thread);
+  const summary = compactObject({
+    thread_id: firstText(
+      normalized.thread_id,
+      normalized.threadId,
+      payload.child_thread_id,
+      payload.target_thread_id,
+      payload.thread_id,
+    ),
+    repository: readThreadRepository(normalized, payload),
+    title: truncateText(firstText(normalized.title), 160),
+    title_source: firstText(normalized.title_source, normalized.titleSource),
+    parent_thread_id: firstText(
+      normalized.parent_thread_id,
+      normalized.parentThreadId,
+      payload.target_parent_thread_id,
+      payload.targetParentThreadId,
+    ),
+    status: firstText(normalized.status, payload.status),
+    aggregate_status: firstText(normalized.aggregate_status, normalized.aggregateStatus),
+    source_type: firstText(normalized.source_type, normalized.sourceType),
+    assigned_to_kind: firstText(normalized.assigned_to_kind, normalized.assignedToKind),
+    assigned_to_github_login: firstText(
+      normalized.assigned_to_github_login,
+      normalized.assignedToGithubLogin,
+    ),
+    updated_at: normalizeEpochMs(normalized.updated_at || normalized.updatedAt),
+  });
+  return sanitizeForOutput(summary);
+}
+
+function summarizeRunForOutput(run) {
+  const normalized = payloadObject(run);
+  return sanitizeForOutput(
+    compactObject({
+      run_id: firstText(normalized.run_id, normalized.runId),
+      status: firstText(normalized.status),
+      started_at: normalizeEpochMs(normalized.started_at || normalized.startedAt),
+      updated_at: normalizeEpochMs(normalized.updated_at || normalized.updatedAt),
+    }),
+  );
+}
+
+function summarizeMessageForOutput(message) {
+  const summary = summarizeThreadMessage(message);
+  return sanitizeForOutput(compactObject(summary));
+}
+
+function summarizeGoalForOutput(goal) {
+  const normalized = payloadObject(goal);
+  return sanitizeForOutput(
+    compactObject({
+      objective: truncateText(firstText(normalized.objective), 240),
+      status: firstText(normalized.status),
+      created_at: normalizeEpochMs(normalized.created_at || normalized.createdAt),
+      updated_at: normalizeEpochMs(normalized.updated_at || normalized.updatedAt),
+    }),
+  );
+}
+
+function parentSummaryFields(payload) {
+  const runnerParentThreadId = firstText(
+    payload.runner_parent_thread_id,
+    payload.runnerParentThreadId,
+    payload.parent_thread_id,
+    payload.parentThreadId,
+  );
+  const runnerParentRunId = firstText(
+    payload.runner_parent_run_id,
+    payload.runnerParentRunId,
+    payload.parent_run_id,
+    payload.parentRunId,
+  );
+  const runnerParentRepository = firstText(
+    payload.runner_parent_workspace_repository,
+    payload.runnerParentWorkspaceRepository,
+    payload.parent_workspace_repository,
+    payload.parentWorkspaceRepository,
+  );
+  return compactObject({
+    runner_parent_thread_id: runnerParentThreadId,
+    runner_parent_run_id: runnerParentRunId,
+    runner_parent_workspace_repository: runnerParentRepository,
+    // Backward-compatible aliases for callers that still read parent_*.
+    parent_thread_id: runnerParentThreadId,
+    parent_run_id: runnerParentRunId,
+    parent_workspace_repository: runnerParentRepository,
+  });
+}
+
+function readThreadOutputId(payload, fallback = "") {
+  const thread = payloadObject(payload.thread);
+  return firstText(
+    payload.child_thread_id,
+    payload.childThreadId,
+    payload.target_thread_id,
+    payload.targetThreadId,
+    payload.assigned_thread_id,
+    payload.assignedThreadId,
+    payload.thread_id,
+    payload.threadId,
+    thread.thread_id,
+    thread.threadId,
+    fallback,
+  );
+}
+
+function readDelegatedDispatchState(payload) {
+  if (payload.delegated_dispatch_failed || payload.delegatedDispatchFailed) {
+    return "failed";
+  }
+  if (payload.delegated) {
+    return "delegated";
+  }
+  if (payload.ok) {
+    return "created";
+  }
+  return "";
+}
+
+function buildDelegatedThreadCreateOutput(payload) {
+  const thread = summarizeThreadForOutput(payload.thread, payload);
+  const threadId = readThreadOutputId(payload);
+  const message = summarizeMessageForOutput(payload.message);
+  const followUpMessageCommand = threadId
+    ? `codeq8 threads message ${threadId} --text "..."`
+    : "";
+  return compactObject({
+    ok: Boolean(payload.ok),
+    delegated: Boolean(payload.delegated),
+    child_thread_id: threadId,
+    delegated_dispatch_failed: payload.delegated_dispatch_failed ? true : undefined,
+    dispatch_state: readDelegatedDispatchState(payload),
+    ...parentSummaryFields(payload),
+    thread,
+    run: summarizeRunForOutput(payload.run),
+    message,
+    follow_up_inspect_command: threadId ? `codeq8 threads inspect ${threadId}` : "",
+    follow_up_message_command: followUpMessageCommand,
+    follow_up_command: followUpMessageCommand,
+  });
+}
+
+function buildDelegatedThreadMessageOutput(payload, fallbackThreadId) {
+  const thread = summarizeThreadForOutput(payload.thread, payload);
+  const threadId = readThreadOutputId(payload, fallbackThreadId);
+  const message = summarizeMessageForOutput(payload.message);
+  return compactObject({
+    ok: Boolean(payload.ok),
+    delegated: Boolean(payload.delegated),
+    child_thread_id: threadId,
+    ...parentSummaryFields(payload),
+    thread,
+    message,
+    follow_up_command: threadId ? `codeq8 threads inspect ${threadId}` : "",
+  });
+}
+
+function buildAssignedThreadOutput(payload, fallbackThreadId) {
+  return compactObject({
+    ok: Boolean(payload.ok),
+    assigned: Boolean(payload.assigned),
+    updated: payload.updated !== false,
+    assigned_thread_id: readThreadOutputId(payload, fallbackThreadId),
+    assigned_to_github_login: firstText(payload.assigned_to_github_login, payload.assignedToGithubLogin),
+    assigned_by_github_login: firstText(payload.assigned_by_github_login, payload.assignedByGithubLogin),
+    ...parentSummaryFields(payload),
+    thread: summarizeThreadForOutput(payload.thread, payload),
+    error: firstText(payload.error),
+  });
+}
+
+function buildThreadGoalOutput(payload, fallbackThreadId) {
+  return compactObject({
+    ok: Boolean(payload.ok),
+    updated: payload.updated !== false,
+    cleared: Boolean(payload.cleared),
+    target_thread_id: readThreadOutputId(payload, fallbackThreadId),
+    ...parentSummaryFields(payload),
+    thread: summarizeThreadForOutput(payload.thread, payload),
+    codex_goal_state: summarizeGoalForOutput(payload.codex_goal_state || payload.codexGoalState),
+    error: firstText(payload.error),
+  });
+}
+
+function buildThreadTitleOutput(payload, fallbackThreadId, fallbackTitle) {
+  const thread = payloadObject(payload.thread);
+  return compactObject({
+    ok: Boolean(payload.ok),
+    titled: payload.titled !== false,
+    updated: payload.updated !== false,
+    target_thread_id: readThreadOutputId(payload, fallbackThreadId),
+    ...parentSummaryFields(payload),
+    title: firstText(payload.title, thread.title, fallbackTitle),
+    title_source: firstText(payload.title_source, payload.titleSource, thread.title_source, thread.titleSource),
+    thread: summarizeThreadForOutput(thread, payload),
+    error: firstText(payload.error),
+  });
+}
+
+function readThreadBranchContext(thread) {
+  return payloadObject(thread.branch_context || thread.branchContext);
+}
+
+function readThreadGitHubContext(thread) {
+  return payloadObject(thread.github_context || thread.githubContext);
+}
+
+function readThreadPullRequest(thread) {
+  const branchContext = readThreadBranchContext(thread);
+  const githubContext = readThreadGitHubContext(thread);
+  const githubPullRequest = payloadObject(
+    githubContext.pull_request || githubContext.pullRequest,
+  );
+  const pullRequestNumber = firstPositiveNumber(
+    branchContext.pull_request_number,
+    branchContext.pullRequestNumber,
+    githubPullRequest.number,
+    githubPullRequest.pull_request_number,
+  );
+  return {
+    number: pullRequestNumber,
+    url: firstText(
+      branchContext.pull_request_url,
+      branchContext.pullRequestUrl,
+      githubPullRequest.html_url,
+      githubPullRequest.url,
+    ),
+    base_branch: firstText(
+      branchContext.pull_request_base_branch,
+      branchContext.pullRequestBaseBranch,
+      payloadObject(githubPullRequest.base).ref,
+    ),
+    head_branch: firstText(
+      branchContext.pull_request_head_branch,
+      branchContext.pullRequestHeadBranch,
+      payloadObject(githubPullRequest.head).ref,
+    ),
+  };
+}
+
+function readThreadRepository(thread, payload) {
+  const githubContext = readThreadGitHubContext(thread);
+  const repository = payloadObject(githubContext.repository);
+  return firstText(
+    thread.workspace_repository,
+    thread.workspaceRepository,
+    payload.repository,
+    repository.full_name,
+    repository.fullName,
+  );
+}
+
+function summarizeThreadMessage(message) {
+  const normalized = payloadObject(message);
+  return {
+    message_id: firstText(normalized.message_id, normalized.messageId),
+    role: firstText(normalized.role),
+    created_at: normalizeEpochMs(normalized.created_at || normalized.createdAt),
+    preview: truncateText(
+      firstText(
+        normalized.content,
+        normalized.text,
+        normalized.preview,
+        normalized.message,
+      ),
+      320,
+    ),
+  };
+}
+
+function readProgressCandidate(value) {
+  const candidate = payloadObject(value);
+  if (Object.keys(candidate).length === 0) {
+    return null;
+  }
+  const events = payloadArray(candidate.events || candidate.progress_events || candidate.progressEvents);
+  const latestEvent = payloadObject(events[events.length - 1]);
+  const latestReasoningEvent = [...events]
+    .reverse()
+    .map((event) => payloadObject(event))
+    .find((event) =>
+      /reasoning/i.test(firstText(event.item_type, event.itemType, event.kind, event.type)),
+    );
+  const label = firstText(
+    candidate.label,
+    candidate.latest_label,
+    candidate.latestLabel,
+    candidate.status_text,
+    candidate.statusText,
+    latestEvent.label,
+    latestEvent.text,
+    latestEvent.message,
+  );
+  const reasoning = firstText(
+    candidate.reasoning,
+    candidate.latest_reasoning,
+    candidate.latestReasoning,
+    latestReasoningEvent?.label,
+    latestReasoningEvent?.text,
+    latestReasoningEvent?.message,
+  );
+  const status = firstText(candidate.status, latestEvent.status);
+  const revision = firstText(candidate.revision, candidate.version);
+  const updatedAt = normalizeEpochMs(
+    candidate.updated_at ||
+      candidate.updatedAt ||
+      latestEvent.updated_at ||
+      latestEvent.updatedAt ||
+      latestEvent.created_at ||
+      latestEvent.createdAt,
+  );
+  if (!label && !reasoning && !status && !revision && !updatedAt) {
+    return null;
+  }
+  return {
+    status,
+    label: truncateText(label, 240),
+    reasoning: truncateText(reasoning, 240),
+    revision,
+    updated_at: updatedAt,
+  };
+}
+
+function readThreadProgressFacts(payload, thread) {
+  const threadAppServer = payloadObject(thread.app_server || thread.appServer);
+  const payloadAppServer = payloadObject(payload.app_server || payload.appServer);
+  const candidates = [
+    payload.progress,
+    payload.live_status,
+    payload.liveStatus,
+    payload.app_server_progress,
+    payload.appServerProgress,
+    payloadAppServer.progress,
+    payloadAppServer.live_status,
+    thread.progress,
+    thread.live_status,
+    thread.liveStatus,
+    thread.app_server_progress,
+    thread.appServerProgress,
+    threadAppServer.progress,
+    threadAppServer.live_status,
+  ];
+  for (const candidate of candidates) {
+    const progress = readProgressCandidate(candidate);
+    if (progress) {
+      return progress;
+    }
+  }
+  return null;
+}
+
+function buildThreadInspectSnapshot(payload) {
   const thread = payloadObject(payload.thread);
   const branchContext = readThreadBranchContext(thread);
   const pullRequest = readThreadPullRequest(thread);
   const progress = readThreadProgressFacts(payload, thread);
   const targetThreadId = firstText(
     payload.target_thread_id,
+    payload.child_thread_id,
     payload.thread_id,
     thread.thread_id,
     thread.threadId,
@@ -53,14 +772,26 @@ function buildThreadInspectSnapshot(payload: JsonRecord): JsonRecord {
   const runnerParentThreadId = firstText(
     payload.runner_parent_thread_id,
     payload.runnerParentThreadId,
+    payload.parent_thread_id,
+    payload.parentThreadId,
   );
   const runnerParentRunId = firstText(
     payload.runner_parent_run_id,
     payload.runnerParentRunId,
+    payload.parent_run_id,
+    payload.parentRunId,
   );
   const runnerParentRepository = firstText(
     payload.runner_parent_workspace_repository,
     payload.runnerParentWorkspaceRepository,
+    payload.parent_workspace_repository,
+    payload.parentWorkspaceRepository,
+  );
+  const targetParentThreadId = firstText(
+    payload.target_parent_thread_id,
+    payload.targetParentThreadId,
+    thread.parent_thread_id,
+    thread.parentThreadId,
   );
   const latestRunId = firstText(
     thread.latest_run_id,
@@ -93,11 +824,13 @@ function buildThreadInspectSnapshot(payload: JsonRecord): JsonRecord {
     runner_parent_thread_id: runnerParentThreadId,
     runner_parent_run_id: runnerParentRunId,
     runner_parent_workspace_repository: runnerParentRepository,
+    target_parent_thread_id: targetParentThreadId,
     target_thread_id: targetThreadId,
     thread: {
       thread_id: targetThreadId,
       repository: readThreadRepository(thread, payload),
       title: truncateText(thread.title || "(untitled)", 160),
+      parent_thread_id: targetParentThreadId,
       status: firstText(thread.status),
       aggregate_status: firstText(thread.aggregate_status, thread.aggregateStatus),
       source_type: firstText(thread.source_type, thread.sourceType),
@@ -163,7 +896,7 @@ function buildThreadInspectSnapshot(payload: JsonRecord): JsonRecord {
   };
 }
 
-function writeThreadInspect(stdout: StdoutLike, snapshot: JsonRecord): void {
+function writeThreadInspect(stdout, snapshot) {
   const thread = payloadObject(snapshot.thread);
   const run = payloadObject(snapshot.run);
   const checks = payloadObject(snapshot.checks);
@@ -196,6 +929,11 @@ function writeThreadInspect(stdout: StdoutLike, snapshot: JsonRecord): void {
         snapshot.runner_parent_run_id ? `run=${snapshot.runner_parent_run_id}` : "",
       ].filter(Boolean).join(" ") || "(unknown)"}\n`,
     );
+  }
+  if (thread.parent_thread_id || snapshot.target_parent_thread_id) {
+    stdout.write(`Target parent: ${thread.parent_thread_id || snapshot.target_parent_thread_id}\n`);
+  } else {
+    stdout.write("Target parent: (none)\n");
   }
   const pullRequestLabel = pullRequest.number
     ? `PR #${pullRequest.number}${pullRequest.url ? ` ${pullRequest.url}` : ""}`
@@ -240,8 +978,7 @@ function writeThreadInspect(stdout: StdoutLike, snapshot: JsonRecord): void {
   if (recentMessages.length === 0) {
     stdout.write("- (none returned)\n");
   } else {
-    for (const entry of recentMessages) {
-      const message = payloadObject(entry);
+    for (const message of recentMessages) {
       const createdAt = message.created_at ? `${formatTimestamp(message.created_at)} ` : "";
       stdout.write(
         `- ${createdAt}${message.role || "message"}: ${message.preview || "(empty)"}\n`,
@@ -264,11 +1001,11 @@ function writeThreadInspect(stdout: StdoutLike, snapshot: JsonRecord): void {
   }
 }
 
-function writeDelegatedThreadCreate(stdout: StdoutLike, snapshot: JsonRecord): void {
+function writeDelegatedThreadCreate(stdout, snapshot) {
   const thread = payloadObject(snapshot.thread);
   const run = payloadObject(snapshot.run);
   const message = payloadObject(snapshot.message);
-  const threadId = snapshot.target_thread_id || thread.thread_id || "(unknown)";
+  const threadId = snapshot.child_thread_id || thread.thread_id || "(unknown)";
   const statusLine = [
     thread.status ? `status=${thread.status}` : "",
     run.status ? `run=${run.status}` : "",
@@ -277,11 +1014,11 @@ function writeDelegatedThreadCreate(stdout: StdoutLike, snapshot: JsonRecord): v
 
   stdout.write(`Created thread: ${threadId}\n`);
   stdout.write(`Title: ${thread.title || "(untitled)"}\n`);
-  stdout.write(`Repository: ${thread.repository || snapshot.runner_parent_workspace_repository || "(unknown)"}\n`);
+  stdout.write(`Repository: ${thread.repository || snapshot.parent_workspace_repository || "(unknown)"}\n`);
   stdout.write(`State: ${statusLine || "(unknown)"}\n`);
-  if (snapshot.runner_parent_thread_id || snapshot.runner_parent_run_id) {
+  if (snapshot.parent_thread_id || snapshot.parent_run_id) {
     stdout.write(
-      `Runner: ${[snapshot.runner_parent_thread_id, snapshot.runner_parent_run_id ? `run=${snapshot.runner_parent_run_id}` : ""]
+      `Parent: ${[snapshot.parent_thread_id, snapshot.parent_run_id ? `run=${snapshot.parent_run_id}` : ""]
         .filter(Boolean)
         .join(" ")}\n`,
     );
@@ -304,7 +1041,7 @@ function writeDelegatedThreadCreate(stdout: StdoutLike, snapshot: JsonRecord): v
   );
 }
 
-function printHelp(stdout: StdoutLike): void {
+function printHelp(stdout) {
   stdout.write(
     [
       "Codeq8 runner helper",
@@ -312,6 +1049,7 @@ function printHelp(stdout: StdoutLike): void {
       "Usage:",
       "  codeq8 threads mine [--status active|all] [--limit 25]",
       "  codeq8 threads search [--search text] [--status active|all] [--limit 25]",
+      "  codeq8 threads children [parent-thread-id] [--status active] [--limit 25] [--json]",
       "  codeq8 threads context <thread-id> [--limit 20]",
       "  codeq8 threads inspect <thread-id> [--limit 12] [--json]",
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
@@ -327,17 +1065,14 @@ function printHelp(stdout: StdoutLike): void {
       "  codeq8 github issue attachments <url|number> [--repo owner/repo] [--comments] --output-dir dir",
       "",
       "Authentication is read from the Codeq8 runner environment. Tokens are never printed.",
+      "Assigned thread lists label child rows as child-of:<parent-thread-id>.",
+      "Child thread listing defaults to the current parent thread and currently supports the active/open lifecycle only.",
       "",
     ].join("\n"),
   );
 }
 
-async function handleThreadsCommand({
-  args,
-  context,
-  fetchImpl,
-  stdout,
-}: ThreadCommandOptions): Promise<number> {
+async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
   const [command, ...rest] = args;
   if (!command || command === "--help" || command === "help") {
     printHelp(stdout);
@@ -363,6 +1098,7 @@ async function handleThreadsCommand({
     });
     writeCompactThreadList(stdout, payload, {
       assignedLabel: "me",
+      showRelationColumn: true,
       status,
     });
     return 0;
@@ -388,6 +1124,47 @@ async function handleThreadsCommand({
         query,
       }),
     );
+    return 0;
+  }
+
+  if (command === "children" || command === "child-list") {
+    const positional = removeFlags(rest, [
+      "--status",
+      "--limit",
+      "--before-updated-at",
+      "--before-thread-id",
+    ], ["--json"]);
+    const parentThreadId = normalizeText(positional[0]) || context.threadId;
+    const status = readFlag(rest, "--status", "active");
+    if (status && status.toLowerCase() !== "active") {
+      throw new Error("codeq8 threads children currently supports --status active only.");
+    }
+    const query = new URLSearchParams();
+    appendParentQuery(query, context);
+    query.set("children_of_thread_id", parentThreadId);
+    query.set("status", status);
+    query.set("limit", readFlag(rest, "--limit", "25"));
+    query.set("before_updated_at", readFlag(rest, "--before-updated-at"));
+    query.set("before_thread_id", readFlag(rest, "--before-thread-id"));
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/thread-search",
+      query,
+    });
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, payload);
+    } else {
+      writeCompactThreadList(stdout, payload, {
+        childrenOfThreadId: firstText(
+          payload.children_of_thread_id,
+          payload.childrenOfThreadId,
+          parentThreadId,
+        ),
+        status,
+      });
+    }
     return 0;
   }
 
@@ -422,13 +1199,13 @@ async function handleThreadsCommand({
       ["--limit", "--before-created-at", "--before-message-id"],
       ["--json"],
     );
-    const targetThreadId = normalizeText(positional[0]);
-    if (!targetThreadId) {
+    const childThreadId = normalizeText(positional[0]);
+    if (!childThreadId) {
       throw new Error("thread id is required.");
     }
     const query = new URLSearchParams();
     appendParentQuery(query, context);
-    query.set("target_thread_id", targetThreadId);
+    query.set("child_thread_id", childThreadId);
     query.set("limit", readFlag(rest, "--limit", "12"));
     query.set("before_created_at", readFlag(rest, "--before-created-at"));
     query.set("before_message_id", readFlag(rest, "--before-message-id"));
@@ -509,9 +1286,9 @@ async function handleThreadsCommand({
 
   if (command === "message" || command === "send") {
     const positional = removeFlags(rest, ["--text", "--message"]);
-    const targetThreadId = normalizeText(positional[0]);
+    const childThreadId = normalizeText(positional[0]);
     const content = readFlag(rest, ["--text", "--message"]);
-    if (!targetThreadId) {
+    if (!childThreadId) {
       throw new Error("thread id is required.");
     }
     if (!content) {
@@ -524,12 +1301,12 @@ async function handleThreadsCommand({
       path: "/api/chat/runs/delegated-thread-messages",
       method: "POST",
       body: parentBody(context, {
-        target_thread_id: targetThreadId,
+        child_thread_id: childThreadId,
         content,
         role: "user",
       }),
     });
-    writeJson(stdout, buildDelegatedThreadMessageOutput(payload, targetThreadId));
+    writeJson(stdout, buildDelegatedThreadMessageOutput(payload, childThreadId));
     return 0;
   }
 
@@ -654,13 +1431,13 @@ async function handleThreadsCommand({
 
   if (command === "state") {
     const positional = removeFlags(rest, ["--limit", "--before-created-at", "--before-message-id"]);
-    const targetThreadId = normalizeText(positional[0]);
-    if (!targetThreadId) {
+    const childThreadId = normalizeText(positional[0]);
+    if (!childThreadId) {
       throw new Error("thread id is required.");
     }
     const query = new URLSearchParams();
     appendParentQuery(query, context);
-    query.set("target_thread_id", targetThreadId);
+    query.set("child_thread_id", childThreadId);
     query.set("limit", readFlag(rest, "--limit", "50"));
     query.set("before_created_at", readFlag(rest, "--before-created-at"));
     query.set("before_message_id", readFlag(rest, "--before-message-id"));
@@ -680,11 +1457,11 @@ async function handleThreadsCommand({
   throw new Error(`Unknown threads command: ${command}.`);
 }
 
-function decodeBase64Url(value: unknown): Buffer {
+function decodeBase64Url(value) {
   return Buffer.from(normalizeText(value), "base64url");
 }
 
-function sanitizeFileName(value: unknown, fallback = "attachment"): string {
+function sanitizeFileName(value, fallback = "attachment") {
   const normalized = normalizeText(value || fallback)
     .replace(/[\\/]+/g, "-")
     .replace(/[\u0000-\u001f]/g, "")
@@ -693,7 +1470,7 @@ function sanitizeFileName(value: unknown, fallback = "attachment"): string {
   return normalized || fallback;
 }
 
-function extensionForContentType(contentType: unknown): string {
+function extensionForContentType(contentType) {
   const normalized = normalizeText(contentType).toLowerCase();
   if (normalized === "image/png") return ".png";
   if (normalized === "image/jpeg" || normalized === "image/jpg") return ".jpg";
@@ -703,7 +1480,7 @@ function extensionForContentType(contentType: unknown): string {
   return "";
 }
 
-function ensureFileNameExtension(name: unknown, contentType: unknown): string {
+function ensureFileNameExtension(name, contentType) {
   const normalizedName = sanitizeFileName(name);
   if (path.extname(normalizedName)) {
     return normalizedName;
@@ -715,11 +1492,7 @@ async function writeGitHubIssueAttachmentFiles({
   attachments,
   outputDir,
   cwd,
-}: {
-  attachments: JsonRecord[];
-  outputDir: string;
-  cwd: string;
-}): Promise<JsonRecord[]> {
+}) {
   const resolvedOutputDir = path.resolve(cwd, outputDir);
   await fs.mkdir(resolvedOutputDir, { recursive: true });
   const usedNames = new Set();
@@ -757,13 +1530,7 @@ async function writeGitHubIssueAttachmentFiles({
   return materialized;
 }
 
-async function handleAttachmentsCommand({
-  args,
-  context,
-  fetchImpl,
-  stdout,
-  cwd,
-}: FileCommandOptions): Promise<number> {
+async function handleAttachmentsCommand({ args, context, fetchImpl, stdout, cwd }) {
   const [command, ...rest] = args;
   if (!command || command === "--help" || command === "help") {
     printHelp(stdout);
@@ -814,13 +1581,7 @@ async function handleAttachmentsCommand({
   return 0;
 }
 
-async function handleGitHubCommand({
-  args,
-  context,
-  fetchImpl,
-  stdout,
-  cwd,
-}: FileCommandOptions): Promise<number> {
+async function handleGitHubCommand({ args, context, fetchImpl, stdout, cwd }) {
   const [resource, command, ...rest] = args;
   if (!resource || resource === "--help" || resource === "help") {
     printHelp(stdout);
@@ -890,8 +1651,9 @@ export async function handleRunnerCodeq8Cli({
   env = process.env,
   fetchImpl = globalThis.fetch,
   stdout = process.stdout,
+  stderr = process.stderr,
   cwd = process.cwd(),
-}: RunnerCliOptions = {}): Promise<number> {
+} = {}) {
   const args = Array.isArray(argv) ? argv.map((entry) => normalizeText(entry)).filter(Boolean) : [];
   if (args.length === 0 || hasFlag(args, ["--help", "-h"]) || args[0] === "help") {
     printHelp(stdout);

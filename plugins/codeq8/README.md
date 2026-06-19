@@ -7,6 +7,7 @@ without changing `CODEX_HOME` or overwriting unmarked user-owned Codex state.
 Bundled skills:
 
 - `codeq8-plugin`: plugin runtime boundaries and rollout checkpoints.
+- `codeq8-child-threads`: Child Threads runtime coordination behavior.
 - `codeq8-skill-stewardship`: proactive skill and repo-memory maintenance
   during Codeq8 runs.
 
