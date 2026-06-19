@@ -237,6 +237,28 @@ async function assertManagedDirectoryOrAbsent(targetPath, collisionTarget) {
   }
 }
 
+async function removeObsoleteManagedSkillDirectories({ skillInstallRoot, bundledSkillNames }) {
+  if (!(await pathExists(skillInstallRoot))) {
+    return [];
+  }
+  const bundledNames = new Set(normalizeList(bundledSkillNames));
+  const removed = [];
+  const entries = await fs.readdir(skillInstallRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || bundledNames.has(entry.name)) {
+      continue;
+    }
+    const targetPath = path.join(skillInstallRoot, entry.name);
+    const marker = await readManagedMarker(targetPath);
+    if (!marker) {
+      continue;
+    }
+    await fs.rm(targetPath, { recursive: true, force: true });
+    removed.push(entry.name);
+  }
+  return removed.sort((left, right) => left.localeCompare(right));
+}
+
 async function readMarketplaceState(marketplacePath, markerPath) {
   if (!(await pathExists(marketplacePath))) {
     return {
@@ -529,6 +551,13 @@ export async function syncCodeq8PluginInstall({
     "plugin",
     ...mcpServerNames.map((serverName) => `mcp:${serverName}`),
   ];
+  const removedSkills = await removeObsoleteManagedSkillDirectories({
+    skillInstallRoot: paths.skillInstallRoot,
+    bundledSkillNames: skills.map((skill) => skill.name),
+  });
+  for (const skillName of removedSkills) {
+    targets.push(`removed-skill:${skillName}`);
+  }
   for (const skill of skills) {
     await replaceManagedDirectory({
       sourcePath: skill.sourcePath,

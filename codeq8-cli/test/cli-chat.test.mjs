@@ -524,7 +524,7 @@ test("chat thread send posts canonical message payload", async () => {
             message_id: "wcm_123",
             thread_id: "wct_123",
             role: "user",
-            content: "Please review child thread",
+            content: "Please review managed thread",
             github_login: "aalzanki",
             metadata: {
               dispatch: false,
@@ -554,7 +554,7 @@ test("chat thread send posts canonical message payload", async () => {
         "--no-dispatch",
         "Please",
         "review",
-        "child",
+        "managed",
         "thread",
       ],
       { env },
@@ -562,7 +562,7 @@ test("chat thread send posts canonical message payload", async () => {
     assert.equal(sent.status, 0);
     assert.equal(requestedAuthorization, "Bearer session-token");
     assert.deepEqual(requestBody, {
-      content: "Please review child thread",
+      content: "Please review managed thread",
       metadata: {
         dispatch: false,
       },

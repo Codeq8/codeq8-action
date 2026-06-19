@@ -228,14 +228,14 @@ test("runner codeq8 helper creates delegated threads with compact safe output", 
       return Response.json({
         ok: true,
         delegated: true,
-        child_thread_id: "wct_child",
-        parent_thread_id: "wct_parent",
-        parent_run_id: "wcr_parent",
-        parent_workspace_repository: "Codeq8/Codeq8",
+        target_thread_id: "wct_managed",
+        runner_parent_thread_id: "wct_parent",
+        runner_parent_run_id: "wcr_parent",
+        runner_parent_workspace_repository: "Codeq8/Codeq8",
         thread_stream_token: "secret_root_stream_token",
         thread_record_handoff: "secret_root_handoff",
         thread: {
-          thread_id: "wct_child",
+          thread_id: "wct_managed",
           workspace_repository: "Codeq8/Codeq8",
           title: "Investigate",
           status: "active",
@@ -243,12 +243,12 @@ test("runner codeq8 helper creates delegated threads with compact safe output", 
           thread_record_handoff: "secret_handoff_token",
         },
         run: {
-          run_id: "wcr_child",
+          run_id: "wcr_managed",
           status: "queued",
           run_record_handoff: "secret_run_handoff",
         },
         message: {
-          message_id: "wcm_child",
+          message_id: "wcm_managed",
           role: "user",
           content: "Please inspect repository_access_handoff=secret_repository_handoff.",
           metadata: {
@@ -268,16 +268,16 @@ test("runner codeq8 helper creates delegated threads with compact safe output", 
   assert.equal(body.initial_message.content, "Please inspect this.");
   assert.equal(body.assigned_to_kind, "codeq8");
   const text = output.readText();
-  assert.match(text, /Created thread: wct_child/);
+  assert.match(text, /Created thread: wct_managed/);
   assert.match(text, /Title: Investigate/);
   assert.match(text, /Repository: Codeq8\/Codeq8/);
   assert.match(text, /State: status=active run=queued dispatch=delegated/);
   assert.match(
     text,
-    /Initial message: user \| wcm_child \| Please inspect repository_access_handoff=\[redacted\]/,
+    /Initial message: user \| wcm_managed \| Please inspect repository_access_handoff=\[redacted\]/,
   );
-  assert.match(text, /Follow-up inspect: codeq8 threads inspect wct_child/);
-  assert.match(text, /Follow-up message: codeq8 threads message wct_child --text "\.\.\."/);
+  assert.match(text, /Follow-up inspect: codeq8 threads inspect wct_managed/);
+  assert.match(text, /Follow-up message: codeq8 threads message wct_managed --text "\.\.\."/);
   assert.ok(text.length < 900);
   assertNoRawCredentialPayload(text);
 });
@@ -300,14 +300,14 @@ test("runner codeq8 helper create json returns a compact redacted snapshot", asy
       Response.json({
         ok: true,
         delegated: true,
-        child_thread_id: "wct_child",
-        parent_thread_id: "wct_parent",
-        parent_run_id: "wcr_parent",
-        parent_workspace_repository: "Codeq8/Codeq8",
+        target_thread_id: "wct_managed",
+        runner_parent_thread_id: "wct_parent",
+        runner_parent_run_id: "wcr_parent",
+        runner_parent_workspace_repository: "Codeq8/Codeq8",
         thread_stream_token: "secret_root_stream_token",
         thread_record_handoff: "secret_root_handoff",
         thread: {
-          thread_id: "wct_child",
+          thread_id: "wct_managed",
           workspace_repository: "Codeq8/Codeq8",
           title: "Investigate",
           status: "active",
@@ -315,12 +315,12 @@ test("runner codeq8 helper create json returns a compact redacted snapshot", asy
           thread_record_handoff: "secret_handoff_token",
         },
         run: {
-          run_id: "wcr_child",
+          run_id: "wcr_managed",
           status: "queued",
           run_record_handoff: "secret_run_handoff",
         },
         message: {
-          message_id: "wcm_child",
+          message_id: "wcm_managed",
           role: "user",
           content: "Please inspect repository_access_handoff=secret_repository_handoff.",
           metadata: {
@@ -333,20 +333,20 @@ test("runner codeq8 helper create json returns a compact redacted snapshot", asy
   const payload = output.readJson();
   assert.equal(payload.ok, true);
   assert.equal(payload.delegated, true);
-  assert.equal(payload.child_thread_id, "wct_child");
+  assert.equal(payload.target_thread_id, "wct_managed");
   assert.equal(payload.dispatch_state, "delegated");
-  assert.equal(payload.thread.thread_id, "wct_child");
-  assert.equal(payload.run.run_id, "wcr_child");
-  assert.equal(payload.message.message_id, "wcm_child");
+  assert.equal(payload.thread.thread_id, "wct_managed");
+  assert.equal(payload.run.run_id, "wcr_managed");
+  assert.equal(payload.message.message_id, "wcm_managed");
   assert.equal(
     payload.message.preview,
     "Please inspect repository_access_handoff=[redacted]",
   );
-  assert.equal(payload.follow_up_inspect_command, "codeq8 threads inspect wct_child");
-  assert.equal(payload.follow_up_message_command, 'codeq8 threads message wct_child --text "..."');
+  assert.equal(payload.follow_up_inspect_command, "codeq8 threads inspect wct_managed");
+  assert.equal(payload.follow_up_message_command, 'codeq8 threads message wct_managed --text "..."');
   assert.equal(
     payload.follow_up_command,
-    'codeq8 threads message wct_child --text "..."',
+    'codeq8 threads message wct_managed --text "..."',
   );
   const serialized = output.readText();
   assert.ok(serialized.length < 1200);
@@ -360,7 +360,7 @@ test("runner codeq8 helper sends delegated thread messages with compact safe out
     argv: [
       "threads",
       "message",
-      "wct_child",
+      "wct_managed",
       "--text",
       "Continue from the latest evidence.",
     ],
@@ -371,12 +371,12 @@ test("runner codeq8 helper sends delegated thread messages with compact safe out
       return Response.json({
         ok: true,
         delegated: true,
-        child_thread_id: "wct_child",
-        parent_thread_id: "wct_parent",
-        parent_run_id: "wcr_parent",
-        parent_workspace_repository: "Codeq8/Codeq8",
+        target_thread_id: "wct_managed",
+        runner_parent_thread_id: "wct_parent",
+        runner_parent_run_id: "wcr_parent",
+        runner_parent_workspace_repository: "Codeq8/Codeq8",
         thread: {
-          thread_id: "wct_child",
+          thread_id: "wct_managed",
           workspace_repository: "Codeq8/Codeq8",
           status: "active",
           thread_stream_token: "secret_stream_token",
@@ -399,15 +399,15 @@ test("runner codeq8 helper sends delegated thread messages with compact safe out
   assert.equal(body.workspace_repository, "Codeq8/Codeq8");
   assert.equal(body.thread_id, "wct_parent");
   assert.equal(body.run_id, "wcr_parent");
-  assert.equal(body.child_thread_id, "wct_child");
+  assert.equal(body.target_thread_id, "wct_managed");
   assert.equal(body.content, "Continue from the latest evidence.");
   assert.equal(body.role, "user");
   const payload = output.readJson();
   assert.equal(payload.ok, true);
-  assert.equal(payload.child_thread_id, "wct_child");
+  assert.equal(payload.target_thread_id, "wct_managed");
   assert.equal(payload.message.message_id, "wcm_followup");
   assert.equal(payload.message.preview, "Continue with thread_stream_token=[redacted]");
-  assert.equal(payload.follow_up_command, "codeq8 threads inspect wct_child");
+  assert.equal(payload.follow_up_command, "codeq8 threads inspect wct_managed");
   assertNoRawCredentialPayload(output.readText());
 });
 

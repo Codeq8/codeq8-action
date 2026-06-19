@@ -46,7 +46,6 @@ function buildThreadInspectSnapshot(payload: JsonRecord): JsonRecord {
   const progress = readThreadProgressFacts(payload, thread);
   const targetThreadId = firstText(
     payload.target_thread_id,
-    payload.child_thread_id,
     payload.thread_id,
     thread.thread_id,
     thread.threadId,
@@ -54,26 +53,14 @@ function buildThreadInspectSnapshot(payload: JsonRecord): JsonRecord {
   const runnerParentThreadId = firstText(
     payload.runner_parent_thread_id,
     payload.runnerParentThreadId,
-    payload.parent_thread_id,
-    payload.parentThreadId,
   );
   const runnerParentRunId = firstText(
     payload.runner_parent_run_id,
     payload.runnerParentRunId,
-    payload.parent_run_id,
-    payload.parentRunId,
   );
   const runnerParentRepository = firstText(
     payload.runner_parent_workspace_repository,
     payload.runnerParentWorkspaceRepository,
-    payload.parent_workspace_repository,
-    payload.parentWorkspaceRepository,
-  );
-  const targetParentThreadId = firstText(
-    payload.target_parent_thread_id,
-    payload.targetParentThreadId,
-    thread.parent_thread_id,
-    thread.parentThreadId,
   );
   const latestRunId = firstText(
     thread.latest_run_id,
@@ -106,13 +93,11 @@ function buildThreadInspectSnapshot(payload: JsonRecord): JsonRecord {
     runner_parent_thread_id: runnerParentThreadId,
     runner_parent_run_id: runnerParentRunId,
     runner_parent_workspace_repository: runnerParentRepository,
-    target_parent_thread_id: targetParentThreadId,
     target_thread_id: targetThreadId,
     thread: {
       thread_id: targetThreadId,
       repository: readThreadRepository(thread, payload),
       title: truncateText(thread.title || "(untitled)", 160),
-      parent_thread_id: targetParentThreadId,
       status: firstText(thread.status),
       aggregate_status: firstText(thread.aggregate_status, thread.aggregateStatus),
       source_type: firstText(thread.source_type, thread.sourceType),
@@ -212,11 +197,6 @@ function writeThreadInspect(stdout: StdoutLike, snapshot: JsonRecord): void {
       ].filter(Boolean).join(" ") || "(unknown)"}\n`,
     );
   }
-  if (thread.parent_thread_id || snapshot.target_parent_thread_id) {
-    stdout.write(`Target parent: ${thread.parent_thread_id || snapshot.target_parent_thread_id}\n`);
-  } else {
-    stdout.write("Target parent: (none)\n");
-  }
   const pullRequestLabel = pullRequest.number
     ? `PR #${pullRequest.number}${pullRequest.url ? ` ${pullRequest.url}` : ""}`
     : "";
@@ -288,7 +268,7 @@ function writeDelegatedThreadCreate(stdout: StdoutLike, snapshot: JsonRecord): v
   const thread = payloadObject(snapshot.thread);
   const run = payloadObject(snapshot.run);
   const message = payloadObject(snapshot.message);
-  const threadId = snapshot.child_thread_id || thread.thread_id || "(unknown)";
+  const threadId = snapshot.target_thread_id || thread.thread_id || "(unknown)";
   const statusLine = [
     thread.status ? `status=${thread.status}` : "",
     run.status ? `run=${run.status}` : "",
@@ -297,11 +277,11 @@ function writeDelegatedThreadCreate(stdout: StdoutLike, snapshot: JsonRecord): v
 
   stdout.write(`Created thread: ${threadId}\n`);
   stdout.write(`Title: ${thread.title || "(untitled)"}\n`);
-  stdout.write(`Repository: ${thread.repository || snapshot.parent_workspace_repository || "(unknown)"}\n`);
+  stdout.write(`Repository: ${thread.repository || snapshot.runner_parent_workspace_repository || "(unknown)"}\n`);
   stdout.write(`State: ${statusLine || "(unknown)"}\n`);
-  if (snapshot.parent_thread_id || snapshot.parent_run_id) {
+  if (snapshot.runner_parent_thread_id || snapshot.runner_parent_run_id) {
     stdout.write(
-      `Parent: ${[snapshot.parent_thread_id, snapshot.parent_run_id ? `run=${snapshot.parent_run_id}` : ""]
+      `Runner: ${[snapshot.runner_parent_thread_id, snapshot.runner_parent_run_id ? `run=${snapshot.runner_parent_run_id}` : ""]
         .filter(Boolean)
         .join(" ")}\n`,
     );
@@ -332,7 +312,6 @@ function printHelp(stdout: StdoutLike): void {
       "Usage:",
       "  codeq8 threads mine [--status active|all] [--limit 25]",
       "  codeq8 threads search [--search text] [--status active|all] [--limit 25]",
-      "  codeq8 threads children [parent-thread-id] [--status active] [--limit 25] [--json]",
       "  codeq8 threads context <thread-id> [--limit 20]",
       "  codeq8 threads inspect <thread-id> [--limit 12] [--json]",
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
@@ -348,8 +327,6 @@ function printHelp(stdout: StdoutLike): void {
       "  codeq8 github issue attachments <url|number> [--repo owner/repo] [--comments] --output-dir dir",
       "",
       "Authentication is read from the Codeq8 runner environment. Tokens are never printed.",
-      "Assigned thread lists label child rows as child-of:<parent-thread-id>.",
-      "Child thread listing defaults to the current parent thread and currently supports the active/open lifecycle only.",
       "",
     ].join("\n"),
   );
@@ -386,7 +363,6 @@ async function handleThreadsCommand({
     });
     writeCompactThreadList(stdout, payload, {
       assignedLabel: "me",
-      showRelationColumn: true,
       status,
     });
     return 0;
@@ -412,47 +388,6 @@ async function handleThreadsCommand({
         query,
       }),
     );
-    return 0;
-  }
-
-  if (command === "children" || command === "child-list") {
-    const positional = removeFlags(rest, [
-      "--status",
-      "--limit",
-      "--before-updated-at",
-      "--before-thread-id",
-    ], ["--json"]);
-    const parentThreadId = normalizeText(positional[0]) || context.threadId;
-    const status = readFlag(rest, "--status", "active");
-    if (status && status.toLowerCase() !== "active") {
-      throw new Error("codeq8 threads children currently supports --status active only.");
-    }
-    const query = new URLSearchParams();
-    appendParentQuery(query, context);
-    query.set("children_of_thread_id", parentThreadId);
-    query.set("status", status);
-    query.set("limit", readFlag(rest, "--limit", "25"));
-    query.set("before_updated_at", readFlag(rest, "--before-updated-at"));
-    query.set("before_thread_id", readFlag(rest, "--before-thread-id"));
-    const payload = await requestJson({
-      context,
-      fetchImpl,
-      routeBase: "public",
-      path: "/api/chat/runs/thread-search",
-      query,
-    });
-    if (hasFlag(rest, "--json")) {
-      writeJson(stdout, payload);
-    } else {
-      writeCompactThreadList(stdout, payload, {
-        childrenOfThreadId: firstText(
-          payload.children_of_thread_id,
-          payload.childrenOfThreadId,
-          parentThreadId,
-        ),
-        status,
-      });
-    }
     return 0;
   }
 
@@ -487,13 +422,13 @@ async function handleThreadsCommand({
       ["--limit", "--before-created-at", "--before-message-id"],
       ["--json"],
     );
-    const childThreadId = normalizeText(positional[0]);
-    if (!childThreadId) {
+    const targetThreadId = normalizeText(positional[0]);
+    if (!targetThreadId) {
       throw new Error("thread id is required.");
     }
     const query = new URLSearchParams();
     appendParentQuery(query, context);
-    query.set("child_thread_id", childThreadId);
+    query.set("target_thread_id", targetThreadId);
     query.set("limit", readFlag(rest, "--limit", "12"));
     query.set("before_created_at", readFlag(rest, "--before-created-at"));
     query.set("before_message_id", readFlag(rest, "--before-message-id"));
@@ -574,9 +509,9 @@ async function handleThreadsCommand({
 
   if (command === "message" || command === "send") {
     const positional = removeFlags(rest, ["--text", "--message"]);
-    const childThreadId = normalizeText(positional[0]);
+    const targetThreadId = normalizeText(positional[0]);
     const content = readFlag(rest, ["--text", "--message"]);
-    if (!childThreadId) {
+    if (!targetThreadId) {
       throw new Error("thread id is required.");
     }
     if (!content) {
@@ -589,12 +524,12 @@ async function handleThreadsCommand({
       path: "/api/chat/runs/delegated-thread-messages",
       method: "POST",
       body: parentBody(context, {
-        child_thread_id: childThreadId,
+        target_thread_id: targetThreadId,
         content,
         role: "user",
       }),
     });
-    writeJson(stdout, buildDelegatedThreadMessageOutput(payload, childThreadId));
+    writeJson(stdout, buildDelegatedThreadMessageOutput(payload, targetThreadId));
     return 0;
   }
 
@@ -719,13 +654,13 @@ async function handleThreadsCommand({
 
   if (command === "state") {
     const positional = removeFlags(rest, ["--limit", "--before-created-at", "--before-message-id"]);
-    const childThreadId = normalizeText(positional[0]);
-    if (!childThreadId) {
+    const targetThreadId = normalizeText(positional[0]);
+    if (!targetThreadId) {
       throw new Error("thread id is required.");
     }
     const query = new URLSearchParams();
     appendParentQuery(query, context);
-    query.set("child_thread_id", childThreadId);
+    query.set("target_thread_id", targetThreadId);
     query.set("limit", readFlag(rest, "--limit", "50"));
     query.set("before_created_at", readFlag(rest, "--before-created-at"));
     query.set("before_message_id", readFlag(rest, "--before-message-id"));

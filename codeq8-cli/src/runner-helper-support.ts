@@ -286,29 +286,16 @@ export function formatThreadUpdatedAt(thread: JsonRecord): string {
   );
 }
 
-export function readThreadParentThreadId(thread: JsonRecord): string {
-  return firstText(thread.parent_thread_id, thread.parentThreadId);
-}
-
-export function formatThreadRelation(thread: JsonRecord): string {
-  const parentThreadId = readThreadParentThreadId(thread);
-  return parentThreadId ? `child-of:${parentThreadId}` : "top-level";
-}
-
 export function writeCompactThreadList(
   stdout: StdoutLike,
   payload: JsonRecord,
-  { assignedLabel = "me", childrenOfThreadId = "", showRelationColumn = false, status = "" } = {},
+  { assignedLabel = "me", status = "" } = {},
 ): void {
   const threads = payloadArray(payload.threads);
   const repository = normalizeText(payload.repository);
   const normalizedStatus = normalizeText(status || payload.status || "");
   stdout.write(`Repository: ${repository || "(unknown)"}\n`);
-  if (childrenOfThreadId) {
-    stdout.write(`Children of: ${childrenOfThreadId}\n`);
-  } else {
-    stdout.write(`Assigned: ${assignedLabel || "me"}\n`);
-  }
+  stdout.write(`Assigned: ${assignedLabel || "me"}\n`);
   if (normalizedStatus) {
     stdout.write(`Status: ${normalizedStatus}\n`);
   }
@@ -319,32 +306,19 @@ export function writeCompactThreadList(
   const lifecycleNote = firstText(payload.lifecycle_note, payload.lifecycleNote);
   if (lifecycleNote) {
     stdout.write(`Lifecycle note: ${lifecycleNote}\n`);
-  } else if (childrenOfThreadId) {
-    stdout.write("Lifecycle note: Child thread listing currently supports the active/open lifecycle only.\n");
   }
   stdout.write("\n");
 
   if (threads.length === 0) {
-    stdout.write(
-      childrenOfThreadId
-        ? "No open child threads.\n"
-        : "No matching assigned threads.\n",
-    );
+    stdout.write("No matching assigned threads.\n");
   } else {
-    stdout.write(
-      showRelationColumn
-        ? "thread_id\tstatus\trelation\trun\ttarget\tupdated_at\ttitle\n"
-        : "thread_id\tstatus\trun\ttarget\tupdated_at\ttitle\n",
-    );
+    stdout.write("thread_id\tstatus\trun\ttarget\tupdated_at\ttitle\n");
     for (const entry of threads) {
       const thread = payloadObject(entry);
       const columns = [
         normalizeText(thread.thread_id || thread.threadId),
         normalizeText(thread.status),
       ];
-      if (showRelationColumn) {
-        columns.push(formatThreadRelation(thread));
-      }
       columns.push(
         formatThreadRunStatus(thread),
         formatThreadTarget(thread),
@@ -456,19 +430,12 @@ export function summarizeThreadForOutput(thread: unknown, payload: JsonRecord = 
     thread_id: firstText(
       normalized.thread_id,
       normalized.threadId,
-      payload.child_thread_id,
       payload.target_thread_id,
       payload.thread_id,
     ),
     repository: readThreadRepository(normalized, payload),
     title: truncateText(firstText(normalized.title), 160),
     title_source: firstText(normalized.title_source, normalized.titleSource),
-    parent_thread_id: firstText(
-      normalized.parent_thread_id,
-      normalized.parentThreadId,
-      payload.target_parent_thread_id,
-      payload.targetParentThreadId,
-    ),
     status: firstText(normalized.status, payload.status),
     aggregate_status: firstText(normalized.aggregate_status, normalized.aggregateStatus),
     source_type: firstText(normalized.source_type, normalized.sourceType),
@@ -515,37 +482,25 @@ export function parentSummaryFields(payload: JsonRecord): JsonRecord {
   const runnerParentThreadId = firstText(
     payload.runner_parent_thread_id,
     payload.runnerParentThreadId,
-    payload.parent_thread_id,
-    payload.parentThreadId,
   );
   const runnerParentRunId = firstText(
     payload.runner_parent_run_id,
     payload.runnerParentRunId,
-    payload.parent_run_id,
-    payload.parentRunId,
   );
   const runnerParentRepository = firstText(
     payload.runner_parent_workspace_repository,
     payload.runnerParentWorkspaceRepository,
-    payload.parent_workspace_repository,
-    payload.parentWorkspaceRepository,
   );
   return compactObject({
     runner_parent_thread_id: runnerParentThreadId,
     runner_parent_run_id: runnerParentRunId,
     runner_parent_workspace_repository: runnerParentRepository,
-    // Backward-compatible aliases for callers that still read parent_*.
-    parent_thread_id: runnerParentThreadId,
-    parent_run_id: runnerParentRunId,
-    parent_workspace_repository: runnerParentRepository,
   });
 }
 
 export function readThreadOutputId(payload: JsonRecord, fallback = ""): string {
   const thread = payloadObject(payload.thread);
   return firstText(
-    payload.child_thread_id,
-    payload.childThreadId,
     payload.target_thread_id,
     payload.targetThreadId,
     payload.assigned_thread_id,
@@ -581,7 +536,7 @@ export function buildDelegatedThreadCreateOutput(payload: JsonRecord): JsonRecor
   return compactObject({
     ok: Boolean(payload.ok),
     delegated: Boolean(payload.delegated),
-    child_thread_id: threadId,
+    target_thread_id: threadId,
     delegated_dispatch_failed: payload.delegated_dispatch_failed ? true : undefined,
     dispatch_state: readDelegatedDispatchState(payload),
     ...parentSummaryFields(payload),
@@ -604,7 +559,7 @@ export function buildDelegatedThreadMessageOutput(
   return compactObject({
     ok: Boolean(payload.ok),
     delegated: Boolean(payload.delegated),
-    child_thread_id: threadId,
+    target_thread_id: threadId,
     ...parentSummaryFields(payload),
     thread,
     message,

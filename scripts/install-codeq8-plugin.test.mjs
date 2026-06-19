@@ -11,6 +11,7 @@ import {
   CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY,
   CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH,
   CODEQ8_PLUGIN_MARKETPLACE_ENTRY_MARKER_FILE,
+  CODEQ8_PLUGIN_MANAGED_BY,
   buildMarketplaceSourcePath,
   hashDirectory,
   resolveCodeq8PluginInstallPaths,
@@ -23,7 +24,6 @@ const CODEQ8_PLUGIN_CAPABILITIES = [
   CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY,
 ];
 const CODEQ8_PLUGIN_SKILLS = [
-  "codeq8-child-threads",
   "codeq8-plugin",
   "codeq8-skill-stewardship",
 ];
@@ -204,9 +204,6 @@ test("Codeq8 plugin install updates marked marker source fields idempotently", a
     const pluginSkillMarker = await readJson(
       path.join(codexHome, "skills", "codeq8-plugin", CODEQ8_PLUGIN_MARKER_FILE),
     );
-    const childThreadsSkillMarker = await readJson(
-      path.join(codexHome, "skills", "codeq8-child-threads", CODEQ8_PLUGIN_MARKER_FILE),
-    );
     const stewardshipSkillMarker = await readJson(
       path.join(codexHome, "skills", "codeq8-skill-stewardship", CODEQ8_PLUGIN_MARKER_FILE),
     );
@@ -216,9 +213,41 @@ test("Codeq8 plugin install updates marked marker source fields idempotently", a
 
     assert.equal(pluginMarker.source_ref, "public-action-sha-new");
     assert.equal(pluginSkillMarker.source_ref, "public-action-sha-new");
-    assert.equal(childThreadsSkillMarker.source_ref, "public-action-sha-new");
     assert.equal(stewardshipSkillMarker.source_ref, "public-action-sha-new");
     assert.equal(marketplaceMarker.source_ref, "public-action-sha-new");
+  });
+});
+
+test("Codeq8 plugin install removes obsolete Codeq8-managed skills only", async () => {
+  await withTempInstallRoot(async ({ codexHome, env }) => {
+    const obsoleteSkillPath = path.join(codexHome, "skills", "codeq8-child-threads");
+    const userSkillPath = path.join(codexHome, "skills", "user-owned-skill");
+    await fs.mkdir(obsoleteSkillPath, { recursive: true });
+    await fs.writeFile(
+      path.join(obsoleteSkillPath, CODEQ8_PLUGIN_MARKER_FILE),
+      `${JSON.stringify({
+        schema_version: 1,
+        managed_by: CODEQ8_PLUGIN_MANAGED_BY,
+        plugin_name: CODEQ8_PLUGIN_NAME,
+        target_kind: "skill",
+        target_name: "codeq8-child-threads",
+      })}\n`,
+      "utf8",
+    );
+    await fs.mkdir(userSkillPath, { recursive: true });
+    await fs.writeFile(path.join(userSkillPath, "SKILL.md"), "user skill\n", "utf8");
+
+    const result = await syncCodeq8PluginInstall({
+      repoRoot: process.cwd(),
+      env,
+      sourceRef: "public-action-sha-cleanup",
+      now: FIXED_NOW,
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(await pathExists(obsoleteSkillPath), false);
+    assert.equal(await pathExists(userSkillPath), true);
+    assert.equal(result.targets.includes("removed-skill:codeq8-child-threads"), true);
   });
 });
 
@@ -406,34 +435,6 @@ test("Codeq8 plugin install source does not mutate CODEX_HOME or Codex auth stat
   assert.doesNotMatch(installerSource, /path\.join\(homePath,\s*"plugins"/);
   assert.doesNotMatch(installerSource, /\.\/plugins\/codeq8/);
   assert.doesNotMatch(installerSource, /auth\.json|config\.toml|sessions/);
-});
-
-test("Codeq8 plugin Child Threads skill is public runtime guidance", async () => {
-  const skillSource = await fs.readFile(
-    path.join(
-      process.cwd(),
-      "plugins",
-      "codeq8",
-      "skills",
-      "codeq8-child-threads",
-      "SKILL.md",
-    ),
-    "utf8",
-  );
-
-  assert.match(skillSource, /^name: codeq8-child-threads$/m);
-  assert.match(skillSource, /^# Child Threads$/m);
-  assert.match(skillSource, /explicitly asks for child threads, sub-threads, subthreads/);
-  assert.match(skillSource, /Do not use child threads just because work is complex/);
-  assert.match(skillSource, /one level deep/);
-  assert.match(skillSource, /server-approved workspace\/run grants/);
-  assert.match(skillSource, /additive update/);
-  assert.doesNotMatch(skillSource, /issue\s*#?\d+/i);
-  assert.doesNotMatch(skillSource, /codeq8-child-thread-project/);
-  assert.doesNotMatch(skillSource, /Abdul|aalzanki/i);
-  assert.doesNotMatch(skillSource, /Codeq8\/Codeq8/);
-  assert.doesNotMatch(skillSource, /\.codex\/skills/);
-  assert.doesNotMatch(skillSource, /main-staging|production branch/i);
 });
 
 test("Codeq8 plugin Skill Stewardship skill is public runtime guidance", async () => {
