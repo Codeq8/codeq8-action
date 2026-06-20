@@ -7287,6 +7287,30 @@ function summarizeAppServerProgressNotification({
     : null;
 }
 
+function buildAppServerAgentMessageProgressEvent({
+  itemId = "",
+  label = "",
+  now = Date.now(),
+} = {}) {
+  const normalizedLabel = normalizeText(label);
+  if (!normalizedLabel) {
+    return null;
+  }
+  return {
+    event_id: buildAppServerProgressEventId({
+      itemId,
+      itemType: "agent_message_progress",
+      label: normalizedLabel,
+      now,
+    }),
+    kind: "item",
+    item_type: "agent_message_progress",
+    label: normalizedLabel,
+    status: "completed",
+    at: now,
+  };
+}
+
 function incrementCount(map, key) {
   const normalizedKey = normalizeText(key);
   if (!normalizedKey) {
@@ -8721,6 +8745,25 @@ async function runCodexAppServer({
     };
 
     const getAssistantOutput = () => lastAgentMessageOutput || currentAgentMessageOutput;
+    const enqueueCurrentAgentMessageProgress = () => {
+      const progressItemId = currentAgentMessageItemId;
+      const progressOutput = currentAgentMessageOutput;
+      if (
+        !progressItemId ||
+        !normalizeText(progressOutput) ||
+        currentAgentMessageProgressItemId === progressItemId
+      ) {
+        return;
+      }
+      const progressEvent = buildAppServerAgentMessageProgressEvent({
+        itemId: progressItemId,
+        label: progressOutput,
+      });
+      if (progressEvent) {
+        currentAgentMessageProgressItemId = progressItemId;
+        progressReporter.enqueue(progressEvent);
+      }
+    };
     const resetAgentMessageCapture = () => {
       currentAgentMessageItemId = "";
       currentAgentMessageOutput = "";
@@ -8732,6 +8775,7 @@ async function runCodexAppServer({
       agentMessageSequence += 1;
       const itemId = extractAppServerItemId(params) || `agent_message:${agentMessageSequence}`;
       if (itemId !== currentAgentMessageItemId) {
+        enqueueCurrentAgentMessageProgress();
         currentAgentMessageItemId = itemId;
         currentAgentMessageOutput = "";
         currentAgentMessageProgressItemId = "";
@@ -8741,8 +8785,10 @@ async function runCodexAppServer({
     const appendAgentMessageDelta = (params) => {
       const itemId = extractAppServerItemId(params);
       if (itemId && itemId !== currentAgentMessageItemId) {
+        enqueueCurrentAgentMessageProgress();
         currentAgentMessageItemId = itemId;
         currentAgentMessageOutput = "";
+        currentAgentMessageProgressItemId = "";
       }
       currentAgentMessageOutput = appendOutput(
         currentAgentMessageOutput,
@@ -8754,6 +8800,7 @@ async function runCodexAppServer({
       const itemId = extractAppServerItemId(params);
       const completedText = extractAppServerCompletedAgentText(params);
       if (itemId && itemId !== currentAgentMessageItemId) {
+        enqueueCurrentAgentMessageProgress();
         currentAgentMessageItemId = itemId;
         currentAgentMessageOutput = "";
         currentAgentMessageProgressItemId = "";
@@ -9207,25 +9254,7 @@ async function runCodexAppServer({
         // not stream partial agent-message deltas into Firestore.
       }
       if (normalizedMethod === "item/completed" && isAppServerAgentMessageItem(params)) {
-        const completedItemId = extractAppServerItemId(params) || currentAgentMessageItemId;
-        const outputBeforeCompletion = currentAgentMessageOutput;
-        const progressAlreadyReported =
-          Boolean(currentAgentMessageProgressItemId) &&
-          currentAgentMessageProgressItemId === completedItemId;
-        const completedText = extractAppServerCompletedAgentText(params);
         completeAgentMessage(params);
-        if (!progressAlreadyReported || (completedText && completedText !== outputBeforeCompletion)) {
-          const progressEvent = summarizeAppServerProgressNotification({
-            method: normalizedMethod,
-            params,
-            itemId: completedItemId,
-            label: getAssistantOutput(),
-          });
-          if (!hiddenTitleTurnActive && progressEvent) {
-            currentAgentMessageProgressItemId = completedItemId;
-            progressReporter.enqueue(progressEvent);
-          }
-        }
       }
       if (normalizedMethod === "turn/completed") {
         const status = extractAppServerTurnStatus(params);
