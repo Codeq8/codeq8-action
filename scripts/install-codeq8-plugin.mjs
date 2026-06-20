@@ -13,6 +13,8 @@ const execFileAsync = promisify(execFile);
 
 export const CODEQ8_PLUGIN_NAME = "codeq8";
 export const CODEQ8_PLUGIN_CAPABILITY = "codeq8_plugin";
+export const CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS_CAPABILITY =
+  "codeq8_plugin_run_behavior_skills";
 export const CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY =
   "codeq8_plugin_playwright_mcp";
 export const CODEQ8_PLUGIN_MARKER_FILE = ".codeq8-managed.json";
@@ -21,6 +23,11 @@ export const CODEQ8_PLUGIN_SOURCE_REPOSITORY = "Codeq8/codeq8-action";
 export const CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH = "plugins/codeq8";
 export const CODEQ8_PLUGIN_MARKETPLACE_ENTRY_MARKER_FILE =
   "codeq8.marketplace-entry.codeq8-managed.json";
+export const CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS = [
+  "codeq8-coordinator",
+  "codeq8-lessons",
+  "codeq8-onboarding",
+];
 export const OBSOLETE_CODEQ8_PLUGIN_SKILLS = [
   "codeq8-child-threads",
   "codeq8-skill-stewardship",
@@ -201,8 +208,12 @@ async function listBundledMcpServerNames(sourcePluginPath, manifest) {
     .sort((left, right) => left.localeCompare(right));
 }
 
-function buildPluginCapabilities({ mcpServerNames = [] } = {}) {
+function buildPluginCapabilities({ mcpServerNames = [], skillNames = [] } = {}) {
   const capabilities = [CODEQ8_PLUGIN_CAPABILITY];
+  const skillNameSet = new Set(normalizeList(skillNames));
+  if (CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS.every((skillName) => skillNameSet.has(skillName))) {
+    capabilities.push(CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS_CAPABILITY);
+  }
   if (normalizeList(mcpServerNames).includes("playwright")) {
     capabilities.push(CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY);
   }
@@ -478,7 +489,10 @@ export async function syncCodeq8PluginInstall({
       paths.sourcePluginPath,
       source.manifest,
     );
-    capabilities = buildPluginCapabilities({ mcpServerNames });
+    capabilities = buildPluginCapabilities({
+      mcpServerNames,
+      skillNames: skills.map((skill) => skill.name),
+    });
   } catch (error) {
     return {
       ok: false,
