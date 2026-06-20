@@ -8746,6 +8746,9 @@ async function runCodexAppServer({
 
     const getAssistantOutput = () => lastAgentMessageOutput || currentAgentMessageOutput;
     const enqueueCurrentAgentMessageProgress = () => {
+      if (activeTurnPurpose === "hidden_thread_title") {
+        return;
+      }
       const progressItemId = currentAgentMessageItemId;
       const progressOutput = currentAgentMessageOutput;
       if (
