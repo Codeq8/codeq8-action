@@ -23,6 +23,7 @@ export const CODEQ8_PLUGIN_MARKETPLACE_ENTRY_MARKER_FILE =
   "codeq8.marketplace-entry.codeq8-managed.json";
 export const OBSOLETE_CODEQ8_PLUGIN_SKILLS = [
   "codeq8-child-threads",
+  "codeq8-skill-stewardship",
 ];
 
 const MARKER_SCHEMA_VERSION = 1;

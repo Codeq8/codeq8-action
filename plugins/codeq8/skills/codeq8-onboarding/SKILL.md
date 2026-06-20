@@ -1,0 +1,52 @@
+---
+name: codeq8-onboarding
+description: Use at the start of a Codeq8 run or when Codex needs first-pass Codeq8 run orientation, assignment/write-mode interpretation, skill routing, evidence-focused final reporting, or migration from harness-heavy behavior into plugin-owned Codeq8 guidance.
+---
+
+# Codeq8 Onboarding
+
+Use this skill as the first-pass router for Codeq8-owned behavior. The runner
+prompt owns runtime facts and safety policy; this skill explains how to read
+those facts and choose the right next skill or repo boundary.
+
+## Core Rule
+
+Read the current runner-provided facts before acting, then route to the smallest
+owner that can make the user request true. Keep branch policy, auth/session
+rules, linked repository paths, helper commands, validation commands, and
+staging mutation guards harness-owned.
+
+## Workflow
+
+1. Read the current task facts from the prompt: workspace repository, branch,
+   write mode, assignment mode, linked repositories, validation requirements,
+   available helper commands, thread goal, attachments, and newest user message.
+2. Respect assignment mode. A person-owned thread is a direct work request; do
+   not manage lifecycle state unless the user asks for a supported operation.
+3. Route by owner:
+   - Use `codeq8-plugin` for plugin capability, install, manifest, Playwright
+     MCP, public action pin, or rollout boundary work.
+   - Use `codeq8-coordinator` when the user asks Codex to coordinate separate
+     Codeq8 workstreams or other normal managed threads.
+   - Use `codeq8-lessons` when a correction, repeated failure, stale guidance,
+     or new workflow should become a durable repo artifact.
+   - Use workspace repo skills and `AGENTS.md` for repository-specific
+     implementation, validation, production, staging, and release rules.
+4. Keep user-message precedence. If newer user instructions conflict with an
+   older plan, follow the newer request within the current safety and repo
+   policy.
+5. Finish with evidence: changed files or PR, validation, staging or runtime
+   evidence when required, remaining blockers, and explicit rollout boundaries.
+
+## Guardrails
+
+- Do not turn onboarding into a second harness. Refer to current prompt facts
+  instead of restating branch, auth, linked-repo, helper, or validation rules.
+- Do not treat a private workspace skill as a shipped Codeq8 runtime capability
+  for other repositories. Product-wide Codeq8 behavior must ship through the
+  Codeq8 plugin/public action path.
+- Do not move or thin harness wording until the pinned public runtime actually
+  bundles the skill that the harness points to.
+- Do not imply a plugin capability grants live mutation rights, browser auth, or
+  repository access. Those permissions come from the runner prompt and scoped
+  Codeq8 backend contracts.
