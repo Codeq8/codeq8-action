@@ -961,6 +961,97 @@ test("runCodex writes a clean AppServer reasoning transcript to Actions logs", a
   assert.doesNotMatch(output.logs, /command_execution \| status/);
 });
 
+test("runCodex forwards AppServer reasoning items to durable progress", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-reasoning-progress-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    for (let index = 1; index <= 12; index += 1) {",
+      "      send({ method: 'item/started', params: { item: { id: `reason_${index}`, type: 'assistant_reasoning', text: `Reasoning block ${index}` } } });",
+      "      send({ method: 'item/completed', params: { item: { id: `reason_${index}`, type: 'assistant_reasoning', text: `Reasoning block ${index}` } } });",
+      "    }",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_done', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_done', delta: 'done' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_done', type: 'agent_message', text: 'done' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const progressEvents = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "persist reasoning progress",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "runner_token",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue(event) {
+            progressEvents.push(event);
+          },
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+        close: async () => {},
+      }),
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "done");
+  const reasoningEvents = progressEvents.filter(
+    (event) => event.item_type === "assistant_reasoning",
+  );
+  assert.equal(reasoningEvents.length, 12);
+  assert.deepEqual(
+    reasoningEvents.map((event) => event.label),
+    Array.from({ length: 12 }, (_value, index) => `Reasoning block ${index + 1}`),
+  );
+  assert(
+    reasoningEvents.every((event) =>
+      /^app_server:reasoning:[a-f0-9]+$/.test(String(event.event_id || "")),
+    ),
+  );
+  assert(
+    reasoningEvents.every((event) =>
+      !String(event.event_id || "").startsWith("app_server:agent_message:"),
+    ),
+  );
+  assert.equal(
+    progressEvents.filter((event) => event.item_type === "agent_message").length,
+    1,
+  );
+});
+
 test("runCodex summarizes AppServer chatter and suppresses successful stderr", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-logs-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");

@@ -6857,8 +6857,8 @@ function extractAppServerAgentDelta(params) {
 function extractAppServerCompletedAgentText(params) {
   const object = normalizeObject(params);
   const item = normalizeObject(object.item);
-  const itemType = normalizeText(item.type || object.type).toLowerCase();
-  if (!/agent|assistant/.test(itemType)) {
+  const itemType = normalizeAppServerItemType(params);
+  if (!isAppServerAgentMessageItemType(itemType)) {
     return "";
   }
   return extractAppServerTextPreservingWhitespace(item, ["text", "content", "message"]);
@@ -6880,17 +6880,7 @@ function extractAppServerItemId(params) {
 }
 
 function isAppServerAgentMessageItem(params) {
-  const object = normalizeObject(params);
-  const item = normalizeObject(object.item);
-  const itemType = normalizeText(
-    item.type ||
-      item.kind ||
-      object.type ||
-      object.kind ||
-      object.itemType ||
-      object.item_type,
-  ).toLowerCase();
-  return /agent|assistant/.test(itemType);
+  return isAppServerAgentMessageItemType(normalizeAppServerItemType(params));
 }
 
 function normalizeAppServerItemType(params, fallback = "") {
@@ -6915,13 +6905,31 @@ function normalizeAppServerActionsTranscriptItemType(value) {
   return normalized || "assistant_message";
 }
 
+function isAppServerReasoningItemType(value) {
+  return normalizeAppServerActionsTranscriptItemType(value).includes("reasoning");
+}
+
+function isAppServerReasoningItem(params) {
+  return isAppServerReasoningItemType(normalizeAppServerItemType(params));
+}
+
+function isAppServerAgentMessageItemType(value) {
+  const normalized = normalizeAppServerActionsTranscriptItemType(value);
+  return (
+    normalized === "agent_message" ||
+    normalized === "assistant_message" ||
+    normalized === "assistant" ||
+    normalized === "agent"
+  );
+}
+
 function isAppServerActionsTranscriptItemType(value) {
   if (!normalizeText(value)) {
     return false;
   }
   const normalized = normalizeAppServerActionsTranscriptItemType(value);
   return (
-    normalized.includes("reasoning") ||
+    isAppServerReasoningItemType(normalized) ||
     normalized === "agent_message" ||
     normalized === "assistant_message" ||
     normalized === "assistant" ||
@@ -7171,11 +7179,17 @@ function buildAppServerProgressEventId({
   label = "",
   now = Date.now(),
 } = {}) {
+  const normalizedItemType = normalizeAppServerActionsTranscriptItemType(itemType);
+  const eventScope = isAppServerAgentMessageItemType(normalizedItemType)
+    ? "agent_message"
+    : isAppServerReasoningItemType(normalizedItemType)
+      ? "reasoning"
+      : normalizedItemType || "item";
   const normalizedItemId = normalizeText(itemId);
   if (normalizedItemId) {
-    return `app_server:agent_message:${hashDiagnosticValue(normalizedItemId).slice(0, 16)}`;
+    return `app_server:${eventScope}:${hashDiagnosticValue(normalizedItemId).slice(0, 16)}`;
   }
-  return `app_server:${now}:agent_message:${hashDiagnosticValue(
+  return `app_server:${now}:${eventScope}:${hashDiagnosticValue(
     `${normalizeText(itemType)}:${normalizeText(label)}`,
   ).slice(0, 12)}`;
 }
@@ -7234,27 +7248,40 @@ function summarizeAppServerProgressNotification({
       object.item_type ||
       "agent_message",
   ).toLowerCase();
-  const isAgentDelta = normalizedMethod === "item/agentMessage/delta";
+  const normalizedTranscriptItemType =
+    normalizeAppServerActionsTranscriptItemType(normalizedItemType);
+  const isAgentItem = isAppServerAgentMessageItemType(normalizedTranscriptItemType);
+  const isReasoningItem = isAppServerReasoningItemType(normalizedTranscriptItemType);
+  const isAgentDelta =
+    isAgentItem && normalizedMethod === "item/agentMessage/delta";
   const isAgentCompletion =
-    normalizedMethod === "item/completed" && isAppServerAgentMessageItem(params);
-  if (!isAgentDelta && !isAgentCompletion) {
+    isAgentItem && normalizedMethod === "item/completed";
+  const isReasoningProgress =
+    isReasoningItem &&
+    (normalizedMethod === "item/started" || normalizedMethod === "item/completed");
+  if (!isAgentDelta && !isAgentCompletion && !isReasoningProgress) {
     return null;
   }
   const itemLabel = normalizeText(
-    label || extractAppServerCompletedAgentText(params),
+    isReasoningProgress
+      ? extractAppServerItemText(params)
+      : label || extractAppServerCompletedAgentText(params),
   );
   return itemLabel
     ? {
         event_id: buildAppServerProgressEventId({
           itemId: itemId || extractAppServerItemId(params),
-          itemType: normalizedItemType,
+          itemType: normalizedTranscriptItemType || normalizedItemType,
           label: itemLabel,
           now,
         }),
         kind: "item",
-        item_type: normalizedItemType || "agent_message",
+        item_type: normalizedTranscriptItemType || normalizedItemType || "agent_message",
         label: itemLabel,
-        status: isAgentCompletion ? "completed" : "in_progress",
+        status:
+          isAgentCompletion || normalizedMethod === "item/completed"
+            ? "completed"
+            : "in_progress",
         at: now,
       }
     : null;
@@ -9159,6 +9186,19 @@ async function runCodexAppServer({
       }
       if (normalizedMethod === "item/started" && isAppServerAgentMessageItem(params)) {
         startAgentMessage(params);
+      }
+      if (
+        !hiddenTitleTurnActive &&
+        normalizedMethod === "item/completed" &&
+        isAppServerReasoningItem(params)
+      ) {
+        const progressEvent = summarizeAppServerProgressNotification({
+          method: normalizedMethod,
+          params,
+        });
+        if (progressEvent) {
+          progressReporter.enqueue(progressEvent);
+        }
       }
       if (normalizedMethod === "item/agentMessage/delta") {
         appendAgentMessageDelta(params);
