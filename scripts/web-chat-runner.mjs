@@ -8466,13 +8466,13 @@ function shouldRunHiddenThreadTitlePreturn({
   if (!normalizeText(promptText)) {
     return false;
   }
+  if (isPlaceholderThreadTitle(threadTitle)) {
+    return true;
+  }
   if (isFinalThreadTitleSource(threadTitleSource)) {
     return false;
   }
-  return (
-    isPlaceholderThreadTitle(threadTitle) ||
-    normalizeText(threadTitleSource).toLowerCase() === "provisional_first_message"
-  );
+  return normalizeText(threadTitleSource).toLowerCase() === "provisional_first_message";
 }
 
 function buildHiddenThreadTitlePrompt({ promptText = "" } = {}) {
@@ -10632,6 +10632,8 @@ async function main() {
       const activeWorkspaceRepository =
         normalizeText(thread.workspace_repository) || workspaceRepository;
       const activeThreadTitle = normalizeText(thread.title) || threadTitle;
+      const activeThreadTitleSource =
+        normalizeText(thread.title_source) || threadTitleSource;
       const activeSourceType = normalizeSourceType(thread.source_type || sourceType);
       const activeBranchContext =
         thread.branch_context?.default_branch &&
@@ -10973,7 +10975,7 @@ async function main() {
               promptText,
               recentUserMessagesPromptText,
               recentChecksPromptText,
-              threadTitleSource,
+              threadTitleSource: activeThreadTitleSource,
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
               referencedThreads,
@@ -10999,7 +11001,7 @@ async function main() {
               threadSpecText,
               promptText,
               recentChecksPromptText,
-              threadTitleSource,
+              threadTitleSource: activeThreadTitleSource,
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
               referencedThreads,
@@ -11137,7 +11139,7 @@ async function main() {
             threadId,
             runId,
             threadTitle: activeThreadTitle,
-            threadTitleSource,
+            threadTitleSource: activeThreadTitleSource,
             promptText,
             workerUrl,
             adminToken,
@@ -11930,6 +11932,7 @@ export {
   shouldLookUpPullRequest,
   shouldStopBeforeCodexForRunCallbackPayload,
   shouldTreatCodexFailureAsCompleted,
+  shouldRunHiddenThreadTitlePreturn,
   stripLeadingCodexTransportNoise,
   extractUserVisibleFailureHeadline,
   fetchJson,

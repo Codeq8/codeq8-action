@@ -61,6 +61,7 @@ import {
   shouldContinueAfterCodexSessionPersistenceFailure,
   shouldStopBeforeCodexForRunCallbackPayload,
   shouldTreatCodexFailureAsCompleted,
+  shouldRunHiddenThreadTitlePreturn,
   stripLeadingCodexTransportNoise,
   toUserVisibleRunnerFailureMessage,
   uploadPreparedWebChatCodexSessionBundle,
@@ -122,6 +123,36 @@ test("runtime manifest baseline matches the public startup contract", () => {
 
 test("Codex chat runs default to the 72 hour GitHub Actions budget", () => {
   assert.equal(DEFAULT_TIMEOUT_SECONDS, 72 * 60 * 60);
+});
+
+test("hidden title pre-turn treats placeholder titles as needing runner ownership", () => {
+  assert.equal(
+    shouldRunHiddenThreadTitlePreturn({
+      mode: "fresh",
+      threadTitle: "Untitled",
+      threadTitleSource: "manual",
+      promptText: "Investigate unread state",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRunHiddenThreadTitlePreturn({
+      mode: "fresh",
+      threadTitle: "Unread state bug",
+      threadTitleSource: "manual",
+      promptText: "Investigate unread state",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRunHiddenThreadTitlePreturn({
+      mode: "resume",
+      threadTitle: "Untitled",
+      threadTitleSource: "provisional_first_message",
+      promptText: "Investigate unread state",
+    }),
+    false,
+  );
 });
 
 test("JSON control-plane requests fail fast instead of waiting on platform timeouts", async () => {
