@@ -2700,6 +2700,7 @@ test("runCodex runs hidden AppServer title pre-turn before the visible task turn
   const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
   const originalFetch = globalThis.fetch;
   const titleCalls = [];
+  const lifecycleEvents = [];
   t.after(async () => {
     globalThis.fetch = originalFetch;
     await fs.rm(workspacePath, { recursive: true, force: true });
@@ -2709,6 +2710,7 @@ test("runCodex runs hidden AppServer title pre-turn before the visible task turn
     const parsed = new URL(String(url));
     if (parsed.pathname === "/api/chat/runs/thread-title") {
       const body = JSON.parse(String(init.body || "{}"));
+      lifecycleEvents.push("title-write");
       titleCalls.push({
         authorization: init.headers?.Authorization || init.headers?.authorization || "",
         body,
@@ -2799,10 +2801,18 @@ test("runCodex runs hidden AppServer title pre-turn before the visible task turn
         }),
       }),
     },
+    beforeMainTurn: async () => {
+      const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+      lifecycleEvents.push(
+        `before-main:${requests.filter((request) => request.method === "turn/start").length}`,
+      );
+      return { stop: false };
+    },
   });
 
   assert.equal(result.ok, true);
   assert.equal(result.output, "Done.");
+  assert.deepEqual(lifecycleEvents, ["title-write", "before-main:1"]);
   assert.equal(titleCalls.length, 1);
   assert.match(titleCalls[0]?.authorization, /^Bearer /);
   assert.equal(titleCalls[0]?.body?.workspace_repository, "example-org/example-repo");
@@ -2822,6 +2832,57 @@ test("runCodex runs hidden AppServer title pre-turn before the visible task turn
   assert.match(turnStarts[0]?.params?.input?.[0]?.text, /Create a concise title/);
   assert.match(turnStarts[0]?.params?.input?.[0]?.text, /120 second timeout/);
   assert.equal(turnStarts[1]?.params?.input?.[0]?.text, "visible work prompt");
+});
+
+test("runCodex can stop after hidden setup before starting the visible task turn", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-before-main-stop-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import fs from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
+      "const requests = [];",
+      "const persistRequests = async () => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', async (line) => {",
+      "  const message = JSON.parse(line);",
+      "  requests.push({ method: message.method, params: message.params || {} });",
+      "  await persistRequests();",
+      "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') send({ id: message.id, result: { turn: { id: 'turn_main', status: 'inProgress' } } });",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "visible work prompt",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+    beforeMainTurn: async () => ({ stop: true }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stoppedBeforeCodex, true);
+  assert.equal(result.output, "");
+
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  assert.equal(requests.some((request) => request.method === "turn/start"), false);
 });
 
 test("runCodex falls back when hidden AppServer title pre-turn times out", async (t) => {

@@ -8626,6 +8626,7 @@ async function runCodexAppServer({
   appServerContext = null,
   codexGoalState = null,
   codexThreadGoalsEnabled = false,
+  beforeMainTurn = null,
 }) {
   const normalizedModel = normalizeText(model) || DEFAULT_CODEX_MODEL;
   const normalizedTask = normalizeText(task);
@@ -9387,7 +9388,26 @@ async function runCodexAppServer({
         throw new Error("Codex app-server did not return a thread id.");
       }
       await synchronizeInitialCodexGoal();
-      await runHiddenThreadTitlePreturn();
+      const hiddenThreadTitleResult = await runHiddenThreadTitlePreturn();
+      if (typeof beforeMainTurn === "function") {
+        const beforeMainTurnResult = await beforeMainTurn({
+          hiddenThreadTitleResult,
+          mode: normalizedMode,
+        });
+        if (beforeMainTurnResult?.stop) {
+          await finish({
+            ok: true,
+            output: "",
+            diagnosticOutput: "",
+            reason: "Web chat run was already cancelled before Codex started.",
+            exitCode: 0,
+            signal: "",
+            timedOut: false,
+            stoppedBeforeCodex: true,
+          });
+          return;
+        }
+      }
       controlListener = firestoreBridge?.createControlListener?.({
         sendRequest,
         getAppServerThreadId: () => appServerThreadId,
@@ -9437,6 +9457,7 @@ async function runCodex({
   appServerContext = null,
   codexGoalState = null,
   codexThreadGoalsEnabled = false,
+  beforeMainTurn = null,
 }) {
   const normalizedModel = normalizeText(model) || DEFAULT_CODEX_MODEL;
   const normalizedTask = normalizeText(task);
@@ -9479,6 +9500,7 @@ async function runCodex({
     appServerContext,
     codexGoalState,
     codexThreadGoalsEnabled,
+    beforeMainTurn,
   });
 }
 
@@ -11061,65 +11083,68 @@ async function main() {
           },
         });
 
-        if (!startedAt) {
-          startedAt = Date.now();
-        }
-        try {
-          const runningCallbackPayload = await postRunCallback({
-            publicBaseUrl,
-            workerUrl,
-            adminToken,
-            body: {
-              thread_id: threadId,
-              run_id: runId,
-              message_id: messageId,
-              workspace_repository: activeWorkspaceRepository,
-              status: "running",
-              summary:
-                threadTargetRestartCount > 0
-                  ? "Restarting on the updated thread context."
-                  : "Codex is working.",
-              resolved_write_branch: preparedWorkspace.durableWriteBranch || undefined,
-              started_at: startedAt,
-              metadata: buildCodexRunMetadata({
-                model: codexModel,
-                mode: executionMode,
-                extra: {
-                  bundle_revision: persistedCodexSessionState.bundle_revision || 0,
-                  thread_target_restart_count: threadTargetRestartCount,
-                },
-              }),
+        const postVisibleRunningState = async () => {
+          if (!startedAt) {
+            startedAt = Date.now();
+          }
+          try {
+            const runningCallbackPayload = await postRunCallback({
+              publicBaseUrl,
+              workerUrl,
+              adminToken,
+              body: {
+                thread_id: threadId,
+                run_id: runId,
+                message_id: messageId,
+                workspace_repository: activeWorkspaceRepository,
+                status: "running",
+                summary:
+                  threadTargetRestartCount > 0
+                    ? "Restarting on the updated thread context."
+                    : "Codex is working.",
+                resolved_write_branch: preparedWorkspace.durableWriteBranch || undefined,
+                started_at: startedAt,
+                metadata: buildCodexRunMetadata({
+                  model: codexModel,
+                  mode: executionMode,
+                  extra: {
+                    bundle_revision: persistedCodexSessionState.bundle_revision || 0,
+                    thread_target_restart_count: threadTargetRestartCount,
+                  },
+                }),
+              },
+            });
+            if (shouldStopBeforeCodexForRunCallbackPayload(runningCallbackPayload)) {
+              log(
+                "Web chat run was already cancelled before Codex started; exiting",
+                `thread_id=${threadId} run_id=${runId}`,
+              );
+              return { stop: true };
+            }
+          } catch (error) {
+            throw new Error(
+              `Failed to post running web chat callback: ${
+                extractErrorMessage(error)
+              }`,
+            );
+          }
+          log(
+            "Starting web chat codex run",
+            `repository=${activeWorkspaceRepository} branch=${preparedWorkspace.effectiveWriteBranch} model=${codexModel} mode=${executionMode} restart_count=${threadTargetRestartCount}`,
+          );
+          await reportRunnerDiagnostic({
+            event: "runner_codex_command_started",
+            mode: executionMode,
+            details: {
+              repository: activeWorkspaceRepository,
+              branch: preparedWorkspace.effectiveWriteBranch,
+              model: codexModel,
+              session_state: summarizeCodexSessionStateForDiagnostic(codexSessionState),
+              thread_target_restart_count: threadTargetRestartCount,
             },
           });
-          if (shouldStopBeforeCodexForRunCallbackPayload(runningCallbackPayload)) {
-            log(
-              "Web chat run was already cancelled before Codex started; exiting",
-              `thread_id=${threadId} run_id=${runId}`,
-            );
-            return;
-          }
-        } catch (error) {
-          throw new Error(
-            `Failed to post running web chat callback: ${
-              extractErrorMessage(error)
-            }`,
-          );
-        }
-        log(
-          "Starting web chat codex run",
-          `repository=${activeWorkspaceRepository} branch=${preparedWorkspace.effectiveWriteBranch} model=${codexModel} mode=${executionMode} restart_count=${threadTargetRestartCount}`,
-        );
-        await reportRunnerDiagnostic({
-          event: "runner_codex_command_started",
-          mode: executionMode,
-          details: {
-            repository: activeWorkspaceRepository,
-            branch: preparedWorkspace.effectiveWriteBranch,
-            model: codexModel,
-            session_state: summarizeCodexSessionStateForDiagnostic(codexSessionState),
-            thread_target_restart_count: threadTargetRestartCount,
-          },
-        });
+          return { stop: false };
+        };
 
         const execution = await runCodex({
           codexPath,
@@ -11132,6 +11157,7 @@ async function main() {
           sessionId: codexSessionState.session_id,
           codexGoalState,
           codexThreadGoalsEnabled,
+          beforeMainTurn: postVisibleRunningState,
           appServerContext: {
             publicBaseUrl,
             webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
@@ -11149,6 +11175,9 @@ async function main() {
             progressHistoryEnabled: appServerProgressHistoryEnabled,
           },
         });
+        if (execution.stoppedBeforeCodex) {
+          return;
+        }
         latestAppServerControlRequests =
           normalizeAppServerControlRequestsForRunMetadata(
             execution.appServerControlRequests,
