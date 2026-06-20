@@ -6,10 +6,11 @@ without changing `CODEX_HOME` or overwriting unmarked user-owned Codex state.
 
 Bundled skills:
 
-- `codeq8-onboarding`: first-pass Codeq8 run orientation and skill routing.
+- `codeq8-onboarding`: first-pass Codeq8 run orientation, durable goal
+  maintenance, and skill routing.
 - `codeq8-coordinator`: normal managed-thread coordination for user-owned
   workstreams.
-- `codeq8-lessons`: curated durable lessons from corrections, repeated
+- `codeq8-lessons`: curated repo-owned lessons from corrections, repeated
   failures, stale guidance, and new workflows.
 - `codeq8-plugin`: plugin runtime boundaries and rollout checkpoints.
 

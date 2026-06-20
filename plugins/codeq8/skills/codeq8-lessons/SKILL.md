@@ -34,7 +34,11 @@ Prefer a small executable guardrail over broad process prose.
 4. Make the lesson concrete. Name the prior bad state, the new invariant, the
    artifact that enforces it, and the validation that proves future runs inherit
    it.
-5. Validate the artifact. Run the skill validator for skill changes when
+5. Keep the thread goal aligned when the lesson changes the durable project
+   context. Update the goal only for a broader objective, problem, or desired
+   outcome; do not store the lesson itself, a transcript summary, or a checklist
+   in the goal.
+6. Validate the artifact. Run the skill validator for skill changes when
    available, and add or update the smallest deterministic contract that would
    fail if the lesson disappeared.
 
@@ -42,6 +46,8 @@ Prefer a small executable guardrail over broad process prose.
 
 - Do not store private transcript details, broad chat summaries, or incidental
   preferences as lessons.
+- Do not use thread goals as the lesson store. Goals preserve the current
+  durable objective; lessons preserve the reusable repo-owned takeaway.
 - Do not create a new skill just to name a topic. Split or add a skill only
   when future runs need an executable checklist, routing rule, validation
   pattern, or reusable boundary.

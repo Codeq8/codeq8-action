@@ -495,7 +495,13 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(onboardingSource, /^name: codeq8-onboarding$/m);
   assert.match(onboardingSource, /first-pass router/);
   assert.match(onboardingSource, /runner\s+prompt owns runtime facts and safety policy/);
+  assert.match(onboardingSource, /Maintain durable thread goals/);
+  assert.match(onboardingSource, /set, update, or\s+clear the thread goal/);
+  assert.match(onboardingSource, /individual commands, checklists, PR mechanics, or transient status/);
+  assert.match(onboardingSource, /include\s+the relevant skill name or path/);
+  assert.match(onboardingSource, /route to\s+`codeq8-lessons`/);
   assert.match(onboardingSource, /Do not turn onboarding into a second harness/);
+  assert.match(onboardingSource, /Do not use goals as blind memory/);
 
   assert.match(coordinatorSource, /^name: codeq8-coordinator$/m);
   assert.match(coordinatorSource, /normal managed threads/);
@@ -507,9 +513,13 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(lessonsSource, /not transcript memory and not blind recording/);
   assert.match(lessonsSource, /user correction|user corrections/);
   assert.match(lessonsSource, /Codeq8 plugin\/public action path/);
+  assert.match(lessonsSource, /Keep the thread goal aligned/);
+  assert.match(lessonsSource, /Do not use thread goals as the lesson store/);
 
   assert.doesNotMatch(pluginSource, /Child Threads runtime coordination skill/);
   assert.doesNotMatch(readmeSource, /codeq8-skill-stewardship|Child Threads runtime/i);
+  assert.match(readmeSource, /durable goal\s+maintenance/);
+  assert.match(readmeSource, /curated repo-owned lessons/);
 
   for (const source of [onboardingSource, coordinatorSource, lessonsSource, pluginSource, readmeSource]) {
     assert.doesNotMatch(source, /Abdul|aalzanki/i);

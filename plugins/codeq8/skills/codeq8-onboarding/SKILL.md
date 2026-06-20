@@ -32,10 +32,22 @@ staging mutation guards harness-owned.
      or new workflow should become a durable repo artifact.
    - Use workspace repo skills and `AGENTS.md` for repository-specific
      implementation, validation, production, staging, and release rules.
-4. Keep user-message precedence. If newer user instructions conflict with an
+4. Maintain durable thread goals. When the conversation establishes, changes,
+   or completes a broader project, problem, or desired outcome, set, update, or
+   clear the thread goal through the runner-supported goal surface. Do not turn
+   individual commands, checklists, PR mechanics, or transient status into the
+   goal. If the durable goal depends on a Codeq8 skill or repo skill, include
+   the relevant skill name or path so future runs inherit both the outcome and
+   the operating context.
+5. Capture durable lessons. When a user correction, repeated failure, stale
+   guidance, or new workflow should change future Codeq8 behavior, route to
+   `codeq8-lessons` and turn the takeaway into a checked-in skill, test,
+   source contract, operator, docs page, or repo instruction instead of relying
+   on chat memory.
+6. Keep user-message precedence. If newer user instructions conflict with an
    older plan, follow the newer request within the current safety and repo
    policy.
-5. Finish with evidence: changed files or PR, validation, staging or runtime
+7. Finish with evidence: changed files or PR, validation, staging or runtime
    evidence when required, remaining blockers, and explicit rollout boundaries.
 
 ## Guardrails
@@ -45,6 +57,9 @@ staging mutation guards harness-owned.
 - Do not treat a private workspace skill as a shipped Codeq8 runtime capability
   for other repositories. Product-wide Codeq8 behavior must ship through the
   Codeq8 plugin/public action path.
+- Do not use goals as blind memory. Keep them focused on durable project
+  context, and use `codeq8-lessons` for reusable takeaways that need a repo
+  artifact.
 - Do not move or thin harness wording until the pinned public runtime actually
   bundles the skill that the harness points to.
 - Do not imply a plugin capability grants live mutation rights, browser auth, or
