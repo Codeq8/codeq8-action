@@ -500,6 +500,7 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(onboardingSource, /individual commands, checklists, PR mechanics, or transient status/);
   assert.match(onboardingSource, /include\s+the relevant skill name or path/);
   assert.match(onboardingSource, /route to\s+`codeq8-lessons`/);
+  assert.match(onboardingSource, /present the lesson\s+candidate before editing/);
   assert.match(onboardingSource, /Do not turn onboarding into a second harness/);
   assert.match(onboardingSource, /Do not use goals as blind memory/);
 
@@ -512,6 +513,12 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(lessonsSource, /^name: codeq8-lessons$/m);
   assert.match(lessonsSource, /not transcript memory and not blind recording/);
   assert.match(lessonsSource, /user correction|user corrections/);
+  assert.match(lessonsSource, /Lesson Candidate Checkpoint/);
+  assert.match(lessonsSource, /bad prior behavior/);
+  assert.match(lessonsSource, /new invariant future runs should follow/);
+  assert.match(lessonsSource, /smallest durable artifact/);
+  assert.match(lessonsSource, /ask first/);
+  assert.match(lessonsSource, /Do not turn every complaint/);
   assert.match(lessonsSource, /Codeq8 plugin\/public action path/);
   assert.match(lessonsSource, /Keep the thread goal aligned/);
   assert.match(lessonsSource, /Do not use thread goals as the lesson store/);

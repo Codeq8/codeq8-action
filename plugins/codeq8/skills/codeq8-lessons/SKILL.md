@@ -11,7 +11,25 @@ Lessons are curated judgment, not transcript memory and not blind recording.
 ## Core Rule
 
 Write down the lesson only when future Codeq8 runs should behave differently.
-Prefer a small executable guardrail over broad process prose.
+Prefer a small executable guardrail over broad process prose. Use a bounded
+lesson-candidate checkpoint before editing unless the user has already asked
+for a durable repo change.
+
+## Lesson Candidate Checkpoint
+
+When a correction, complaint, or discussion reveals a possible reusable agent
+failure, decide whether it should become repo-owned memory. If yes, name:
+
+- the bad prior behavior;
+- the new invariant future runs should follow;
+- the smallest durable artifact, such as a skill, `AGENTS.md` rule, source
+  contract, test, operator guard, parser/route boundary, or doc;
+- whether the user has already authorized the edit or Codex should ask first.
+
+If the user is still aligning, propose the lesson candidate and wait for
+approval before editing. If the user already said to make the durable update,
+make the smallest artifact change and validate it. Do not turn every complaint,
+style preference, or thread-local correction into a lesson.
 
 ## Workflow
 
@@ -20,25 +38,27 @@ Prefer a small executable guardrail over broad process prose.
    stale skill text, missing validation boundary, new operator workflow,
    ambiguous ownership, or a request to make future Codex runs inherit a
    pattern.
-2. Choose the durable artifact:
+2. Run the lesson-candidate checkpoint unless the user has already approved
+   the durable update.
+3. Choose the durable artifact:
    - skill or skill reference for procedural agent behavior;
    - `AGENTS.md` for hard repo law or safety policy;
    - source contract, unit test, lint rule, parser, or route boundary for a
      repeated failure class;
    - operator guard or dry-run path for repeatable diagnostics or mutations;
    - docs only when humans need the explanation outside agent execution.
-3. Respect the runtime boundary. Workspace-specific lessons can live in that
+4. Respect the runtime boundary. Workspace-specific lessons can live in that
    workspace. Codeq8-owned behavior that normal Codeq8 runs across repositories
    must ship through the Codeq8 plugin/public action path first, then be pinned
    or advertised by the private app when required.
-4. Make the lesson concrete. Name the prior bad state, the new invariant, the
+5. Make the lesson concrete. Name the prior bad state, the new invariant, the
    artifact that enforces it, and the validation that proves future runs inherit
    it.
-5. Keep the thread goal aligned when the lesson changes the durable project
+6. Keep the thread goal aligned when the lesson changes the durable project
    context. Update the goal only for a broader objective, problem, or desired
    outcome; do not store the lesson itself, a transcript summary, or a checklist
    in the goal.
-6. Validate the artifact. Run the skill validator for skill changes when
+7. Validate the artifact. Run the skill validator for skill changes when
    available, and add or update the smallest deterministic contract that would
    fail if the lesson disappeared.
 

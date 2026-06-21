@@ -41,9 +41,10 @@ staging mutation guards harness-owned.
    the operating context.
 5. Capture durable lessons. When a user correction, repeated failure, stale
    guidance, or new workflow should change future Codeq8 behavior, route to
-   `codeq8-lessons` and turn the takeaway into a checked-in skill, test,
-   source contract, operator, docs page, or repo instruction instead of relying
-   on chat memory.
+   `codeq8-lessons`. If the user is still aligning, present the lesson
+   candidate before editing; if the user already asked for the durable update,
+   turn the takeaway into a checked-in skill, test, source contract, operator,
+   docs page, or repo instruction instead of relying on chat memory.
 6. Keep user-message precedence. If newer user instructions conflict with an
    older plan, follow the newer request within the current safety and repo
    policy.
