@@ -9239,16 +9239,15 @@ async function runCodexAppServer({
         startAgentMessage(params);
       }
       if (
+        !hiddenTitleTurnActive &&
         normalizedMethod === "item/completed" &&
         isAppServerReasoningItem(params)
       ) {
-        const progressEvent = hiddenTitleTurnActive
-          ? null
-          : summarizeAppServerProgressNotification({
-              method: normalizedMethod,
-              params,
-            });
-        if (!hiddenTitleTurnActive && progressEvent) {
+        const progressEvent = summarizeAppServerProgressNotification({
+          method: normalizedMethod,
+          params,
+        });
+        if (progressEvent) {
           progressReporter.enqueue(progressEvent);
         }
       }
