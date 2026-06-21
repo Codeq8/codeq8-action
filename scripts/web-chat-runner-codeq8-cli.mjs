@@ -948,6 +948,64 @@ function writeThreadInspect(stdout, snapshot) {
   }
 }
 
+function normalizeRunDetailsEvent(eventValue) {
+  const event = payloadObject(eventValue);
+  return {
+    event_id: firstText(event.event_id, event.eventId),
+    event_key: firstText(event.event_key, event.eventKey),
+    item_type: firstText(event.item_type, event.itemType, event.kind, event.type),
+    status: firstText(event.status),
+    label: truncateText(firstText(event.label, event.text, event.message), 320),
+    at: normalizeEpochMs(event.at || event.created_at || event.createdAt),
+    recorded_at: normalizeEpochMs(event.recorded_at || event.recordedAt),
+  };
+}
+
+function writeThreadRunDetails(stdout, payload) {
+  const events = payloadArray(payload.events).map(normalizeRunDetailsEvent);
+  const progressHistory = payloadObject(payload.progress_history || payload.progressHistory);
+  const threadId = firstText(payload.target_thread_id, payload.targetThreadId);
+  const runId = firstText(payload.target_run_id, payload.targetRunId);
+  stdout.write(`Thread: ${threadId || "(unknown)"}\n`);
+  stdout.write(`Run: ${runId || "(unknown)"}\n`);
+  const historyCount = normalizeInteger(
+    progressHistory.event_count || progressHistory.eventCount,
+    0,
+  );
+  stdout.write(`Saved details: ${historyCount || events.length || 0}\n`);
+  const skippedReason = firstText(payload.skipped_reason, payload.skippedReason);
+  if (skippedReason) {
+    stdout.write(`Skipped: ${skippedReason}\n`);
+  }
+  stdout.write("\nEvents:\n");
+  if (events.length === 0) {
+    stdout.write("- (none returned)\n");
+  } else {
+    for (const event of events) {
+      const time = event.at ? `${formatTimestamp(event.at)} ` : "";
+      const type = event.item_type ? `${event.item_type}` : "detail";
+      const status = event.status ? ` ${event.status}` : "";
+      stdout.write(`- ${time}${type}${status}: ${event.label || "(empty)"}\n`);
+    }
+  }
+  stdout.write("\n");
+  const pageCount = normalizeInteger(payload.page_count || payload.pageCount, events.length);
+  const hasMore = Boolean(payload.has_more || payload.hasMore);
+  stdout.write(`Page: ${pageCount} event(s), has more: ${hasMore ? "yes" : "no"}\n`);
+  const nextBeforeAt = normalizeEpochMs(payload.next_before_at || payload.nextBeforeAt);
+  const nextBeforeEventKey = firstText(
+    payload.next_before_event_key,
+    payload.nextBeforeEventKey,
+  );
+  if (nextBeforeAt || nextBeforeEventKey) {
+    stdout.write(
+      `Next: --before-at ${nextBeforeAt || ""} --before-event-key ${
+        nextBeforeEventKey || ""
+      }\n`,
+    );
+  }
+}
+
 function writeDelegatedThreadCreate(stdout, snapshot) {
   const thread = payloadObject(snapshot.thread);
   const run = payloadObject(snapshot.run);
@@ -991,6 +1049,7 @@ function printHelp(stdout) {
       "  codeq8 threads search [--search text] [--status active|all] [--limit 25]",
       "  codeq8 threads context <thread-id> [--limit 20]",
       "  codeq8 threads inspect <thread-id> [--limit 12] [--json]",
+      "  codeq8 threads details <thread-id> --run <run-id> [--limit 20] [--json]",
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
       "  codeq8 threads create --title title --message text [--assigned-to codeq8|me] [--json]",
       "  codeq8 threads message <thread-id> --text text",
@@ -1116,6 +1175,42 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       writeJson(stdout, snapshot);
     } else {
       writeThreadInspect(stdout, snapshot);
+    }
+    return 0;
+  }
+
+  if (command === "details" || command === "detail") {
+    const positional = removeFlags(
+      rest,
+      ["--run", "--run-id", "--limit", "--before-at", "--before-event-key"],
+      ["--json"],
+    );
+    const targetThreadId = normalizeText(positional[0]);
+    const targetRunId = readFlag(rest, ["--run", "--run-id"]);
+    if (!targetThreadId) {
+      throw new Error("thread id is required.");
+    }
+    if (!targetRunId) {
+      throw new Error("--run is required.");
+    }
+    const query = new URLSearchParams();
+    appendParentQuery(query, context);
+    query.set("target_thread_id", targetThreadId);
+    query.set("target_run_id", targetRunId);
+    query.set("limit", readFlag(rest, "--limit", "20"));
+    query.set("before_at", readFlag(rest, "--before-at"));
+    query.set("before_event_key", readFlag(rest, "--before-event-key"));
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/thread-run-details",
+      query,
+    });
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, payload);
+    } else {
+      writeThreadRunDetails(stdout, payload);
     }
     return 0;
   }

@@ -285,6 +285,113 @@ test("runner codeq8 helper inspects one delegated thread with compact redacted o
   assert.doesNotMatch(text, /secret_progress_token/);
 });
 
+test("runner codeq8 helper reads paged run details with compact redacted output", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  const exitCode = await handleRunnerCodeq8Cli({
+    argv: [
+      "threads",
+      "details",
+      "wct_managed",
+      "--run",
+      "wcr_details",
+      "--limit",
+      "2",
+      "--before-at",
+      "1700000002000",
+      "--before-event-key",
+      "ev_cursor",
+    ],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        runner_parent_thread_id: "wct_parent",
+        runner_parent_run_id: "wcr_parent",
+        runner_parent_workspace_repository: "Codeq8/Codeq8",
+        target_thread_id: "wct_managed",
+        target_run_id: "wcr_details",
+        progress_history: {
+          available: true,
+          event_count: 3,
+          latest_event_at: 1700000003000,
+        },
+        events: [
+          {
+            event_id: "evt_1",
+            event_key: "ev_1",
+            kind: "item",
+            item_type: "assistant_reasoning",
+            label: "Reading token=secret_details_token",
+            status: "completed",
+            at: 1700000001000,
+            recorded_at: 1700000001500,
+          },
+          {
+            event_id: "evt_2",
+            event_key: "ev_2",
+            kind: "item",
+            item_type: "agent_message_progress",
+            label: "Checking the next page cursor",
+            status: "completed",
+            at: 1700000002000,
+            recorded_at: 1700000002500,
+          },
+        ],
+        page_count: 2,
+        has_more: true,
+        next_before_at: 1700000001000,
+        next_before_event_key: "ev_1",
+      });
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.origin, "https://codeq8.example");
+  assert.equal(url.pathname, "/api/chat/runs/thread-run-details");
+  assert.equal(calls[0]?.init?.method, "GET");
+  assert.equal(url.searchParams.get("workspace_repository"), "Codeq8/Codeq8");
+  assert.equal(url.searchParams.get("thread_id"), "wct_parent");
+  assert.equal(url.searchParams.get("run_id"), "wcr_parent");
+  assert.equal(url.searchParams.get("target_thread_id"), "wct_managed");
+  assert.equal(url.searchParams.get("target_run_id"), "wcr_details");
+  assert.equal(url.searchParams.get("limit"), "2");
+  assert.equal(url.searchParams.get("before_at"), "1700000002000");
+  assert.equal(url.searchParams.get("before_event_key"), "ev_cursor");
+
+  const text = output.readText();
+  assert.match(text, /Thread: wct_managed/);
+  assert.match(text, /Run: wcr_details/);
+  assert.match(text, /Saved details: 3/);
+  assert.match(text, /assistant_reasoning completed: Reading token=\[redacted\]/);
+  assert.match(text, /agent_message_progress completed: Checking the next page cursor/);
+  assert.match(text, /Page: 2 event\(s\), has more: yes/);
+  assert.match(text, /Next: --before-at 1700000001000 --before-event-key ev_1/);
+  assert.ok(text.length < 1600);
+  assertNoRawCredentialPayload(text);
+  assert.doesNotMatch(text, /secret_details_token/);
+});
+
+test("runner codeq8 helper requires a run id for details", async () => {
+  let calls = 0;
+  await assert.rejects(
+    handleRunnerCodeq8Cli({
+      argv: ["threads", "details", "wct_managed"],
+      env: testEnv(),
+      fetchImpl: async () => {
+        calls += 1;
+        throw new Error("details should not fetch without --run");
+      },
+    }),
+    /--run is required/,
+  );
+  assert.equal(calls, 0);
+});
+
 test("runner codeq8 helper inspect json returns a redacted snapshot contract", async () => {
   const output = createOutputCapture();
   await handleRunnerCodeq8Cli({
@@ -518,6 +625,7 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.equal(exitCode, 0);
   const text = output.readText();
   assert.match(text, /codeq8 threads inspect <thread-id> \[--limit 12\] \[--json\]/);
+  assert.match(text, /codeq8 threads details <thread-id> --run <run-id> \[--limit 20\] \[--json\]/);
   assert.doesNotMatch(text, /codeq8 threads children/);
   assert.doesNotMatch(text, /child rows|child-of|Child thread/i);
   assert.match(text, /codeq8 threads message <thread-id> --text text/);
