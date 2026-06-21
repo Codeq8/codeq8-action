@@ -566,6 +566,52 @@ function buildThreadTitleOutput(payload, fallbackThreadId, fallbackTitle) {
   });
 }
 
+function buildThreadPullRequestOutput(
+  payload,
+  fallbackThreadId,
+  fallbackPullRequestNumber,
+  fallbackPullRequestUrl,
+) {
+  const thread = payloadObject(payload.thread);
+  const branchContext = readThreadBranchContext(thread);
+  const threadPullRequest = readThreadPullRequest(thread);
+  const pullRequest = compactObject({
+    number: firstPositiveNumber(
+      payload.pull_request_number,
+      payload.pullRequestNumber,
+      threadPullRequest.number,
+      fallbackPullRequestNumber,
+    ),
+    url: firstText(
+      payload.pull_request_url,
+      payload.pullRequestUrl,
+      threadPullRequest.url,
+      fallbackPullRequestUrl,
+    ),
+    head_branch: firstText(threadPullRequest.head_branch),
+    base_branch: firstText(threadPullRequest.base_branch),
+  });
+  const branch = compactObject({
+    context_branch: firstText(
+      branchContext.context_branch,
+      branchContext.contextBranch,
+    ),
+    write_branch: firstText(branchContext.write_branch, branchContext.writeBranch),
+    base_branch: firstText(branchContext.base_branch, branchContext.baseBranch),
+  });
+  return compactObject({
+    ok: Boolean(payload.ok),
+    associated: payload.associated !== false,
+    updated: payload.updated !== false,
+    target_thread_id: readThreadOutputId(payload, fallbackThreadId),
+    ...parentSummaryFields(payload),
+    pull_request: pullRequest,
+    branch,
+    thread: summarizeThreadForOutput(thread, payload),
+    error: firstText(payload.error),
+  });
+}
+
 function readThreadBranchContext(thread) {
   return payloadObject(thread.branch_context || thread.branchContext);
 }
@@ -1054,6 +1100,7 @@ function printHelp(stdout) {
       "  codeq8 threads create --title title --message text [--assigned-to codeq8|me] [--json]",
       "  codeq8 threads message <thread-id> --text text",
       "  codeq8 threads title <thread-id> --title text",
+      "  codeq8 threads pull-request <thread-id> --pull-request-number n|--pull-request-url url",
       "  codeq8 threads archive <thread-id>  (alias: close)",
       "  codeq8 threads reopen <thread-id>",
       "  codeq8 threads goal <thread-id> --objective text [--status active|paused]",
@@ -1348,6 +1395,61 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       }),
     });
     writeJson(stdout, buildThreadTitleOutput(payload, targetThreadId, title));
+    return 0;
+  }
+
+  if (
+    command === "pull-request" ||
+    command === "set-pr" ||
+    command === "associate-pr" ||
+    command === "pr"
+  ) {
+    const positional = removeFlags(rest, [
+      "--pull-request-number",
+      "--number",
+      "--pr",
+      "--pull-request-url",
+      "--url",
+    ], ["--json"]);
+    const targetThreadId = normalizeText(positional[0]);
+    const pullRequestNumber = readFlag(rest, [
+      "--pull-request-number",
+      "--number",
+      "--pr",
+    ]);
+    const pullRequestUrl = readFlag(rest, ["--pull-request-url", "--url"]);
+    if (!targetThreadId) {
+      throw new Error("thread id is required.");
+    }
+    if (!pullRequestNumber && !pullRequestUrl) {
+      throw new Error("--pull-request-number or --pull-request-url is required.");
+    }
+    const body = parentBody(context, {
+      target_thread_id: targetThreadId,
+    });
+    if (pullRequestNumber) {
+      body.pull_request_number = pullRequestNumber;
+    }
+    if (pullRequestUrl) {
+      body.pull_request_url = pullRequestUrl;
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/thread-pull-request",
+      method: "POST",
+      body,
+    });
+    writeJson(
+      stdout,
+      buildThreadPullRequestOutput(
+        payload,
+        targetThreadId,
+        normalizeInteger(pullRequestNumber, 0),
+        pullRequestUrl,
+      ),
+    );
     return 0;
   }
 

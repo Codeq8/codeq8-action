@@ -630,6 +630,10 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.doesNotMatch(text, /child rows|child-of|Child thread/i);
   assert.match(text, /codeq8 threads message <thread-id> --text text/);
   assert.match(text, /codeq8 threads title <thread-id> --title text/);
+  assert.match(
+    text,
+    /codeq8 threads pull-request <thread-id> --pull-request-number n\|--pull-request-url url/,
+  );
   assert.match(text, /codeq8 threads archive <thread-id>\s+\(alias: close\)/);
   assert.match(text, /codeq8 threads reopen <thread-id>/);
   assert.doesNotMatch(text, /threads steer/);
@@ -794,6 +798,83 @@ test("runner codeq8 helper sets thread titles through backend contract", async (
   assert.equal(payload.title_source, "manual");
   assert.equal(payload.thread.title, "Runner title");
   assertNoRawCredentialPayload(output.readText());
+});
+
+test("runner codeq8 helper associates threads with pull requests through backend contract", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "pull-request", "wct_target", "--pull-request-number", "2573"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        associated: true,
+        updated: true,
+        target_thread_id: "wct_target",
+        pull_request_number: 2573,
+        pull_request_url: "https://github.com/Codeq8/Codeq8/pull/2573",
+        thread: {
+          thread_id: "wct_target",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Retarget PR thread",
+          source_type: "branch",
+          branch_context: {
+            context_branch: "feature/thread-pr",
+            write_branch: "feature/thread-pr",
+            base_branch: "main",
+            pull_request_number: 2573,
+            pull_request_url: "https://github.com/Codeq8/Codeq8/pull/2573",
+            pull_request_head_branch: "feature/thread-pr",
+            pull_request_base_branch: "main",
+          },
+          github_context: {
+            pull_request: {
+              number: 2573,
+              html_url: "https://github.com/Codeq8/Codeq8/pull/2573",
+              head: { ref: "feature/thread-pr" },
+              base: { ref: "main" },
+            },
+          },
+          thread_stream_token: "secret_pr_stream",
+          thread_record_handoff: "secret_pr_handoff",
+        },
+      });
+    },
+  });
+
+  assert.equal(new URL(calls[0]?.url).pathname, "/api/chat/runs/thread-pull-request");
+  assert.equal(calls[0]?.init?.method, "POST");
+  assert.equal(calls[0]?.init?.headers?.Authorization, "Bearer header.payload.signature");
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+  const body = JSON.parse(String(calls[0]?.init?.body || "{}"));
+  assert.equal(body.workspace_repository, "Codeq8/Codeq8");
+  assert.equal(body.thread_id, "wct_parent");
+  assert.equal(body.run_id, "wcr_parent");
+  assert.equal(body.target_thread_id, "wct_target");
+  assert.equal(body.pull_request_number, "2573");
+  assert.equal(Object.hasOwn(body, "pull_request_url"), false);
+  const payload = output.readJson();
+  assert.equal(payload.ok, true);
+  assert.equal(payload.associated, true);
+  assert.equal(payload.updated, true);
+  assert.equal(payload.target_thread_id, "wct_target");
+  assert.deepEqual(payload.pull_request, {
+    number: 2573,
+    url: "https://github.com/Codeq8/Codeq8/pull/2573",
+    head_branch: "feature/thread-pr",
+    base_branch: "main",
+  });
+  assert.deepEqual(payload.branch, {
+    context_branch: "feature/thread-pr",
+    write_branch: "feature/thread-pr",
+    base_branch: "main",
+  });
+  assert.equal(payload.thread.source_type, "branch");
+  assertNoRawCredentialPayload(output.readText());
+  assert.doesNotMatch(output.readText(), /secret_pr_/);
 });
 
 test("runner codeq8 helper creates delegated threads with compact safe output", async () => {
