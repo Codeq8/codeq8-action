@@ -21,6 +21,29 @@ Do not push a separate learning branch, create a standalone learning PR, or
 defer the update as a vague follow-up when the current work can safely carry
 the artifact.
 
+## Correction-To-Artifact Rule
+
+When a user correction asks why Codex ignored, misread, or worked around
+`AGENTS.md`, a skill, prompt guidance, validation, staging verification, or a
+repo-owned workflow, treat that as an active learning signal.
+
+If the user asks what artifact would prevent the miss, do not only name the
+artifact. Inspect the owning guidance and do one of these in the active branch
+or public-action change whenever it is in scope:
+
+- update the owning skill, test, source contract, operator, docs page, or repo
+  instruction when the invariant is missing or unclear;
+- if the named artifact already contains the invariant, add or update the
+  smallest deterministic enforcement that would have forced the better
+  behavior, or update `codeq8-learn` itself when the failure was that Codex
+  did not turn the correction into an artifact;
+- if no repo change is safe, report the exact artifact, the existing invariant,
+  the blocker, and the validation that would be required.
+
+Do not wait for a separate "make the change" instruction when the user is
+asking how to prevent the recurrence and the artifact is in scope for the
+current review path.
+
 ## Active Learning Pass
 
 Run this pass while implementing and again before final handoff:
