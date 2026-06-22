@@ -28,8 +28,9 @@ staging mutation guards harness-owned.
      MCP, public action pin, or rollout boundary work.
    - Use `codeq8-coordinator` when the user asks Codex to coordinate separate
      Codeq8 workstreams or other normal managed threads.
-   - Use `codeq8-lessons` when a correction, repeated failure, stale guidance,
-     or new workflow should become a durable repo artifact.
+   - Use `codeq8-learn` when a correction, repeated failure, stale guidance,
+     new workflow, or current-work implementation friction should update a
+     durable repo artifact.
    - Use workspace repo skills and `AGENTS.md` for repository-specific
      implementation, validation, production, staging, and release rules.
 4. Maintain durable thread goals. When the conversation establishes, changes,
@@ -39,12 +40,14 @@ staging mutation guards harness-owned.
    goal. If the durable goal depends on a Codeq8 skill or repo skill, include
    the relevant skill name or path so future runs inherit both the outcome and
    the operating context.
-5. Capture durable lessons. When a user correction, repeated failure, stale
-   guidance, or new workflow should change future Codeq8 behavior, route to
-   `codeq8-lessons`. If the user is still aligning, present the lesson
-   candidate before editing; if the user already asked for the durable update,
-   turn the takeaway into a checked-in skill, test, source contract, operator,
-   docs page, or repo instruction instead of relying on chat memory.
+5. Run the active learning pass. When a user correction, repeated failure,
+   stale guidance, new workflow, or current-work implementation friction should
+   change future Codeq8 behavior, route to `codeq8-learn`. If the relevant
+   learning is in scope for the current branch or public-action change, fold
+   the skill, test, source contract, operator, docs page, or repo instruction
+   update into the same work. If it would materially expand risk or cross an
+   unrelated rollout boundary, report a bounded learning candidate instead of
+   creating a hidden background branch or standalone learning PR.
 6. Keep user-message precedence. If newer user instructions conflict with an
    older plan, follow the newer request within the current safety and repo
    policy.
@@ -59,7 +62,7 @@ staging mutation guards harness-owned.
   for other repositories. Product-wide Codeq8 behavior must ship through the
   Codeq8 plugin/public action path.
 - Do not use goals as blind memory. Keep them focused on durable project
-  context, and use `codeq8-lessons` for reusable takeaways that need a repo
+  context, and use `codeq8-learn` for reusable takeaways that need a repo
   artifact.
 - Do not move or thin harness wording until the pinned public runtime actually
   bundles the skill that the harness points to.

@@ -10,8 +10,9 @@ Bundled skills:
   maintenance, and skill routing.
 - `codeq8-coordinator`: normal managed-thread coordination for user-owned
   workstreams.
-- `codeq8-lessons`: curated repo-owned lessons from corrections, repeated
-  failures, stale guidance, and new workflows.
+- `codeq8-learn`: active in-run learning pass for updating skills, tests,
+  source contracts, operators, docs, or repo instructions when current work
+  reveals reusable behavior.
 - `codeq8-plugin`: plugin runtime boundaries and rollout checkpoints.
 
 Bundled MCP servers:

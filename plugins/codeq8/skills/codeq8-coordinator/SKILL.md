@@ -48,7 +48,7 @@ itself a reason to create another lane.
    normal user work.
 4. Require durable handoff artifacts for implementation lanes: PR body section,
    skill/reference update, source contract, test, operator guard, docs update,
-   or issue. A chat-only note is not enough for reusable lessons.
+   or issue. A chat-only note is not enough for reusable learning.
 5. Verify from authoritative evidence before reporting a lane complete:
    current files, commit SHA, CI/check output, staging/runtime evidence when
    required, Error Reporting or provider diagnostics when relevant, and cleanup

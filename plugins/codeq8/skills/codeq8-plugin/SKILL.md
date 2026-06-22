@@ -35,8 +35,9 @@ Bundled run-behavior skills:
   the right plugin or workspace skill.
 - `codeq8-coordinator` guides user-owned coordination through normal managed
   threads and explicit handoff artifacts.
-- `codeq8-lessons` turns durable takeaways into curated repo-owned artifacts
-  instead of transcript memory.
+- `codeq8-learn` runs the active learning pass so reusable takeaways become
+  visible skill, test, source-contract, operator, docs, or instruction updates
+  in the current review path when safe.
 
 Playwright MCP availability is not permission to mutate live state. Follow the
 runner prompt's Codeq8 staging rules, visible workspace proof, and existing
