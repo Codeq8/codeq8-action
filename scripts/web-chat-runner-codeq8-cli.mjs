@@ -102,12 +102,14 @@ function requireContext(context) {
   }
 }
 
-function buildHeaders(context, extra = {}) {
+function buildHeaders(context, extra = {}, { includeRunnerAuthorization = true } = {}) {
   const headers = {
-    Authorization: `Bearer ${context.token}`,
     Accept: "application/json",
     ...extra,
   };
+  if (includeRunnerAuthorization) {
+    headers.Authorization = `Bearer ${context.token}`;
+  }
   if (context.githubSessionCookie) {
     headers.Cookie = `code_github_session=${context.githubSessionCookie}`;
   }
@@ -137,6 +139,7 @@ async function requestJson({
   method = "GET",
   query = null,
   body = null,
+  authMode = "runner",
 }) {
   const base = routeBase === "worker" ? context.workerUrl : context.publicBaseUrl;
   const url = new URL(routePath, `${base}/`);
@@ -149,7 +152,11 @@ async function requestJson({
   }
   const response = await fetchImpl(url.toString(), {
     method,
-    headers: buildHeaders(context, body ? { "Content-Type": "application/json" } : {}),
+    headers: buildHeaders(
+      context,
+      body ? { "Content-Type": "application/json" } : {},
+      { includeRunnerAuthorization: authMode !== "web-session" },
+    ),
     body: body ? JSON.stringify(body) : undefined,
   });
   let payload = {};
@@ -610,6 +617,117 @@ function buildThreadPullRequestOutput(
     thread: summarizeThreadForOutput(thread, payload),
     error: firstText(payload.error),
   });
+}
+
+function normalizeScheduledChatCadence(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  if (["day", "week", "month"].includes(normalized)) {
+    return normalized;
+  }
+  return "";
+}
+
+function readScheduledChatCadence(rest, { fallback = "" } = {}) {
+  const cadence = normalizeScheduledChatCadence(
+    firstText(readFlag(rest, ["--every", "--cadence", "--frequency"]), fallback),
+  );
+  if (!cadence) {
+    throw new Error("--every must be day, week, or month.");
+  }
+  return cadence;
+}
+
+function formatScheduledChatCadence(value) {
+  const cadence = normalizeScheduledChatCadence(value);
+  if (cadence === "week") {
+    return "Once every week";
+  }
+  if (cadence === "month") {
+    return "Once every month";
+  }
+  return "Once every day";
+}
+
+function summarizeScheduledChatForOutput(record) {
+  const normalized = payloadObject(record);
+  return sanitizeForOutput(
+    compactObject({
+      scheduled_chat_id: firstText(
+        normalized.scheduled_chat_id,
+        normalized.scheduledChatId,
+      ),
+      repository: firstText(
+        normalized.workspace_repository,
+        normalized.workspaceRepository,
+      ),
+      title: truncateText(firstText(normalized.title), 160),
+      cadence: normalizeScheduledChatCadence(normalized.cadence),
+      status: firstText(normalized.status),
+      next_run_at: normalizeEpochMs(normalized.next_run_at || normalized.nextRunAt),
+      last_run_at: normalizeEpochMs(normalized.last_run_at || normalized.lastRunAt),
+      last_thread_id: firstText(normalized.last_thread_id, normalized.lastThreadId),
+      last_run_id: firstText(normalized.last_run_id, normalized.lastRunId),
+      last_run_status: firstText(
+        normalized.last_run_status,
+        normalized.lastRunStatus,
+      ),
+      failure_count: normalizeInteger(
+        normalized.failure_count || normalized.failureCount,
+        0,
+      ),
+      last_error: truncateText(firstText(normalized.last_error, normalized.lastError), 240),
+      prompt_preview: truncateText(firstText(normalized.prompt), 240),
+    }),
+  );
+}
+
+function readScheduledChatOutput(payload) {
+  return summarizeScheduledChatForOutput(
+    payload.scheduled_chat || payload.scheduledChat || {},
+  );
+}
+
+function writeScheduledChatList(stdout, payload, { repository = "" } = {}) {
+  const records = payloadArray(payload.scheduled_chats || payload.scheduledChats)
+    .map(summarizeScheduledChatForOutput)
+    .filter((record) => record.scheduled_chat_id);
+  stdout.write(`Repository: ${repository || "(unknown)"}\n`);
+  stdout.write("\n");
+  if (records.length === 0) {
+    stdout.write("No scheduled chats.\n");
+  } else {
+    stdout.write("scheduled_chat_id\tstatus\tcadence\tnext_run_at\ttitle\n");
+    for (const record of records) {
+      stdout.write(
+        [
+          record.scheduled_chat_id,
+          record.status,
+          formatScheduledChatCadence(record.cadence),
+          formatTimestamp(record.next_run_at),
+          normalizeText(record.title || "(untitled)").replace(/\s+/g, " "),
+        ].join("\t") + "\n",
+      );
+    }
+  }
+  stdout.write("\n");
+  stdout.write(`Has more: ${payload.has_more || payload.hasMore ? "yes" : "no"}\n`);
+}
+
+function writeScheduledChatMutation(stdout, record) {
+  stdout.write(`Scheduled chat: ${record.scheduled_chat_id || "(unknown)"}\n`);
+  stdout.write(`Title: ${record.title || "(untitled)"}\n`);
+  stdout.write(`Repository: ${record.repository || "(unknown)"}\n`);
+  stdout.write(`State: ${record.status || "(unknown)"}\n`);
+  stdout.write(`Cadence: ${formatScheduledChatCadence(record.cadence)}\n`);
+  if (record.next_run_at) {
+    stdout.write(`Next run: ${formatTimestamp(record.next_run_at)}\n`);
+  }
+  if (record.last_thread_id) {
+    stdout.write(`Last thread: ${record.last_thread_id}\n`);
+  }
+  if (record.last_error) {
+    stdout.write(`Last error: ${record.last_error}\n`);
+  }
 }
 
 function readThreadBranchContext(thread) {
@@ -1106,6 +1224,10 @@ function printHelp(stdout) {
       "  codeq8 threads goal <thread-id> --objective text [--status active|paused]",
       "  codeq8 threads goal <thread-id> --clear",
       "  codeq8 threads state <thread-id> [--limit 50]",
+      "  codeq8 scheduled list [--repository owner/repo] [--json]",
+      "  codeq8 scheduled create --message text --every day|week|month [--title title] [--repository owner/repo] [--json]",
+      "  codeq8 scheduled update <scheduled-chat-id> [--title title] [--message text] [--every day|week|month] [--status active|paused] [--json]",
+      "  codeq8 scheduled pause|resume|delete <scheduled-chat-id> [--json]",
       "  codeq8 attachments get --attachment <attachment-id> [--thread <thread-id>] [--output file]",
       "  codeq8 github issue attachments <url|number> [--repo owner/repo] [--comments] --output-dir dir",
       "",
@@ -1549,6 +1671,184 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
   throw new Error(`Unknown threads command: ${command}.`);
 }
 
+async function handleScheduledCommand({ args, context, fetchImpl, stdout }) {
+  const [command, ...rest] = args;
+  if (!command || command === "--help" || command === "help") {
+    printHelp(stdout);
+    return 0;
+  }
+
+  if (command === "list" || command === "ls") {
+    const repository = readFlag(
+      rest,
+      ["--repository", "--repo"],
+      context.workspaceRepository,
+    );
+    const query = new URLSearchParams();
+    query.set("workspace_repository", repository);
+    query.set("limit", readFlag(rest, "--limit", "100"));
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/scheduled-chats",
+      query,
+      authMode: "web-session",
+    });
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, payload);
+    } else {
+      writeScheduledChatList(stdout, payload, { repository });
+    }
+    return 0;
+  }
+
+  if (command === "create" || command === "add") {
+    const repository = readFlag(
+      rest,
+      ["--repository", "--repo"],
+      context.workspaceRepository,
+    );
+    const title = readFlag(rest, "--title");
+    const message = readFlag(rest, ["--message", "--text", "--prompt"]);
+    if (!message) {
+      throw new Error("--message is required.");
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/scheduled-chats",
+      method: "POST",
+      body: {
+        workspace_repository: repository,
+        title,
+        prompt: message,
+        cadence: readScheduledChatCadence(rest),
+      },
+      authMode: "web-session",
+    });
+    const output = readScheduledChatOutput(payload);
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, { ok: true, scheduled_chat: output });
+    } else {
+      writeScheduledChatMutation(stdout, output);
+    }
+    return 0;
+  }
+
+  if (command === "update" || command === "edit") {
+    const positional = removeFlags(
+      rest,
+      [
+        "--title",
+        "--message",
+        "--text",
+        "--prompt",
+        "--every",
+        "--cadence",
+        "--frequency",
+        "--status",
+      ],
+      ["--json"],
+    );
+    const scheduledChatId = normalizeText(positional[0]);
+    if (!scheduledChatId) {
+      throw new Error("scheduled chat id is required.");
+    }
+    const body = {};
+    const title = readFlag(rest, "--title");
+    const message = readFlag(rest, ["--message", "--text", "--prompt"]);
+    const cadenceFlag = readFlag(rest, ["--every", "--cadence", "--frequency"]);
+    const status = normalizeText(readFlag(rest, "--status")).toLowerCase();
+    if (title) {
+      body.title = title;
+    }
+    if (message) {
+      body.prompt = message;
+    }
+    if (cadenceFlag) {
+      body.cadence = readScheduledChatCadence(rest);
+    }
+    if (status) {
+      if (!["active", "paused"].includes(status)) {
+        throw new Error("--status must be active or paused.");
+      }
+      body.status = status;
+    }
+    if (Object.keys(body).length === 0) {
+      throw new Error("at least one update flag is required.");
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: `/api/scheduled-chats/${encodeURIComponent(scheduledChatId)}`,
+      method: "PATCH",
+      body,
+      authMode: "web-session",
+    });
+    const output = readScheduledChatOutput(payload);
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, { ok: true, scheduled_chat: output });
+    } else {
+      writeScheduledChatMutation(stdout, output);
+    }
+    return 0;
+  }
+
+  if (command === "pause" || command === "resume") {
+    const positional = removeFlags(rest, [], ["--json"]);
+    const scheduledChatId = normalizeText(positional[0]);
+    if (!scheduledChatId) {
+      throw new Error("scheduled chat id is required.");
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: `/api/scheduled-chats/${encodeURIComponent(scheduledChatId)}`,
+      method: "PATCH",
+      body: {
+        status: command === "pause" ? "paused" : "active",
+      },
+      authMode: "web-session",
+    });
+    const output = readScheduledChatOutput(payload);
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, { ok: true, scheduled_chat: output });
+    } else {
+      writeScheduledChatMutation(stdout, output);
+    }
+    return 0;
+  }
+
+  if (command === "delete" || command === "remove" || command === "rm") {
+    const positional = removeFlags(rest, [], ["--json"]);
+    const scheduledChatId = normalizeText(positional[0]);
+    if (!scheduledChatId) {
+      throw new Error("scheduled chat id is required.");
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: `/api/scheduled-chats/${encodeURIComponent(scheduledChatId)}`,
+      method: "DELETE",
+      authMode: "web-session",
+    });
+    const output = {
+      ok: Boolean(payload.ok),
+      scheduled_chat_id: scheduledChatId,
+      deleted: true,
+    };
+    writeJson(stdout, output);
+    return 0;
+  }
+
+  throw new Error(`Unknown scheduled command: ${command}.`);
+}
+
 function decodeBase64Url(value) {
   return Buffer.from(normalizeText(value), "base64url");
 }
@@ -1760,6 +2060,9 @@ export async function handleRunnerCodeq8Cli({
   const [group, ...rest] = args;
   if (group === "threads" || group === "thread" || group === "chat") {
     return await handleThreadsCommand({ args: rest, context, fetchImpl, stdout });
+  }
+  if (group === "scheduled" || group === "schedules" || group === "schedule") {
+    return await handleScheduledCommand({ args: rest, context, fetchImpl, stdout });
   }
   if (group === "attachments" || group === "attachment") {
     return await handleAttachmentsCommand({ args: rest, context, fetchImpl, stdout, cwd });

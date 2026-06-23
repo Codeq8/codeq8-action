@@ -172,6 +172,220 @@ test("runner codeq8 helper does not expose child thread listing", async () => {
   assert.equal(calls, 0);
 });
 
+test("runner codeq8 helper lists scheduled chats with web-session auth only", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  const exitCode = await handleRunnerCodeq8Cli({
+    argv: ["scheduled", "list", "--repository", "iScoot-LLC/iScoot"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        scheduled_chats: [
+          {
+            scheduled_chat_id: "wcs_daily",
+            workspace_repository: "iScoot-LLC/iScoot",
+            title: "Daily error check",
+            prompt: "Check the production errors.",
+            cadence: "day",
+            status: "active",
+            next_run_at: 1700000000000,
+          },
+        ],
+        has_more: false,
+      });
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.origin, "https://codeq8.example");
+  assert.equal(url.pathname, "/api/scheduled-chats");
+  assert.equal(url.searchParams.get("workspace_repository"), "iScoot-LLC/iScoot");
+  assert.equal(calls[0]?.init?.method, "GET");
+  assert.equal(calls[0]?.init?.headers?.Authorization, undefined);
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+
+  const text = output.readText();
+  assert.match(text, /Repository: iScoot-LLC\/iScoot/);
+  assert.match(text, /scheduled_chat_id\tstatus\tcadence\tnext_run_at\ttitle/);
+  assert.match(text, /wcs_daily\tactive\tOnce every day\t2023-11-14T22:13:20\.000Z\tDaily error check/);
+});
+
+test("runner codeq8 helper creates scheduled chats with daily weekly monthly cadence", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  const exitCode = await handleRunnerCodeq8Cli({
+    argv: [
+      "scheduled",
+      "create",
+      "--title",
+      "Weekly status",
+      "--message",
+      "Summarize unresolved runner errors.",
+      "--every",
+      "week",
+      "--json",
+    ],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        scheduled_chat: {
+          scheduled_chat_id: "wcs_weekly",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Weekly status",
+          prompt: "Summarize unresolved runner errors.",
+          cadence: "week",
+          status: "active",
+          next_run_at: 1700604800000,
+        },
+      });
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.origin, "https://codeq8.example");
+  assert.equal(url.pathname, "/api/scheduled-chats");
+  assert.equal(calls[0]?.init?.method, "POST");
+  assert.equal(calls[0]?.init?.headers?.Authorization, undefined);
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body || "{}")), {
+    workspace_repository: "Codeq8/Codeq8",
+    title: "Weekly status",
+    prompt: "Summarize unresolved runner errors.",
+    cadence: "week",
+  });
+
+  const payload = output.readJson();
+  assert.equal(payload.ok, true);
+  assert.equal(payload.scheduled_chat.scheduled_chat_id, "wcs_weekly");
+  assert.equal(payload.scheduled_chat.cadence, "week");
+  assert.equal(payload.scheduled_chat.prompt_preview, "Summarize unresolved runner errors.");
+});
+
+test("runner codeq8 helper pauses resumes updates and deletes scheduled chats", async () => {
+  const calls = [];
+  const env = testEnv();
+
+  await handleRunnerCodeq8Cli({
+    argv: ["scheduled", "pause", "wcs_daily", "--json"],
+    env,
+    stdout: createOutputCapture().stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        scheduled_chat: {
+          scheduled_chat_id: "wcs_daily",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Daily status",
+          prompt: "Check errors.",
+          cadence: "day",
+          status: "paused",
+        },
+      });
+    },
+  });
+  await handleRunnerCodeq8Cli({
+    argv: ["scheduled", "resume", "wcs_daily", "--json"],
+    env,
+    stdout: createOutputCapture().stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        scheduled_chat: {
+          scheduled_chat_id: "wcs_daily",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Daily status",
+          prompt: "Check errors.",
+          cadence: "day",
+          status: "active",
+        },
+      });
+    },
+  });
+  await handleRunnerCodeq8Cli({
+    argv: ["scheduled", "update", "wcs_daily", "--every", "month", "--message", "Check monthly errors."],
+    env,
+    stdout: createOutputCapture().stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        scheduled_chat: {
+          scheduled_chat_id: "wcs_daily",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Daily status",
+          prompt: "Check monthly errors.",
+          cadence: "month",
+          status: "active",
+        },
+      });
+    },
+  });
+  await handleRunnerCodeq8Cli({
+    argv: ["scheduled", "delete", "wcs_daily"],
+    env,
+    stdout: createOutputCapture().stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({ ok: true, scheduled_chat: null });
+    },
+  });
+
+  assert.deepEqual(
+    calls.map((call) => {
+      const url = new URL(call.url);
+      return {
+        path: url.pathname,
+        method: call.init?.method,
+        authorization: call.init?.headers?.Authorization,
+        cookie: call.init?.headers?.Cookie,
+        body: call.init?.body ? JSON.parse(String(call.init.body)) : null,
+      };
+    }),
+    [
+      {
+        path: "/api/scheduled-chats/wcs_daily",
+        method: "PATCH",
+        authorization: undefined,
+        cookie: "code_github_session=session_cookie",
+        body: { status: "paused" },
+      },
+      {
+        path: "/api/scheduled-chats/wcs_daily",
+        method: "PATCH",
+        authorization: undefined,
+        cookie: "code_github_session=session_cookie",
+        body: { status: "active" },
+      },
+      {
+        path: "/api/scheduled-chats/wcs_daily",
+        method: "PATCH",
+        authorization: undefined,
+        cookie: "code_github_session=session_cookie",
+        body: { prompt: "Check monthly errors.", cadence: "month" },
+      },
+      {
+        path: "/api/scheduled-chats/wcs_daily",
+        method: "DELETE",
+        authorization: undefined,
+        cookie: "code_github_session=session_cookie",
+        body: null,
+      },
+    ],
+  );
+});
+
 test("runner codeq8 helper inspects one delegated thread with compact redacted output", async () => {
   const output = createOutputCapture();
   const calls = [];
@@ -636,6 +850,12 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   );
   assert.match(text, /codeq8 threads archive <thread-id>\s+\(alias: close\)/);
   assert.match(text, /codeq8 threads reopen <thread-id>/);
+  assert.match(text, /codeq8 scheduled list \[--repository owner\/repo\] \[--json\]/);
+  assert.match(
+    text,
+    /codeq8 scheduled create --message text --every day\|week\|month/,
+  );
+  assert.match(text, /codeq8 scheduled pause\|resume\|delete <scheduled-chat-id>/);
   assert.doesNotMatch(text, /threads steer/);
 
   const cliSource = await fs.readFile(
