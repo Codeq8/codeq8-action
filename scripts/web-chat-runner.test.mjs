@@ -1760,12 +1760,16 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
   assert.equal(goalUpdates[0]?.authorization, "Bearer header.payload.signature");
   assert.equal(goalUpdates[0]?.body?.event, "updated");
   assert.equal(goalUpdates[0]?.body?.goal?.objective, longGoalObjective);
-  assert.equal(progressEvents[0]?.kind, "codex_goal");
-  assert.equal(progressEvents[0]?.item_type, "codex_goal");
   assert(longGoalObjective.length > 180);
-  assert.equal(progressEvents[0]?.label, `Goal: ${longGoalObjective}`);
-  assert.equal(progressEvents[0]?.status, "completed");
-  assert.match(progressEvents[0]?.event_id, /^app_server:goal:/);
+  assert.deepEqual(
+    progressEvents.filter(
+      (event) =>
+        event?.kind === "codex_goal" ||
+        event?.item_type === "codex_goal" ||
+        String(event?.label || "").startsWith("Goal: "),
+    ),
+    [],
+  );
 });
 
 test("runCodex preserves the web goal when the final AppServer goal read is empty", async (t) => {
