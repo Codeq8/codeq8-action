@@ -4580,6 +4580,63 @@ test("configureWorkspaceGitCredentialHelper clears inherited helpers before addi
   }
 });
 
+test("workspace git credential helper reuses the prepared primary workspace token", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-credential-helper-"));
+  let requestCount = 0;
+  const server = createServer((request, response) => {
+    requestCount += 1;
+    response.writeHead(500, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ ok: false, error: "unexpected request" }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  t.after(() => {
+    server.close();
+  });
+
+  try {
+    git(workspacePath, ["init"]);
+    const address = server.address();
+    assert.equal(typeof address, "object");
+    assert.ok(address);
+    const helperPath = await configureWorkspaceGitCredentialHelper({
+      workspacePath,
+      commandEnv: process.env,
+      publicBaseUrl: `http://127.0.0.1:${address.port}`,
+      workspaceRepository: "Codeq8/Codeq8",
+    });
+
+    const result = await runCredentialHelperGet({
+      helperPath,
+      input: [
+        "protocol=https",
+        "host=github.com",
+        "path=Codeq8/Codeq8.git",
+        "",
+      ].join("\n"),
+      env: {
+        ...process.env,
+        CODEX_GITHUB_WRITE_TOKEN: "prepared-primary-token",
+      },
+    });
+
+    assert.equal(result.code, 0);
+    assert.equal(
+      result.stdout,
+      "username=x-access-token\npassword=prepared-primary-token\n\n",
+    );
+    assert.equal(result.stderr, "");
+    assert.equal(requestCount, 0);
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
 test("workspace git credential helper requests linked repository tokens by path", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-credential-helper-"));
   const requests = [];
