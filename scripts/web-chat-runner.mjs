@@ -115,6 +115,7 @@ const CODEX_SESSION_COMPACTION_TYPES = new Set([
   "context_compacted",
   "compacted",
 ]);
+const CODEX_SESSION_ROLLOVER_COMPRESSED_SIZE_LIMIT_BYTES = 100 * 1024 * 1024;
 const WEB_CHAT_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const WEB_CHAT_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
@@ -490,6 +491,35 @@ function summarizeCodexSessionStateForDiagnostic(value) {
     has_last_error: Boolean(state.last_error),
     ...(state.last_error ? { last_error: truncateDiagnosticString(state.last_error) } : {}),
   };
+}
+
+function shouldRolloverOversizedCodexSessionState(value) {
+  const state = normalizeCodexSessionState(value);
+  return (
+    state.status === "ready" &&
+    state.bundle_compressed_size_bytes >=
+      CODEX_SESSION_ROLLOVER_COMPRESSED_SIZE_LIMIT_BYTES
+  );
+}
+
+function applyCodexSessionContinuityGuidance({
+  prompt,
+  continuityWarning = "",
+}) {
+  const normalizedPrompt = normalizeText(prompt);
+  const normalizedWarning = normalizeText(continuityWarning);
+  if (!normalizedPrompt || !normalizedWarning) {
+    return normalizedPrompt;
+  }
+  return [
+    "Codeq8 session continuity:",
+    `- ${normalizedWarning}`,
+    "- Continue seamlessly from the injected Codeq8 thread context, current thread goal, repository state, latest user message, and bounded prior chat context already present below.",
+    "- Do not try to recover, download, or inspect the oversized persisted Codex session bundle unless the user explicitly asks for session diagnostics.",
+    "- Do not mention this internal session rollover to the user unless it directly affects the requested task.",
+    "",
+    normalizedPrompt,
+  ].join("\n");
 }
 
 function toBase64Url(bytes) {
@@ -5017,6 +5047,52 @@ async function loadCodexSessionStateForExecution({
       expected_bundle_revision: expectedBundleRevision,
     },
   });
+
+  // Cost boundary: runner.codex_session_oversized_rollover. Do not fetch or
+  // restore oversized persisted bundles; fresh prompt hydration is bounded by
+  // the server-owned prompt route.
+  if (shouldRolloverOversizedCodexSessionState(persistedCodexSessionState)) {
+    const freshCodexSessionState = buildFreshStartCodexSessionState(
+      persistedCodexSessionState,
+    );
+    const continuityWarning =
+      `Starting a fresh Codex session because the persisted session bundle is ${persistedCodexSessionState.bundle_compressed_size_bytes} compressed bytes, at or above the ${CODEX_SESSION_ROLLOVER_COMPRESSED_SIZE_LIMIT_BYTES} byte rollover limit.`;
+    log(
+      "WARN",
+      continuityWarning,
+      `thread_id=${normalizeText(threadId)} run_id=${normalizeText(runId)} bundle_revision=${expectedBundleRevision}`,
+    );
+    await maybeReportRunnerDiagnostic(reportRunnerDiagnostic, {
+      event: "runner_session_size_rollover_selected",
+      failureClass: "runner_session_size_rollover_selected",
+      severity: "warning",
+      ok: true,
+      mode: "fresh",
+      details: {
+        run_id: normalizeText(runId),
+        reason: "bundle_compressed_size_limit",
+        limit_bytes: CODEX_SESSION_ROLLOVER_COMPRESSED_SIZE_LIMIT_BYTES,
+        previous_session_state: summarizeCodexSessionStateForDiagnostic(
+          persistedCodexSessionState,
+        ),
+        fallback_session_state: summarizeCodexSessionStateForDiagnostic(
+          freshCodexSessionState,
+        ),
+        expected_bundle_revision: expectedBundleRevision,
+      },
+    });
+    return {
+      loadedCodexSession: {
+        thread: normalizeObject(thread),
+        codexSessionState: freshCodexSessionState,
+        sessionFileContents: "",
+      },
+      codexSessionState: freshCodexSessionState,
+      persistedCodexSessionState: freshCodexSessionState,
+      expectedBundleRevision,
+      continuityWarning,
+    };
+  }
 
   try {
     const loadedCodexSession = await loadWebChatCodexSessionState({
@@ -11066,7 +11142,10 @@ async function main() {
               serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
               runnerDiscordDmCommand: preparedRunnerDiscordDmCli.commandName,
             });
-            prompt = promptPayload.prompt;
+            prompt = applyCodexSessionContinuityGuidance({
+              prompt: promptPayload.prompt,
+              continuityWarning: nonFatalCodexSessionLoadWarning,
+            });
             codexGoalState = promptPayload.codexGoalState;
           }
         } catch (sessionError) {
@@ -11915,6 +11994,7 @@ export {
   applyRunControlPlaneContextToCallbackBody,
   applyWorkspaceGitToken,
   applyWorkspaceGitIdentity,
+  applyCodexSessionContinuityGuidance,
   appendWebChatRunMarkerToPrompt,
   buildCodexPrompt,
   buildCodexRunMetadata,

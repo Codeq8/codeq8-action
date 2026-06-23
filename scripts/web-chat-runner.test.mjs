@@ -16,6 +16,7 @@ import {
 import {
   assertWebChatRunnerRuntimeCompatibility,
   applyCodexNodeOptions,
+  applyCodexSessionContinuityGuidance,
   appendWebChatRunMarkerToPrompt,
   buildFirebaseStorageDownloadUrl,
   buildFinalWorkspaceStateCallbackPayload,
@@ -34,6 +35,7 @@ import {
   findPullRequestForBranch,
   flushServerOwnedCodeq8File,
   hydrateServerOwnedCodeq8File,
+  loadCodexSessionStateForExecution,
   extractUserVisibleFailureHeadline,
   isRecoverableCodexResumeFailure,
   isRecoverableCodexTransportFailure,
@@ -270,6 +272,88 @@ test("web chat run markers prove captured Codex sessions contain the current run
     }),
     false,
   );
+});
+
+test("Codex session continuity guidance keeps rollover prompts bounded", () => {
+  const prompt = applyCodexSessionContinuityGuidance({
+    prompt: "User message:\nContinue the task.",
+    continuityWarning:
+      "Starting a fresh Codex session because the persisted session bundle is 104857600 compressed bytes.",
+  });
+
+  assert.match(prompt, /^Codeq8 session continuity:/);
+  assert.match(
+    prompt,
+    /Continue seamlessly from the injected Codeq8 thread context/,
+  );
+  assert.match(
+    prompt,
+    /Do not try to recover, download, or inspect the oversized persisted Codex session bundle/,
+  );
+  assert.match(prompt, /User message:\nContinue the task\./);
+});
+
+test("oversized Codex session state rolls over before reading bundle contents", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const diagnostics = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method || "GET" });
+    throw new Error("oversized rollover must not fetch session contents");
+  };
+
+  try {
+    const result = await loadCodexSessionStateForExecution({
+      workerUrl: "https://worker.example.com",
+      adminToken: "secret",
+      threadId: "wct_oversized",
+      runId: "wcr_rollover",
+      thread: {
+        thread_id: "wct_oversized",
+        codex_session_state: {
+          status: "ready",
+          session_id: "019dd643-e3ec-76e1-952c-3dc25053e8c3",
+          session_file_relative_path:
+            "sessions/2026/05/02/rollout-2026-05-02T01-06-49-019dd643-e3ec-76e1-952c-3dc25053e8c3.jsonl",
+          bundle_storage_key: "web_chat_codex_session_blob:wct_oversized:17:nonce",
+          storage_bucket: "bucket",
+          storage_backend: "firebase_storage",
+          bundle_revision: 17,
+          bundle_size_bytes: 200 * 1024 * 1024,
+          bundle_compressed_size_bytes: 100 * 1024 * 1024,
+          last_run_id: "wcr_previous",
+        },
+      },
+      reportRunnerDiagnostic: async (diagnostic) => {
+        diagnostics.push(diagnostic);
+        return { ok: true };
+      },
+    });
+
+    assert.deepEqual(calls, []);
+    assert.equal(result.codexSessionState.status, "missing");
+    assert.equal(result.codexSessionState.bundle_revision, 17);
+    assert.equal(result.loadedCodexSession.sessionFileContents, "");
+    assert.equal(result.expectedBundleRevision, 17);
+    assert.match(result.continuityWarning, /fresh Codex session/);
+    assert.equal(
+      diagnostics.some(
+        (diagnostic) => diagnostic.event === "runner_session_state_load_started",
+      ),
+      true,
+    );
+    assert.equal(
+      diagnostics.some(
+        (diagnostic) =>
+          diagnostic.event === "runner_session_size_rollover_selected" &&
+          diagnostic.mode === "fresh" &&
+          diagnostic.details?.limit_bytes === 100 * 1024 * 1024,
+      ),
+      true,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Codex session capture uses the expected App Server session id", async () => {
@@ -2822,7 +2906,11 @@ test("runCodex runs hidden AppServer title pre-turn before the visible task turn
       "import readline from 'node:readline';",
       `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
       "const requests = [];",
-      "const persistRequests = async () => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",
+      "let persistChain = Promise.resolve();",
+      "const persistRequests = () => {",
+      "  persistChain = persistChain.then(() => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8'));",
+      "  return persistChain;",
+      "};",
       "const rl = readline.createInterface({ input: process.stdin });",
       "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
       "let turnCount = 0;",
@@ -2940,7 +3028,11 @@ test("runCodex can stop after hidden setup before starting the visible task turn
       "import readline from 'node:readline';",
       `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
       "const requests = [];",
-      "const persistRequests = async () => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",
+      "let persistChain = Promise.resolve();",
+      "const persistRequests = () => {",
+      "  persistChain = persistChain.then(() => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8'));",
+      "  return persistChain;",
+      "};",
       "const rl = readline.createInterface({ input: process.stdin });",
       "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
       "rl.on('line', async (line) => {",
@@ -3013,7 +3105,11 @@ test("runCodex falls back when hidden AppServer title pre-turn times out", async
       "import readline from 'node:readline';",
       `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
       "const requests = [];",
-      "const persistRequests = async () => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",
+      "let persistChain = Promise.resolve();",
+      "const persistRequests = () => {",
+      "  persistChain = persistChain.then(() => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8'));",
+      "  return persistChain;",
+      "};",
       "const rl = readline.createInterface({ input: process.stdin });",
       "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
       "let turnCount = 0;",
@@ -3161,8 +3257,11 @@ async function writeFakeCodexAppServer(
       "if (argsOutputPath) await fs.writeFile(argsOutputPath, JSON.stringify(process.argv.slice(2)), 'utf8');",
       "if (envOutputPath) await fs.writeFile(envOutputPath, process.env.NODE_OPTIONS || '', 'utf8');",
       "const requests = [];",
+      "let persistChain = Promise.resolve();",
       "const persistRequests = async () => {",
-      "  if (requestsOutputPath) await fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",
+      "  if (!requestsOutputPath) return;",
+      "  persistChain = persistChain.then(() => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8'));",
+      "  await persistChain;",
       "};",
       "const rl = readline.createInterface({ input: process.stdin });",
       "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
