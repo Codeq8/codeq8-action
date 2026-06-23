@@ -32,12 +32,10 @@ Codeq8-owned browser verification capability.
 Bundled run-behavior skills:
 
 - `codeq8-onboarding` routes Codeq8 runs from the runner-provided facts into
-  the right plugin or workspace skill.
+  the right plugin or workspace skill, maintains durable goals, and manages
+  repo-owned skills as durable operating context.
 - `codeq8-coordinator` guides user-owned coordination through normal managed
   threads and explicit handoff artifacts.
-- `codeq8-learn` runs the active learning pass so reusable takeaways become
-  visible skill, test, source-contract, operator, docs, or instruction updates
-  in the current review path when safe.
 
 Playwright MCP availability is not permission to mutate live state. Follow the
 runner prompt's Codeq8 staging rules, visible workspace proof, and existing

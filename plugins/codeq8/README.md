@@ -7,13 +7,9 @@ without changing `CODEX_HOME` or overwriting unmarked user-owned Codex state.
 Bundled skills:
 
 - `codeq8-onboarding`: first-pass Codeq8 run orientation, durable goal
-  maintenance, and skill routing.
+  maintenance, and goal-like repo skill management.
 - `codeq8-coordinator`: normal managed-thread coordination for user-owned
   workstreams.
-- `codeq8-learn`: active in-run learning pass and bounded Codeq8 repo
-  learning sweep for updating skills, tests, source contracts, operators, docs,
-  or repo instructions when current work or thread/PR evidence reveals reusable
-  behavior.
 - `codeq8-plugin`: plugin runtime boundaries and rollout checkpoints.
 
 Bundled MCP servers:

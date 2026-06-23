@@ -25,11 +25,11 @@ export const CODEQ8_PLUGIN_MARKETPLACE_ENTRY_MARKER_FILE =
   "codeq8.marketplace-entry.codeq8-managed.json";
 export const CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS = [
   "codeq8-coordinator",
-  "codeq8-learn",
   "codeq8-onboarding",
 ];
 export const OBSOLETE_CODEQ8_PLUGIN_SKILLS = [
   "codeq8-child-threads",
+  "codeq8-learn",
   "codeq8-lessons",
   "codeq8-skill-stewardship",
 ];
