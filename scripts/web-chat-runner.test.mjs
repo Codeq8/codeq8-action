@@ -286,6 +286,7 @@ test("Codex session continuity guidance keeps rollover prompts bounded", () => {
     prompt,
     /Continue seamlessly from the injected Codeq8 thread context/,
   );
+  assert.match(prompt, /current thread goal/);
   assert.match(
     prompt,
     /Do not try to recover, download, or inspect the oversized persisted Codex session bundle/,
@@ -310,6 +311,15 @@ test("oversized Codex session state rolls over before reading bundle contents", 
       runId: "wcr_rollover",
       thread: {
         thread_id: "wct_oversized",
+        codex_goal_state: {
+          objective: "Keep the rollover goal durable",
+          status: "active",
+          token_budget: 12000,
+          tokens_used: 600,
+          time_used_seconds: 90,
+          created_at: 1_000,
+          updated_at: 2_000,
+        },
         codex_session_state: {
           status: "ready",
           session_id: "019dd643-e3ec-76e1-952c-3dc25053e8c3",
@@ -334,6 +344,10 @@ test("oversized Codex session state rolls over before reading bundle contents", 
     assert.equal(result.codexSessionState.status, "missing");
     assert.equal(result.codexSessionState.bundle_revision, 17);
     assert.equal(result.loadedCodexSession.sessionFileContents, "");
+    assert.equal(
+      result.loadedCodexSession.thread.codex_goal_state.objective,
+      "Keep the rollover goal durable",
+    );
     assert.equal(result.expectedBundleRevision, 17);
     assert.match(result.continuityWarning, /fresh Codex session/);
     assert.equal(
