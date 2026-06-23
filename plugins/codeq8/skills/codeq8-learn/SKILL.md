@@ -21,15 +21,16 @@ Do not push a separate learning branch, create a standalone learning PR, or
 defer the update as a vague follow-up when the current work can safely carry
 the artifact.
 
-## Correction-To-Artifact Rule
+## Proactive Correction-To-Artifact Rule
 
-When a user correction asks why Codex ignored, misread, or worked around
-`AGENTS.md`, a skill, prompt guidance, validation, staging verification, or a
-repo-owned workflow, treat that as an active learning signal.
+When a user correction or repeated steering shows that Codex ignored, misread,
+or worked around `AGENTS.md`, a skill, prompt guidance, validation, staging
+verification, or a repo-owned workflow, treat the correction itself as an active
+learning signal. Do this even if the user never asks for memory, a lesson, a
+skill update, or an artifact.
 
-If the user asks what artifact would prevent the miss, do not only name the
-artifact. Inspect the owning guidance and do one of these in the active branch
-or public-action change whenever it is in scope:
+Before final handoff, inspect the owning guidance and do one of these in the
+active branch or public-action change whenever it is in scope:
 
 - update the owning skill, test, source contract, operator, docs page, or repo
   instruction when the invariant is missing or unclear;
@@ -40,9 +41,11 @@ or public-action change whenever it is in scope:
 - if no repo change is safe, report the exact artifact, the existing invariant,
   the blocker, and the validation that would be required.
 
-Do not wait for a separate "make the change" instruction when the user is
-asking how to prevent the recurrence and the artifact is in scope for the
-current review path.
+A later user question such as "what artifact prevents this?" is confirmation of
+the learning signal, not a prerequisite. Do not answer only with an explanation,
+and do not wait for a separate "what artifact", "memory", "lesson", or "make
+the change" instruction when the current review path can safely carry the
+artifact.
 
 ## Active Learning Pass
 

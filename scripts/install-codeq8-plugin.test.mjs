@@ -523,11 +523,14 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(learnSource, /new invariant future runs should follow/);
   assert.match(learnSource, /current branch or public-action change/);
   assert.match(learnSource, /creating a side PR/);
-  assert.match(learnSource, /Correction-To-Artifact Rule/);
-  assert.match(learnSource, /do not only name the\s+artifact/);
-  assert.match(learnSource, /Inspect the owning guidance/);
+  assert.match(learnSource, /Proactive Correction-To-Artifact Rule/);
+  assert.match(learnSource, /correction itself as an active\s+learning signal/);
+  assert.match(learnSource, /even if the user never asks for memory, a lesson,\s+a\s+skill update, or an artifact/);
+  assert.match(learnSource, /inspect the owning guidance/);
   assert.match(learnSource, /smallest deterministic enforcement/);
-  assert.match(learnSource, /Do not wait for a separate "make the change" instruction/);
+  assert.match(learnSource, /not a prerequisite/);
+  assert.match(learnSource, /Do not answer only with an explanation/);
+  assert.match(learnSource, /do not wait for a separate "what artifact", "memory", "lesson", or "make\s+the change" instruction/);
   assert.match(learnSource, /Codeq8 plugin\/public action path/);
   assert.match(learnSource, /Keep the thread goal aligned/);
   assert.match(learnSource, /Do not use thread goals as the learning store/);
