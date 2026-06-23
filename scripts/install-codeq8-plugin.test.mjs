@@ -505,7 +505,7 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(onboardingSource, /Prefer\s+updating an existing owner skill before creating a new one/);
   assert.match(onboardingSource, /executable checklist, routing rule,\s+validation pattern, or reusable boundary/);
   assert.match(onboardingSource, /deterministic validator, test, source contract, operator guard, or docs\s+update/);
-  assert.match(onboardingSource, /hidden branch or\s+standalone learning PR/);
+  assert.match(onboardingSource, /hidden branch or\s+standalone skill-management PR/);
   assert.doesNotMatch(onboardingSource, /route to\s+`codeq8-learn`/);
   assert.doesNotMatch(onboardingSource, /Run the active learning pass/);
   assert.doesNotMatch(onboardingSource, /Codeq8 Repo Learning Sweep/);

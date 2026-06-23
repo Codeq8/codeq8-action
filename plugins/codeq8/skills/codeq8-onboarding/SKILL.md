@@ -50,7 +50,7 @@ staging mutation guards harness-owned.
    update that proves the invariant. If the skill change would materially
    expand scope or cross an unrelated rollout boundary, report the exact skill
    candidate, blocker, and validation instead of creating a hidden branch or
-   standalone learning PR.
+   standalone skill-management PR.
 6. Keep user-message precedence. If newer user instructions conflict with an
    older plan, follow the newer request within the current safety and repo
    policy.
