@@ -30,15 +30,9 @@ import {
   WEB_CHAT_RUNNER_RUNTIME_MANIFEST_PATH,
 } from "../lib/web-chat-runner-runtime-manifest.mjs";
 import {
-  WEB_CHAT_RUNNER_CODEQ8_FILE_PATH,
-  WEB_CHAT_RUNNER_CODEQ8_FILE_SAVE_PATH,
   WEB_CHAT_RUNNER_DIAGNOSTIC_PATH,
   supportsAppServerProgressHistory,
-  supportsServerOwnedCodeq8FileSync,
   supportsCodexThreadGoals,
-  supportsServerOwnedDiscordDmChat,
-  webChatRunnerCodeq8FileResponseSchema,
-  webChatRunnerCodeq8FileSaveResponseSchema,
   webChatRunnerDiagnosticResponseSchema,
   webChatRunnerPromptResponseSchema,
   webChatRunnerRuntimeManifestResponseSchema,
@@ -2325,202 +2319,6 @@ async function assertWebChatRunnerRuntimeCompatibility({
     );
   }
   return manifest;
-}
-
-function resolveWorkspaceRuntimeFilePath({ workspacePath, relativePath }) {
-  const normalizedWorkspacePath = path.resolve(String(workspacePath || ""));
-  const normalizedRelativePath = normalizeText(relativePath).replace(/^\/+/, "");
-  if (!normalizedWorkspacePath || !normalizedRelativePath) {
-    throw new Error("Workspace path and runtime file path are required.");
-  }
-  const resolvedPath = path.resolve(normalizedWorkspacePath, normalizedRelativePath);
-  const relativeToWorkspace = path.relative(normalizedWorkspacePath, resolvedPath);
-  if (
-    relativeToWorkspace === ".." ||
-    relativeToWorkspace.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(normalizedRelativePath)
-  ) {
-    throw new Error(`Runner runtime file path is outside the workspace: ${normalizedRelativePath}`);
-  }
-  return {
-    absolutePath: resolvedPath,
-    relativePath: relativeToWorkspace || path.basename(resolvedPath),
-  };
-}
-
-async function ensureWorkspaceIgnoredRuntimeFile({ workspacePath, relativePath }) {
-  const normalizedWorkspacePath = path.resolve(String(workspacePath || ""));
-  const normalizedRelativePath = normalizeText(relativePath)
-    .replace(/^\/+/, "")
-    .replace(/\\/g, "/");
-  if (!normalizedWorkspacePath || !normalizedRelativePath) {
-    return;
-  }
-
-  const excludePath = path.join(normalizedWorkspacePath, ".git", "info", "exclude");
-  await ensureDirectory(path.dirname(excludePath));
-  let existing = "";
-  try {
-    existing = await fs.readFile(excludePath, "utf8");
-  } catch {
-    existing = "";
-  }
-  const pattern = `/${normalizedRelativePath}`;
-  const existingLines = existing
-    .split(/\r?\n/g)
-    .map((line) => normalizeText(line))
-    .filter(Boolean);
-  if (existingLines.includes(pattern) || existingLines.includes(normalizedRelativePath)) {
-    return;
-  }
-  const nextContents = existing
-    ? `${existing.replace(/\s*$/u, "\n")}${pattern}\n`
-    : `${pattern}\n`;
-  await fs.writeFile(excludePath, nextContents, "utf8");
-}
-
-async function requestServerOwnedCodeq8File({
-  publicBaseUrl,
-  webChatRunToken,
-  workspaceRepository,
-  threadId,
-  runId,
-}) {
-  return requestWebChatRunnerRuntimeJson({
-    publicBaseUrl,
-    webChatRunToken,
-    path: WEB_CHAT_RUNNER_CODEQ8_FILE_PATH,
-    body: {
-      workspace_repository: normalizeText(workspaceRepository),
-      thread_id: normalizeText(threadId),
-      run_id: normalizeText(runId),
-    },
-    schema: webChatRunnerCodeq8FileResponseSchema,
-    responseLabel: "Codeq8 runner codeq8.md response",
-  });
-}
-
-async function saveServerOwnedCodeq8File({
-  publicBaseUrl,
-  webChatRunToken,
-  workspaceRepository,
-  threadId,
-  runId,
-  markdown,
-  expectedRevisionId = "",
-  changeSummary = "",
-}) {
-  return requestWebChatRunnerRuntimeJson({
-    publicBaseUrl,
-    webChatRunToken,
-    path: WEB_CHAT_RUNNER_CODEQ8_FILE_SAVE_PATH,
-    body: {
-      workspace_repository: normalizeText(workspaceRepository),
-      thread_id: normalizeText(threadId),
-      run_id: normalizeText(runId),
-      repo_workflow_prompt_markdown: String(markdown || ""),
-      expected_revision_id: normalizeText(expectedRevisionId),
-      change_summary: normalizeText(changeSummary),
-    },
-    schema: webChatRunnerCodeq8FileSaveResponseSchema,
-    responseLabel: "Codeq8 runner codeq8.md save response",
-  });
-}
-
-async function hydrateServerOwnedCodeq8File({
-  publicBaseUrl,
-  webChatRunToken,
-  workspaceRepository,
-  threadId,
-  runId,
-  workspacePath,
-}) {
-  const payload = await requestServerOwnedCodeq8File({
-    publicBaseUrl,
-    webChatRunToken,
-    workspaceRepository,
-    threadId,
-    runId,
-  });
-  const resolvedFilePath = resolveWorkspaceRuntimeFilePath({
-    workspacePath,
-    relativePath: payload.prompt_file_path,
-  });
-  await ensureWorkspaceIgnoredRuntimeFile({
-    workspacePath,
-    relativePath: resolvedFilePath.relativePath,
-  });
-  await ensureDirectory(path.dirname(resolvedFilePath.absolutePath));
-  await fs.writeFile(
-    resolvedFilePath.absolutePath,
-    String(payload.repo_workflow_prompt_markdown || ""),
-    "utf8",
-  );
-  return {
-    filePath: resolvedFilePath.absolutePath,
-    relativePath: resolvedFilePath.relativePath.replace(/\\/g, "/"),
-    promptMarkdown: String(payload.repo_workflow_prompt_markdown || ""),
-    latestRevisionId: normalizeText(payload.latest_revision_id),
-    latestRevisionNumber: Number(payload.latest_revision_number || 0) || 0,
-  };
-}
-
-async function flushServerOwnedCodeq8File({
-  publicBaseUrl,
-  webChatRunToken,
-  workspaceRepository,
-  threadId,
-  runId,
-  hydratedFile,
-  assistantMessage,
-}) {
-  if (!hydratedFile) {
-    return {
-      assistantMessage: normalizeText(assistantMessage),
-      promptSaved: false,
-      latestRevisionId: "",
-      latestRevisionNumber: 0,
-    };
-  }
-
-  const normalizedAssistantMessage = normalizeText(assistantMessage);
-  let currentMarkdown = "";
-  try {
-    currentMarkdown = await fs.readFile(hydratedFile.filePath, "utf8");
-  } catch (error) {
-    throw new Error(
-      `Runner-owned ${hydratedFile.relativePath} file could not be read after the run: ${extractErrorMessage(error)}`,
-    );
-  }
-
-  let nextMarkdown = currentMarkdown;
-  let expectedRevisionId = hydratedFile.latestRevisionId;
-  let changeSummary = "";
-  if (nextMarkdown === hydratedFile.promptMarkdown) {
-    return {
-      assistantMessage: normalizedAssistantMessage,
-      promptSaved: false,
-      latestRevisionId: hydratedFile.latestRevisionId,
-      latestRevisionNumber: hydratedFile.latestRevisionNumber,
-    };
-  }
-
-  const saved = await saveServerOwnedCodeq8File({
-    publicBaseUrl,
-    webChatRunToken,
-    workspaceRepository,
-    threadId,
-    runId,
-    markdown: nextMarkdown,
-    expectedRevisionId,
-    changeSummary,
-  });
-  return {
-    assistantMessage: normalizedAssistantMessage,
-    promptSaved: !saved.unchanged,
-    latestRevisionId: saved.latest_revision_id,
-    latestRevisionNumber: saved.latest_revision_number,
-  };
 }
 
 async function applyWorkspaceGitToken({
@@ -5895,46 +5693,6 @@ function applyCodeq8CliRuntimeEnv({
   };
 }
 
-async function prepareRunnerDiscordDmCli({
-  commandEnv,
-  runtimeHomePath,
-}) {
-  const normalizedRuntimeHomePath = path.resolve(runtimeHomePath);
-  const wrapperBinPath = path.join(normalizedRuntimeHomePath, "bin");
-  const wrapperPath = path.join(wrapperBinPath, "codeq8-discord-dm");
-  const helperScriptPath = path.resolve(
-    path.dirname(new URL(import.meta.url).pathname),
-    "web-chat-runner-discord-dm.mjs",
-  );
-
-  await ensureDirectory(wrapperBinPath);
-  const wrapperScript = [
-    "#!/bin/sh",
-    `exec node ${quoteShellArgument(helperScriptPath)} "$@"`,
-    "",
-  ].join("\n");
-  await fs.writeFile(wrapperPath, wrapperScript, { mode: 0o755 });
-  await fs.chmod(wrapperPath, 0o755);
-
-  const currentPath = String(commandEnv.PATH || "");
-  const normalizedWrapperBinPath = normalizeText(wrapperBinPath);
-  const pathEntries = currentPath
-    .split(path.delimiter)
-    .map((entry) => normalizeText(entry))
-    .filter(Boolean);
-  if (!pathEntries.includes(normalizedWrapperBinPath)) {
-    commandEnv.PATH = currentPath
-      ? `${normalizedWrapperBinPath}${path.delimiter}${currentPath}`
-      : normalizedWrapperBinPath;
-  }
-
-  return {
-    available: true,
-    commandName: "codeq8-discord-dm",
-    wrapperPath,
-  };
-}
-
 function prependCommandPath(commandEnv, binPath) {
   const currentPath = String(commandEnv.PATH || "");
   const normalizedBinPath = normalizeText(binPath);
@@ -6288,47 +6046,6 @@ async function validateRunnerCodexAuth({
   });
 }
 
-function applyServerOwnedCodeq8FileGuidance({
-  prompt,
-  promptFilePath = "",
-}) {
-  const normalizedPrompt = normalizeText(prompt);
-  const normalizedPromptFilePath = normalizeText(promptFilePath);
-  if (!normalizedPrompt || !normalizedPromptFilePath) {
-    return normalizedPrompt;
-  }
-  return [
-    "Runner-owned prompt file:",
-    `- The current per-user repo workflow prompt is hydrated into \`${normalizedPromptFilePath}\` in the workspace root for this run.`,
-    `- Read and update \`${normalizedPromptFilePath}\` directly when the durable repo workflow memory should change.`,
-    `- If you update the prompt, edit \`${normalizedPromptFilePath}\` in place and keep the visible assistant reply free of prompt-transport markup.`,
-    "",
-    normalizedPrompt,
-  ].join("\n");
-}
-
-function applyRunnerDiscordDmGuidance({
-  prompt,
-  commandName = "",
-}) {
-  const normalizedPrompt = normalizeText(prompt);
-  const normalizedCommandName = normalizeText(commandName);
-  if (!normalizedPrompt || !normalizedCommandName) {
-    return normalizedPrompt;
-  }
-  return [
-    "Runner-owned Discord DM helper:",
-    `- Use \`${normalizedCommandName} list --json\` to read older owner-global Discord DM history when the injected unread DM context is not enough.`,
-    `- Paginate older messages with \`${normalizedCommandName} list --json --before-created-at <next_before_created_at> --before-event-id <next_before_event_id>\`.`,
-    `- Use \`${normalizedCommandName} send --content \"...\" --json\` when you need machine-checkable confirmation that the DM send succeeded.`,
-    "- If the helper wrapper prints no visible stdout, inspect `command -v codeq8-discord-dm`, read the shim path behind it, and use a direct `node --input-type=module -e` import of the runtime helper to get JSON instead of guessing.",
-    "- Do not claim that a Discord DM was sent unless the helper proves `sent: true`. If send verification is missing, say that explicitly.",
-    "- Keep Discord DMs short and factual. The website repo chat remains the primary high-bandwidth meeting surface.",
-    "",
-    normalizedPrompt,
-  ].join("\n");
-}
-
 async function buildCodexPromptPayload({
   publicBaseUrl,
   webChatRunToken,
@@ -6347,8 +6064,6 @@ async function buildCodexPromptPayload({
   codeq8Cli,
   attachments = [],
   referencedThreads = [],
-  serverOwnedCodeq8FilePath = "",
-  runnerDiscordDmCommand = "",
 }) {
   const payload = await requestWebChatRunnerRuntimeJson({
     publicBaseUrl,
@@ -6382,13 +6097,7 @@ async function buildCodexPromptPayload({
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
   return {
-    prompt: applyRunnerDiscordDmGuidance({
-      prompt: applyServerOwnedCodeq8FileGuidance({
-        prompt,
-        promptFilePath: serverOwnedCodeq8FilePath,
-      }),
-      commandName: runnerDiscordDmCommand,
-    }),
+    prompt,
     codexGoalState: normalizeCodexGoalState(payload.codex_goal_state),
   };
 }
@@ -6416,8 +6125,6 @@ async function buildResumePromptPayload({
   attachments = [],
   referencedThreads = [],
   targetShift = null,
-  serverOwnedCodeq8FilePath = "",
-  runnerDiscordDmCommand = "",
 }) {
   const payload = await requestWebChatRunnerRuntimeJson({
     publicBaseUrl,
@@ -6451,13 +6158,7 @@ async function buildResumePromptPayload({
     throw new Error("Codeq8 returned an empty runner prompt.");
   }
   return {
-    prompt: applyRunnerDiscordDmGuidance({
-      prompt: applyServerOwnedCodeq8FileGuidance({
-        prompt,
-        promptFilePath: serverOwnedCodeq8FilePath,
-      }),
-      commandName: runnerDiscordDmCommand,
-    }),
+    prompt,
     codexGoalState: normalizeCodexGoalState(payload.codex_goal_state),
   };
 }
@@ -10687,19 +10388,9 @@ async function main() {
     "Validated Codeq8 runner runtime manifest",
     `contract=${normalizeText(runtimeManifest.contract_version)} capabilities=${Array.isArray(runtimeManifest.capabilities) ? runtimeManifest.capabilities.length : 0} authorized_paths=${Array.isArray(runtimeManifest.authorized_paths) ? runtimeManifest.authorized_paths.length : 0}`,
   );
-  const serverOwnedCodeq8FileSyncEnabled = supportsServerOwnedCodeq8FileSync(runtimeManifest);
-  const serverOwnedDiscordDmChatEnabled = supportsServerOwnedDiscordDmChat(runtimeManifest);
   const codexThreadGoalsEnabled = supportsCodexThreadGoals(runtimeManifest);
   const appServerProgressHistoryEnabled =
     supportsAppServerProgressHistory(runtimeManifest);
-  log(
-    "Resolved runner-owned codeq8.md workspace sync capability",
-    serverOwnedCodeq8FileSyncEnabled ? "enabled" : "disabled",
-  );
-  log(
-    "Resolved runner-owned Discord DM capability",
-    serverOwnedDiscordDmChatEnabled ? "enabled" : "disabled",
-  );
   log(
     "Resolved Codex thread goals capability",
     codexThreadGoalsEnabled ? "enabled" : "disabled",
@@ -10713,7 +10404,6 @@ async function main() {
   let preparedWorkspace = null;
   let runRuntime = null;
   let preparedCodeq8Cli = { available: false, reason: "" };
-  let preparedRunnerDiscordDmCli = { available: false, commandName: "" };
   let startedAt = 0;
   let assistantMessage = "";
   let persistedCodexSessionState = normalizeCodexSessionState(null);
@@ -10829,22 +10519,6 @@ async function main() {
         commandEnv,
         branch: preparedWorkspace.effectiveWriteBranch,
       });
-      const hydratedCodeq8File = serverOwnedCodeq8FileSyncEnabled
-        ? await hydrateServerOwnedCodeq8File({
-            publicBaseUrl,
-            webChatRunToken,
-            workspaceRepository: activeWorkspaceRepository,
-            threadId,
-            runId,
-            workspacePath: preparedWorkspace.workspacePath,
-          })
-        : null;
-      if (hydratedCodeq8File) {
-        log(
-          "Hydrated runner-owned codeq8.md file",
-          `path=${hydratedCodeq8File.relativePath} revision=${hydratedCodeq8File.latestRevisionId}`,
-        );
-      }
 
       const attemptRunRuntime = await createWebChatRunRuntime(threadId);
       runRuntime = attemptRunRuntime;
@@ -10854,18 +10528,6 @@ async function main() {
         publicBaseUrl,
         runtimeHomePath: attemptRunRuntime.homePath,
       });
-      preparedRunnerDiscordDmCli = serverOwnedDiscordDmChatEnabled
-        ? await prepareRunnerDiscordDmCli({
-            commandEnv: codexCommandEnv,
-            runtimeHomePath: attemptRunRuntime.homePath,
-          })
-        : { available: false, commandName: "" };
-      if (preparedRunnerDiscordDmCli.available) {
-        log(
-          "Prepared runner-owned Discord DM helper",
-          `command=${preparedRunnerDiscordDmCli.commandName}`,
-        );
-      }
       const preparedGitHubCli = await prepareGitHubCliAuth({
         commandEnv: codexCommandEnv,
         runtimeHomePath: attemptRunRuntime.homePath,
@@ -11083,8 +10745,6 @@ async function main() {
               attachments: materializedAttachments,
               referencedThreads,
               targetShift: resumeTargetShift ? targetBeforeAttempt : null,
-              serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
-              runnerDiscordDmCommand: preparedRunnerDiscordDmCli.commandName,
             });
             prompt = promptPayload.prompt;
             codexGoalState = promptPayload.codexGoalState;
@@ -11108,8 +10768,6 @@ async function main() {
               codeq8Cli: preparedCodeq8Cli,
               attachments: materializedAttachments,
               referencedThreads,
-              serverOwnedCodeq8FilePath: hydratedCodeq8File?.relativePath || "",
-              runnerDiscordDmCommand: preparedRunnerDiscordDmCli.commandName,
             });
             prompt = applyCodexSessionContinuityGuidance({
               prompt: promptPayload.prompt,
@@ -11338,22 +10996,6 @@ async function main() {
           continue;
         }
         assistantMessage = truncate(normalizeText(execution.output), MAX_OUTPUT_CHARS);
-        const promptSyncResult = await flushServerOwnedCodeq8File({
-          publicBaseUrl,
-          webChatRunToken: resolveWebChatRunToken(codexCommandEnv),
-          workspaceRepository: activeWorkspaceRepository,
-          threadId,
-          runId,
-          hydratedFile: hydratedCodeq8File,
-          assistantMessage,
-        });
-        assistantMessage = truncate(promptSyncResult.assistantMessage, MAX_OUTPUT_CHARS);
-        if (promptSyncResult.promptSaved) {
-          log(
-            "Persisted runner-owned codeq8.md changes",
-            `revision=${promptSyncResult.latestRevisionId || "<unknown>"}`,
-          );
-        }
 
         const finalBranch = await currentBranch({
           workspacePath: preparedWorkspace.workspacePath,
@@ -11984,8 +11626,6 @@ export {
   configureWorkspaceGitCredentialHelper,
   configureWorkspacePushPolicy,
   findBrokenRemoteTrackingRefs,
-  flushServerOwnedCodeq8File,
-  hydrateServerOwnedCodeq8File,
   applyCodeq8CliRuntimeEnv,
   isInvalidCodexSessionBundleError,
   isRecoverableWorkspaceRefRefreshFailure,
@@ -12003,7 +11643,6 @@ export {
   postRunCallback,
   postAppServerProgressHistoryBatch,
   prepareCodeq8Cli,
-  prepareRunnerDiscordDmCli,
   prepareGitHubCliAuth,
   pushRememberedThreadBranch,
   findPullRequestForBranch,
@@ -12025,7 +11664,6 @@ export {
   discardPreparedWebChatCodexSessionBundle,
   DEFAULT_TIMEOUT_SECONDS,
   requestWorkspaceGitToken,
-  requestServerOwnedCodeq8File,
   requestWebChatRunnerRuntimeManifest,
   readBranchDivergenceCounts,
   resolveEffectiveWriteBranch,
@@ -12050,7 +11688,6 @@ export {
   stripLeadingCodexTransportNoise,
   extractUserVisibleFailureHeadline,
   fetchJson,
-  saveServerOwnedCodeq8File,
   toUserVisibleRunnerFailureMessage,
 };
 

@@ -33,8 +33,6 @@ import {
   configureWorkspacePushPolicy,
   DEFAULT_TIMEOUT_SECONDS,
   findPullRequestForBranch,
-  flushServerOwnedCodeq8File,
-  hydrateServerOwnedCodeq8File,
   loadCodexSessionStateForExecution,
   extractUserVisibleFailureHeadline,
   isRecoverableCodexResumeFailure,
@@ -49,7 +47,6 @@ import {
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
   prepareGitHubCliAuth,
-  prepareRunnerDiscordDmCli,
   prepareWebChatCodexSessionUpload,
   readFirebaseStorageAttachment,
   readFirebaseStorageSignedAttachment,
@@ -2448,7 +2445,6 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
       contract_version: CONTRACT_VERSION,
       capabilities: [
         "server_owned_prompt",
-        "server_owned_codeq8_file_sync",
         "staged_codex_session_upload",
         "recoverable_codex_session_errors",
         "codex_app_server_turn_control",
@@ -2461,8 +2457,6 @@ test("assertWebChatRunnerRuntimeCompatibility accepts the server-owned runtime m
         "/api/chat/runs/runtime-manifest",
         "/api/chat/runs/prompt",
         "/api/chat/runs/app-server/firebase-session",
-        "/api/chat/runs/codeq8-file",
-        "/api/chat/runs/codeq8-file/save",
         "/web-chat/attachments/get",
         "/web-chat/codex-session/get",
         "/web-chat/codex-session/read-url",
@@ -3481,100 +3475,6 @@ test("buildCodexPrompt fetches the server-owned fresh prompt", async () => {
   }
 });
 
-test("buildCodexPrompt prepends runner-owned codeq8.md guidance when file sync is active", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () =>
-    Response.json({
-      ok: true,
-      contract_version: CONTRACT_VERSION,
-      prompt: "server-owned fresh prompt",
-    });
-
-  try {
-    const prompt = await buildCodexPrompt({
-      publicBaseUrl: "https://codeq8.example.com",
-      webChatRunToken: "header.payload.signature",
-      repository: "Codeq8/Codeq8",
-      threadTitle: "Fix the runner",
-      threadId: "wct_123",
-      runId: "wcr_123",
-      messageId: "wcm_123",
-      sourceType: "default_branch",
-      branchContext: {
-        context_branch: "main",
-        write_mode: "branch_and_pr",
-        write_branch: "",
-        base_branch: "main",
-        default_branch: "main",
-        protected_branches: ["main"],
-      },
-      workspacePersistenceState: null,
-      threadSpecText: "",
-      promptText: "fix it",
-      recentChecksPromptText: "",
-      codeq8Cli: { available: false },
-      attachments: [],
-      referencedThreads: [],
-      serverOwnedCodeq8FilePath: "codeq8.md",
-    });
-
-    assert.match(prompt, /Runner-owned prompt file:/);
-    assert.match(prompt, /edit `codeq8\.md` in place and keep the visible assistant reply free of prompt-transport markup/);
-    assert.match(prompt, /server-owned fresh prompt$/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("buildCodexPrompt prepends runner-owned Discord DM guidance when available", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () =>
-    Response.json({
-      ok: true,
-      contract_version: CONTRACT_VERSION,
-      prompt: "server-owned fresh prompt",
-    });
-
-  try {
-    const prompt = await buildCodexPrompt({
-      publicBaseUrl: "https://codeq8.example.com",
-      webChatRunToken: "header.payload.signature",
-      repository: "Codeq8/Codeq8",
-      threadTitle: "Fix the runner",
-      threadId: "wct_123",
-      runId: "wcr_123",
-      messageId: "wcm_123",
-      sourceType: "default_branch",
-      branchContext: {
-        context_branch: "main",
-        write_mode: "branch_and_pr",
-        write_branch: "",
-        base_branch: "main",
-        default_branch: "main",
-        protected_branches: ["main"],
-      },
-      workspacePersistenceState: null,
-      threadSpecText: "",
-      promptText: "fix it",
-      recentChecksPromptText: "",
-      codeq8Cli: { available: false },
-      attachments: [],
-      referencedThreads: [],
-      runnerDiscordDmCommand: "codeq8-discord-dm",
-    });
-
-    assert.match(prompt, /Runner-owned Discord DM helper:/);
-    assert.match(prompt, /codeq8-discord-dm list --json/);
-    assert.match(prompt, /codeq8-discord-dm send --content .* --json/);
-    assert.match(prompt, /wrapper prints no visible stdout/i);
-    assert.match(prompt, /node --input-type=module -e/);
-    assert.match(prompt, /Do not claim that a Discord DM was sent unless the helper proves `sent: true`\./);
-    assert.match(prompt, /server-owned fresh prompt$/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
 test("buildResumePrompt fetches the server-owned resume prompt", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -3637,217 +3537,6 @@ test("buildResumePrompt fetches the server-owned resume prompt", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
-});
-
-test("buildResumePrompt prepends runner-owned Discord DM guidance when available", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () =>
-    Response.json({
-      ok: true,
-      contract_version: CONTRACT_VERSION,
-      prompt: "server-owned resume prompt",
-    });
-
-  try {
-    const prompt = await buildResumePrompt({
-      publicBaseUrl: "https://codeq8.example.com",
-      webChatRunToken: "header.payload.signature",
-      repository: "Codeq8/Codeq8",
-      threadId: "wct_123",
-      runId: "wcr_123",
-      messageId: "wcm_123",
-      sourceType: "default_branch",
-      branchContext: {
-        context_branch: "main",
-        write_mode: "branch_and_pr",
-        write_branch: "",
-        base_branch: "main",
-        default_branch: "main",
-        protected_branches: ["main"],
-      },
-      workspacePersistenceState: null,
-      threadSpecText: "",
-      promptText: "keep going",
-      recentUserMessagesPromptText: "",
-      recentChecksPromptText: "",
-      attachments: [],
-      referencedThreads: [],
-      serverOwnedCodeq8FilePath: "",
-      runnerDiscordDmCommand: "codeq8-discord-dm",
-    });
-
-    assert.match(prompt, /Runner-owned Discord DM helper:/);
-    assert.match(prompt, /codeq8-discord-dm list --json/);
-    assert.match(prompt, /codeq8-discord-dm send --content .* --json/);
-    assert.match(prompt, /server-owned resume prompt$/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("prepareRunnerDiscordDmCli writes the helper wrapper into the runtime bin", async (t) => {
-  const runtimeHomePath = await fs.mkdtemp(path.join(os.tmpdir(), "runner-discord-dm-"));
-  t.after(async () => {
-    await fs.rm(runtimeHomePath, { recursive: true, force: true });
-  });
-
-  const commandEnv = { PATH: "/usr/bin" };
-  const prepared = await prepareRunnerDiscordDmCli({
-    commandEnv,
-    runtimeHomePath,
-  });
-
-  assert.equal(prepared.available, true);
-  assert.equal(prepared.commandName, "codeq8-discord-dm");
-  assert.match(prepared.wrapperPath, /codeq8-discord-dm$/);
-  const wrapperContents = await fs.readFile(prepared.wrapperPath, "utf8");
-  assert.match(wrapperContents, /web-chat-runner-discord-dm\.mjs/);
-  assert.match(commandEnv.PATH, new RegExp(runtimeHomePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-});
-
-test("hydrateServerOwnedCodeq8File writes the prompt file into the workspace and hides it from git", async (t) => {
-  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-hydrate-"));
-  const gitPath = path.join(workspacePath, ".git", "info");
-  const originalFetch = globalThis.fetch;
-
-  t.after(async () => {
-    globalThis.fetch = originalFetch;
-    await fs.rm(workspacePath, { recursive: true, force: true });
-  });
-
-  await fs.mkdir(gitPath, { recursive: true });
-  globalThis.fetch = async () =>
-    Response.json({
-      ok: true,
-      contract_version: CONTRACT_VERSION,
-      prompt_file_path: "codeq8.md",
-      repo_workflow_prompt_markdown: "# Codeq8\n\n- Durable prompt",
-      latest_revision_id: "rpr_123",
-      latest_revision_number: 4,
-    });
-
-  const hydrated = await hydrateServerOwnedCodeq8File({
-    publicBaseUrl: "https://codeq8.example.com",
-    webChatRunToken: "header.payload.signature",
-    workspaceRepository: "Codeq8/Codeq8",
-    threadId: "wct_123",
-    runId: "wcr_123",
-    workspacePath,
-  });
-
-  assert.equal(hydrated.relativePath, "codeq8.md");
-  assert.equal(hydrated.latestRevisionId, "rpr_123");
-  assert.equal(
-    await fs.readFile(path.join(workspacePath, "codeq8.md"), "utf8"),
-    "# Codeq8\n\n- Durable prompt",
-  );
-  assert.match(await fs.readFile(path.join(workspacePath, ".git", "info", "exclude"), "utf8"), /\/codeq8\.md/);
-});
-
-test("flushServerOwnedCodeq8File saves direct file edits and preserves the visible assistant reply", async (t) => {
-  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-flush-"));
-  const promptFilePath = path.join(workspacePath, "codeq8.md");
-  const originalFetch = globalThis.fetch;
-  const calls = [];
-
-  t.after(async () => {
-    globalThis.fetch = originalFetch;
-    await fs.rm(workspacePath, { recursive: true, force: true });
-  });
-
-  await fs.writeFile(promptFilePath, "# Codeq8\n\n- Updated on disk", "utf8");
-  globalThis.fetch = async (url, init) => {
-    calls.push({
-      url: String(url),
-      method: init?.method || "GET",
-      body: init?.body ? JSON.parse(String(init.body)) : null,
-    });
-    return Response.json({
-      ok: true,
-      contract_version: CONTRACT_VERSION,
-      prompt_file_path: "codeq8.md",
-      unchanged: false,
-      latest_revision_id: "rpr_next",
-      latest_revision_number: 5,
-    });
-  };
-
-  const result = await flushServerOwnedCodeq8File({
-    publicBaseUrl: "https://codeq8.example.com",
-    webChatRunToken: "header.payload.signature",
-    workspaceRepository: "Codeq8/Codeq8",
-    threadId: "wct_123",
-    runId: "wcr_123",
-    hydratedFile: {
-      filePath: promptFilePath,
-      relativePath: "codeq8.md",
-      promptMarkdown: "# Codeq8\n\n- Original",
-      latestRevisionId: "rpr_prev",
-      latestRevisionNumber: 4,
-    },
-    assistantMessage: "Finished the work.",
-  });
-
-  assert.equal(result.assistantMessage, "Finished the work.");
-  assert.equal(result.promptSaved, true);
-  assert.equal(result.latestRevisionId, "rpr_next");
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.url, "https://codeq8.example.com/api/chat/runs/codeq8-file/save");
-  assert.equal(calls[0]?.method, "POST");
-  assert.equal(calls[0]?.body?.repo_workflow_prompt_markdown, "# Codeq8\n\n- Updated on disk");
-  assert.equal(calls[0]?.body?.expected_revision_id, "rpr_prev");
-});
-
-test("flushServerOwnedCodeq8File skips saves when the prompt file is unchanged", async (t) => {
-  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-file-hidden-sync-"));
-  const promptFilePath = path.join(workspacePath, "codeq8.md");
-  const originalFetch = globalThis.fetch;
-  const calls = [];
-
-  t.after(async () => {
-    globalThis.fetch = originalFetch;
-    await fs.rm(workspacePath, { recursive: true, force: true });
-  });
-
-  await fs.writeFile(promptFilePath, "# Codeq8\n\n- Original", "utf8");
-  globalThis.fetch = async (url, init) => {
-    calls.push({
-      url: String(url),
-      body: init?.body ? JSON.parse(String(init.body)) : null,
-    });
-    return Response.json({
-      ok: true,
-      contract_version: CONTRACT_VERSION,
-      prompt_file_path: "codeq8.md",
-      unchanged: false,
-      latest_revision_id: "rpr_next",
-      latest_revision_number: 5,
-    });
-  };
-
-  const result = await flushServerOwnedCodeq8File({
-    publicBaseUrl: "https://codeq8.example.com",
-    webChatRunToken: "header.payload.signature",
-    workspaceRepository: "Codeq8/Codeq8",
-    threadId: "wct_123",
-    runId: "wcr_123",
-    hydratedFile: {
-      filePath: promptFilePath,
-      relativePath: "codeq8.md",
-      promptMarkdown: "# Codeq8\n\n- Original",
-      latestRevisionId: "rpr_prev",
-      latestRevisionNumber: 4,
-    },
-    assistantMessage: "Finished the work.",
-  });
-
-  assert.equal(result.assistantMessage, "Finished the work.");
-  assert.equal(result.promptSaved, false);
-  assert.equal(calls.length, 0);
-  assert.equal(
-    await fs.readFile(promptFilePath, "utf8"),
-    "# Codeq8\n\n- Original",
-  );
 });
 
 test("findPullRequestForBranch only reads existing pull requests", async () => {
