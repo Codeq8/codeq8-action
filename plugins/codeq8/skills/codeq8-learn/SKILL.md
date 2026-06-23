@@ -68,6 +68,43 @@ Run this pass while implementing and again before final handoff:
    touch unrelated ownership, report the candidate and blocker instead of
    creating a side PR.
 
+## Codeq8 Repo Learning Sweep
+
+For Codeq8-owned repositories, run this sweep automatically during
+implementation and again before final handoff whenever the current work exposes
+reusable evidence. It is not triggered by a user asking for "thread review" or
+"skill updates"; those requests are only one possible evidence source.
+
+Use this sweep after user corrections, CI/staging/runtime failures, repeated
+implementation friction, prompt or skill confusion, relevant referenced
+threads/PRs, or any Codeq8 work that touched a durable operating boundary. If
+write mode allows repo changes and the artifact is in scope, update it in the
+same active branch or public-action change. If the user explicitly asks for
+analysis only, report bounded candidates instead of editing.
+
+1. Inspect a bounded evidence set:
+   - current-run facts, failures, corrections, validation output, and
+     implementation friction;
+   - current and referenced Codeq8 threads already provided in the prompt;
+   - user-named threads, PRs, or incidents when they are part of the current
+     evidence;
+   - helper-supported active or recent archived threads only when the current
+     task already needs that exact scope. Do not broad-scan for learning.
+2. Group evidence by reusable failure class, not by transcript. Prefer repeated
+   corrections, false ready/fixed claims, missing staging proof, stale skill
+   guidance, CI/runtime misses, or workflow friction that would recur in future
+   Codeq8 runs.
+3. For each high-confidence finding, identify the owning artifact and update it
+   in the active branch or public-action change when safe. Do not stop at a
+   recommendation list when the current work revealed an in-scope durable
+   update, even if the user's original request did not mention learning.
+4. When a finding is real but unsafe to edit in the current lane, report a
+   bounded learning candidate with the exact evidence, owner artifact, blocker,
+   and validation required.
+5. Keep the sweep bounded and repo-owned. Do not broad-scan unrelated user
+   conversations, store thread summaries as memory, create hidden review
+   branches, or turn thread review into a standing background job.
+
 ## Learning Candidate
 
 When a learning signal is real but not safe to edit immediately, report a

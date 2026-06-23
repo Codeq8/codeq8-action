@@ -123,7 +123,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
       const skillMarker = await readJson(path.join(skillPath, CODEQ8_PLUGIN_MARKER_FILE));
       assert.equal(skillMarker.target_kind, "skill");
       assert.equal(skillMarker.target_name, skillName);
-      assert.equal(skillMarker.plugin_version, "0.5.0");
+      assert.equal(skillMarker.plugin_version, "0.5.1");
       assert.equal(await pathExists(path.join(skillPath, "SKILL.md")), true);
     }
 
@@ -502,8 +502,11 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(onboardingSource, /include\s+the relevant skill name or path/);
   assert.match(onboardingSource, /route to\s+`codeq8-learn`/);
   assert.match(onboardingSource, /Run the active learning pass/);
-  assert.match(onboardingSource, /fold\s+the skill, test, source contract, operator, docs page, or repo instruction\s+update into the same work/);
+  assert.match(onboardingSource, /Codeq8-owned repo\s+evidence/);
+  assert.match(onboardingSource, /even if the user did not ask for learning, memory,\s+skill\s+updates, artifact updates, or thread review/);
+  assert.match(onboardingSource, /fold the skill, test, source\s+contract, operator, docs page, or repo instruction update into the same\s+work/);
   assert.match(onboardingSource, /bounded learning candidate/);
+  assert.doesNotMatch(onboardingSource, /request to review Codeq8 threads\/PRs for skill updates/);
   assert.match(onboardingSource, /Do not turn onboarding into a second harness/);
   assert.match(onboardingSource, /Do not use goals as blind memory/);
 
@@ -523,6 +526,19 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(learnSource, /new invariant future runs should follow/);
   assert.match(learnSource, /current branch or public-action change/);
   assert.match(learnSource, /creating a side PR/);
+  assert.match(learnSource, /Codeq8 Repo Learning Sweep/);
+  assert.match(learnSource, /run this sweep automatically during\s+implementation and again before final handoff/);
+  assert.match(learnSource, /not triggered by a user asking for "thread review" or\s+"skill updates"/);
+  assert.match(learnSource, /those requests are only one possible evidence source/);
+  assert.doesNotMatch(learnSource, /Use this sweep when the user asks/);
+  assert.doesNotMatch(learnSource, /"review my threads and suggest skill updates" are\s+implementation requests/);
+  assert.match(learnSource, /Inspect a bounded evidence set/);
+  assert.match(learnSource, /current-run facts, failures, corrections, validation output, and\s+implementation friction/);
+  assert.match(learnSource, /helper-supported active or recent archived threads/);
+  assert.match(learnSource, /Do not broad-scan for learning/);
+  assert.match(learnSource, /Do not stop at a\s+recommendation list/);
+  assert.match(learnSource, /even if the user's original request did not mention learning/);
+  assert.match(learnSource, /not broad-scan unrelated user\s+conversations/);
   assert.match(learnSource, /Proactive Correction-To-Artifact Rule/);
   assert.match(learnSource, /correction itself as an active\s+learning signal/);
   assert.match(learnSource, /even if the user never asks for memory, a lesson,\s+a\s+skill update, or an artifact/);
@@ -540,6 +556,7 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.doesNotMatch(readmeSource, /codeq8-skill-stewardship|Child Threads runtime/i);
   assert.match(readmeSource, /durable goal\s+maintenance/);
   assert.match(readmeSource, /active in-run learning pass/);
+  assert.match(readmeSource, /bounded Codeq8 repo\s+learning sweep/);
 
   for (const source of [onboardingSource, coordinatorSource, learnSource, pluginSource, readmeSource]) {
     assert.doesNotMatch(source, /Abdul|aalzanki/i);
