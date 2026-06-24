@@ -327,7 +327,7 @@ test("oversized Codex session state rolls over before reading bundle contents", 
           storage_backend: "firebase_storage",
           bundle_revision: 17,
           bundle_size_bytes: 200 * 1024 * 1024,
-          bundle_compressed_size_bytes: 100 * 1024 * 1024,
+          bundle_compressed_size_bytes: 50 * 1024 * 1024,
           last_run_id: "wcr_previous",
         },
       },
@@ -358,7 +358,7 @@ test("oversized Codex session state rolls over before reading bundle contents", 
         (diagnostic) =>
           diagnostic.event === "runner_session_size_rollover_selected" &&
           diagnostic.mode === "fresh" &&
-          diagnostic.details?.limit_bytes === 100 * 1024 * 1024,
+          diagnostic.details?.limit_bytes === 50 * 1024 * 1024,
       ),
       true,
     );

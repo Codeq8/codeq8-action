@@ -109,7 +109,7 @@ const CODEX_SESSION_COMPACTION_TYPES = new Set([
   "context_compacted",
   "compacted",
 ]);
-const CODEX_SESSION_ROLLOVER_COMPRESSED_SIZE_LIMIT_BYTES = 100 * 1024 * 1024;
+const CODEX_SESSION_ROLLOVER_COMPRESSED_SIZE_LIMIT_BYTES = 50 * 1024 * 1024;
 const WEB_CHAT_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 const WEB_CHAT_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const BRANCH_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
