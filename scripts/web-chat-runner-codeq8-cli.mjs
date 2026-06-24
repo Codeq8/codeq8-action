@@ -661,6 +661,10 @@ function summarizeScheduledChatForOutput(record) {
         normalized.workspaceRepository,
       ),
       title: truncateText(firstText(normalized.title), 160),
+      assigned_to_github_login: firstText(
+        normalized.assigned_to_github_login,
+        normalized.assignedToGithubLogin,
+      ),
       cadence: normalizeScheduledChatCadence(normalized.cadence),
       status: firstText(normalized.status),
       next_run_at: normalizeEpochMs(normalized.next_run_at || normalized.nextRunAt),
@@ -696,12 +700,17 @@ function writeScheduledChatList(stdout, payload, { repository = "" } = {}) {
   if (records.length === 0) {
     stdout.write("No scheduled chats.\n");
   } else {
-    stdout.write("scheduled_chat_id\tstatus\tcadence\tnext_run_at\ttitle\n");
+    stdout.write(
+      "scheduled_chat_id\tstatus\tassigned_to\tcadence\tnext_run_at\ttitle\n",
+    );
     for (const record of records) {
       stdout.write(
         [
           record.scheduled_chat_id,
           record.status,
+          record.assigned_to_github_login
+            ? `@${record.assigned_to_github_login}`
+            : "",
           formatScheduledChatCadence(record.cadence),
           formatTimestamp(record.next_run_at),
           normalizeText(record.title || "(untitled)").replace(/\s+/g, " "),
@@ -717,6 +726,9 @@ function writeScheduledChatMutation(stdout, record) {
   stdout.write(`Scheduled chat: ${record.scheduled_chat_id || "(unknown)"}\n`);
   stdout.write(`Title: ${record.title || "(untitled)"}\n`);
   stdout.write(`Repository: ${record.repository || "(unknown)"}\n`);
+  if (record.assigned_to_github_login) {
+    stdout.write(`Assigned to: @${record.assigned_to_github_login}\n`);
+  }
   stdout.write(`State: ${record.status || "(unknown)"}\n`);
   stdout.write(`Cadence: ${formatScheduledChatCadence(record.cadence)}\n`);
   if (record.next_run_at) {
@@ -1226,7 +1238,8 @@ function printHelp(stdout) {
       "  codeq8 threads state <thread-id> [--limit 50]",
       "  codeq8 scheduled list [--repository owner/repo] [--json]",
       "  codeq8 scheduled create --message text --every day|week|month [--title title] [--repository owner/repo] [--json]",
-      "  codeq8 scheduled update <scheduled-chat-id> [--title title] [--message text] [--every day|week|month] [--status active|paused] [--json]",
+      "  codeq8 scheduled update <scheduled-chat-id> [--title title] [--message text] [--every day|week|month] [--status active|paused] [--assigned-to github-login] [--json]",
+      "  codeq8 scheduled reassign <scheduled-chat-id> --to github-login [--json]",
       "  codeq8 scheduled pause|resume|delete <scheduled-chat-id> [--json]",
       "  codeq8 attachments get --attachment <attachment-id> [--thread <thread-id>] [--output file]",
       "  codeq8 github issue attachments <url|number> [--repo owner/repo] [--comments] --output-dir dir",
@@ -1749,6 +1762,9 @@ async function handleScheduledCommand({ args, context, fetchImpl, stdout }) {
         "--cadence",
         "--frequency",
         "--status",
+        "--assigned-to",
+        "--assign-to",
+        "--assignee",
       ],
       ["--json"],
     );
@@ -1761,6 +1777,11 @@ async function handleScheduledCommand({ args, context, fetchImpl, stdout }) {
     const message = readFlag(rest, ["--message", "--text", "--prompt"]);
     const cadenceFlag = readFlag(rest, ["--every", "--cadence", "--frequency"]);
     const status = normalizeText(readFlag(rest, "--status")).toLowerCase();
+    const assignedToGithubLogin = readFlag(rest, [
+      "--assigned-to",
+      "--assign-to",
+      "--assignee",
+    ]);
     if (title) {
       body.title = title;
     }
@@ -1776,6 +1797,9 @@ async function handleScheduledCommand({ args, context, fetchImpl, stdout }) {
       }
       body.status = status;
     }
+    if (assignedToGithubLogin) {
+      body.assigned_to_github_login = assignedToGithubLogin;
+    }
     if (Object.keys(body).length === 0) {
       throw new Error("at least one update flag is required.");
     }
@@ -1786,6 +1810,45 @@ async function handleScheduledCommand({ args, context, fetchImpl, stdout }) {
       path: `/api/scheduled-chats/${encodeURIComponent(scheduledChatId)}`,
       method: "PATCH",
       body,
+      authMode: "web-session",
+    });
+    const output = readScheduledChatOutput(payload);
+    if (hasFlag(rest, "--json")) {
+      writeJson(stdout, { ok: true, scheduled_chat: output });
+    } else {
+      writeScheduledChatMutation(stdout, output);
+    }
+    return 0;
+  }
+
+  if (command === "assign" || command === "reassign") {
+    const positional = removeFlags(
+      rest,
+      ["--to", "--assigned-to", "--assign-to", "--assignee"],
+      ["--json"],
+    );
+    const scheduledChatId = normalizeText(positional[0]);
+    if (!scheduledChatId) {
+      throw new Error("scheduled chat id is required.");
+    }
+    const assignedToGithubLogin = readFlag(rest, [
+      "--to",
+      "--assigned-to",
+      "--assign-to",
+      "--assignee",
+    ]);
+    if (!assignedToGithubLogin) {
+      throw new Error("--to is required.");
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: `/api/scheduled-chats/${encodeURIComponent(scheduledChatId)}`,
+      method: "PATCH",
+      body: {
+        assigned_to_github_login: assignedToGithubLogin,
+      },
       authMode: "web-session",
     });
     const output = readScheduledChatOutput(payload);

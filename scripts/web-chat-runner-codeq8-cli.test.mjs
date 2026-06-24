@@ -188,6 +188,7 @@ test("runner codeq8 helper lists scheduled chats with web-session auth only", as
             scheduled_chat_id: "wcs_daily",
             workspace_repository: "iScoot-LLC/iScoot",
             title: "Daily error check",
+            assigned_to_github_login: "dami",
             prompt: "Check the production errors.",
             cadence: "day",
             status: "active",
@@ -211,8 +212,8 @@ test("runner codeq8 helper lists scheduled chats with web-session auth only", as
 
   const text = output.readText();
   assert.match(text, /Repository: iScoot-LLC\/iScoot/);
-  assert.match(text, /scheduled_chat_id\tstatus\tcadence\tnext_run_at\ttitle/);
-  assert.match(text, /wcs_daily\tactive\tOnce every day\t2023-11-14T22:13:20\.000Z\tDaily error check/);
+  assert.match(text, /scheduled_chat_id\tstatus\tassigned_to\tcadence\tnext_run_at\ttitle/);
+  assert.match(text, /wcs_daily\tactive\t@dami\tOnce every day\t2023-11-14T22:13:20\.000Z\tDaily error check/);
 });
 
 test("runner codeq8 helper creates scheduled chats with daily weekly monthly cadence", async () => {
@@ -240,6 +241,7 @@ test("runner codeq8 helper creates scheduled chats with daily weekly monthly cad
           scheduled_chat_id: "wcs_weekly",
           workspace_repository: "Codeq8/Codeq8",
           title: "Weekly status",
+          assigned_to_github_login: "aalzanki",
           prompt: "Summarize unresolved runner errors.",
           cadence: "week",
           status: "active",
@@ -268,6 +270,7 @@ test("runner codeq8 helper creates scheduled chats with daily weekly monthly cad
   assert.equal(payload.ok, true);
   assert.equal(payload.scheduled_chat.scheduled_chat_id, "wcs_weekly");
   assert.equal(payload.scheduled_chat.cadence, "week");
+  assert.equal(payload.scheduled_chat.assigned_to_github_login, "aalzanki");
   assert.equal(payload.scheduled_chat.prompt_preview, "Summarize unresolved runner errors.");
 });
 
@@ -314,7 +317,7 @@ test("runner codeq8 helper pauses resumes updates and deletes scheduled chats", 
     },
   });
   await handleRunnerCodeq8Cli({
-    argv: ["scheduled", "update", "wcs_daily", "--every", "month", "--message", "Check monthly errors."],
+    argv: ["scheduled", "update", "wcs_daily", "--every", "month", "--message", "Check monthly errors.", "--assigned-to", "dami"],
     env,
     stdout: createOutputCapture().stream,
     fetchImpl: async (url, init = {}) => {
@@ -325,6 +328,7 @@ test("runner codeq8 helper pauses resumes updates and deletes scheduled chats", 
           scheduled_chat_id: "wcs_daily",
           workspace_repository: "Codeq8/Codeq8",
           title: "Daily status",
+          assigned_to_github_login: "dami",
           prompt: "Check monthly errors.",
           cadence: "month",
           status: "active",
@@ -373,7 +377,11 @@ test("runner codeq8 helper pauses resumes updates and deletes scheduled chats", 
         method: "PATCH",
         authorization: undefined,
         cookie: "code_github_session=session_cookie",
-        body: { prompt: "Check monthly errors.", cadence: "month" },
+        body: {
+          prompt: "Check monthly errors.",
+          cadence: "month",
+          assigned_to_github_login: "dami",
+        },
       },
       {
         path: "/api/scheduled-chats/wcs_daily",
@@ -384,6 +392,46 @@ test("runner codeq8 helper pauses resumes updates and deletes scheduled chats", 
       },
     ],
   );
+});
+
+test("runner codeq8 helper reassigns scheduled chats", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  const exitCode = await handleRunnerCodeq8Cli({
+    argv: ["scheduled", "reassign", "wcs_daily", "--to", "dami"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        scheduled_chat: {
+          scheduled_chat_id: "wcs_daily",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Daily status",
+          assigned_to_github_login: "dami",
+          prompt: "Check errors.",
+          cadence: "day",
+          status: "active",
+        },
+      });
+    },
+  });
+
+  assert.equal(exitCode, 0);
+  assert.equal(calls.length, 1);
+  const url = new URL(calls[0]?.url);
+  assert.equal(url.pathname, "/api/scheduled-chats/wcs_daily");
+  assert.equal(calls[0]?.init?.method, "PATCH");
+  assert.equal(calls[0]?.init?.headers?.Authorization, undefined);
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body || "{}")), {
+    assigned_to_github_login: "dami",
+  });
+
+  const text = output.readText();
+  assert.match(text, /Scheduled chat: wcs_daily/);
+  assert.match(text, /Assigned to: @dami/);
 });
 
 test("runner codeq8 helper inspects one delegated thread with compact redacted output", async () => {
@@ -855,6 +903,7 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
     text,
     /codeq8 scheduled create --message text --every day\|week\|month/,
   );
+  assert.match(text, /codeq8 scheduled reassign <scheduled-chat-id> --to github-login/);
   assert.match(text, /codeq8 scheduled pause\|resume\|delete <scheduled-chat-id>/);
   assert.doesNotMatch(text, /threads steer/);
 
