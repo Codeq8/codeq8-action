@@ -627,6 +627,66 @@ function normalizeScheduledChatCadence(value) {
   return "";
 }
 
+const SCHEDULED_CHAT_NEXT_RUN_MIN_LEAD_MS = 60 * 1000;
+
+function parseScheduledChatRunInMs(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  const match = normalized.match(/^(\d+)(ms|s|m|h)?$/);
+  if (!match) {
+    return 0;
+  }
+  const amount = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return 0;
+  }
+  const unit = match[2] || "s";
+  if (unit === "h") {
+    return amount * 60 * 60 * 1000;
+  }
+  if (unit === "m") {
+    return amount * 60 * 1000;
+  }
+  if (unit === "s") {
+    return amount * 1000;
+  }
+  return amount;
+}
+
+function parseScheduledChatNextRunAt(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return 0;
+  }
+  if (/^\d+$/.test(normalized)) {
+    return normalizeEpochMs(normalized);
+  }
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function readScheduledChatNextRunAt(rest) {
+  const runIn = readFlag(rest, ["--run-in", "--next-run-in"]);
+  const nextRunAt = readFlag(rest, ["--next-run-at", "--run-at"]);
+  if (runIn && nextRunAt) {
+    throw new Error("Use only one of --run-in or --next-run-at.");
+  }
+  if (runIn) {
+    const delayMs = parseScheduledChatRunInMs(runIn);
+    if (delayMs < SCHEDULED_CHAT_NEXT_RUN_MIN_LEAD_MS) {
+      throw new Error("--run-in must be at least 60s.");
+    }
+    return Date.now() + delayMs;
+  }
+  if (nextRunAt) {
+    const epochMs = parseScheduledChatNextRunAt(nextRunAt);
+    if (epochMs < Date.now() + SCHEDULED_CHAT_NEXT_RUN_MIN_LEAD_MS) {
+      throw new Error("--next-run-at must be at least 60s in the future.");
+    }
+    return epochMs;
+  }
+  return 0;
+}
+
 function readScheduledChatCadence(rest, { fallback = "" } = {}) {
   const cadence = normalizeScheduledChatCadence(
     firstText(readFlag(rest, ["--every", "--cadence", "--frequency"]), fallback),
@@ -1238,7 +1298,7 @@ function printHelp(stdout) {
       "  codeq8 threads state <thread-id> [--limit 50]",
       "  codeq8 scheduled list [--repository owner/repo] [--json]",
       "  codeq8 scheduled create --message text --every day|week|month [--title title] [--repository owner/repo] [--json]",
-      "  codeq8 scheduled update <scheduled-chat-id> [--title title] [--message text] [--every day|week|month] [--status active|paused] [--assigned-to github-login] [--json]",
+      "  codeq8 scheduled update <scheduled-chat-id> [--title title] [--message text] [--every day|week|month] [--status active|paused] [--assigned-to github-login] [--run-in 3m|--next-run-at iso-or-ms] [--json]",
       "  codeq8 scheduled reassign <scheduled-chat-id> --to github-login [--json]",
       "  codeq8 scheduled pause|resume|delete <scheduled-chat-id> [--json]",
       "  codeq8 attachments get --attachment <attachment-id> [--thread <thread-id>] [--output file]",
@@ -1765,6 +1825,10 @@ async function handleScheduledCommand({ args, context, fetchImpl, stdout }) {
         "--assigned-to",
         "--assign-to",
         "--assignee",
+        "--run-in",
+        "--next-run-in",
+        "--next-run-at",
+        "--run-at",
       ],
       ["--json"],
     );
@@ -1782,6 +1846,7 @@ async function handleScheduledCommand({ args, context, fetchImpl, stdout }) {
       "--assign-to",
       "--assignee",
     ]);
+    const nextRunAt = readScheduledChatNextRunAt(rest);
     if (title) {
       body.title = title;
     }
@@ -1799,6 +1864,9 @@ async function handleScheduledCommand({ args, context, fetchImpl, stdout }) {
     }
     if (assignedToGithubLogin) {
       body.assigned_to_github_login = assignedToGithubLogin;
+    }
+    if (nextRunAt) {
+      body.next_run_at = nextRunAt;
     }
     if (Object.keys(body).length === 0) {
       throw new Error("at least one update flag is required.");
