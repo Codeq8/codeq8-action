@@ -190,7 +190,7 @@ test("runner codeq8 helper lists scheduled chats with web-session auth only", as
             title: "Daily error check",
             assigned_to_github_login: "dami",
             prompt: "Check the production errors.",
-            cadence: "day",
+            cadence: "every_3_days",
             status: "active",
             next_run_at: 1700000000000,
           },
@@ -213,10 +213,10 @@ test("runner codeq8 helper lists scheduled chats with web-session auth only", as
   const text = output.readText();
   assert.match(text, /Repository: iScoot-LLC\/iScoot/);
   assert.match(text, /scheduled_chat_id\tstatus\tassigned_to\tcadence\tnext_run_at\ttitle/);
-  assert.match(text, /wcs_daily\tactive\t@dami\tOnce every day\t2023-11-14T22:13:20\.000Z\tDaily error check/);
+  assert.match(text, /wcs_daily\tactive\t@dami\tOnce every 3 days\t2023-11-14T22:13:20\.000Z\tDaily error check/);
 });
 
-test("runner codeq8 helper creates scheduled chats with daily weekly monthly cadence", async () => {
+test("runner codeq8 helper creates scheduled chats with custom day cadence", async () => {
   const output = createOutputCapture();
   const calls = [];
   const exitCode = await handleRunnerCodeq8Cli({
@@ -228,7 +228,7 @@ test("runner codeq8 helper creates scheduled chats with daily weekly monthly cad
       "--message",
       "Summarize unresolved runner errors.",
       "--every",
-      "week",
+      "3d",
       "--json",
     ],
     env: testEnv(),
@@ -238,12 +238,12 @@ test("runner codeq8 helper creates scheduled chats with daily weekly monthly cad
       return Response.json({
         ok: true,
         scheduled_chat: {
-          scheduled_chat_id: "wcs_weekly",
+          scheduled_chat_id: "wcs_custom",
           workspace_repository: "Codeq8/Codeq8",
           title: "Weekly status",
           assigned_to_github_login: "aalzanki",
           prompt: "Summarize unresolved runner errors.",
-          cadence: "week",
+          cadence: "every_3_days",
           status: "active",
           next_run_at: 1700604800000,
         },
@@ -263,13 +263,13 @@ test("runner codeq8 helper creates scheduled chats with daily weekly monthly cad
     workspace_repository: "Codeq8/Codeq8",
     title: "Weekly status",
     prompt: "Summarize unresolved runner errors.",
-    cadence: "week",
+    cadence: "every_3_days",
   });
 
   const payload = output.readJson();
   assert.equal(payload.ok, true);
-  assert.equal(payload.scheduled_chat.scheduled_chat_id, "wcs_weekly");
-  assert.equal(payload.scheduled_chat.cadence, "week");
+  assert.equal(payload.scheduled_chat.scheduled_chat_id, "wcs_custom");
+  assert.equal(payload.scheduled_chat.cadence, "every_3_days");
   assert.equal(payload.scheduled_chat.assigned_to_github_login, "aalzanki");
   assert.equal(payload.scheduled_chat.prompt_preview, "Summarize unresolved runner errors.");
 });
@@ -988,7 +988,7 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.match(text, /codeq8 scheduled list \[--repository owner\/repo\] \[--json\]/);
   assert.match(
     text,
-    /codeq8 scheduled create --message text --every day\|week\|month/,
+    /codeq8 scheduled create --message text --every day\|week\|month\|Nd/,
   );
   assert.match(text, /--run-in 3m\|--next-run-at iso-or-ms/);
   assert.match(text, /codeq8 scheduled reassign <scheduled-chat-id> --to github-login/);

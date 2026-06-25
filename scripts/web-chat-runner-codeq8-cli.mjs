@@ -620,9 +620,51 @@ function buildThreadPullRequestOutput(
 }
 
 function normalizeScheduledChatCadence(value) {
-  const normalized = normalizeText(value).toLowerCase();
-  if (["day", "week", "month"].includes(normalized)) {
-    return normalized;
+  const original = normalizeText(value).toLowerCase();
+  const normalized = original
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    ["day", "daily", "every day", "once a day", "once every day"].includes(
+      normalized,
+    )
+  ) {
+    return "day";
+  }
+  if (
+    ["week", "weekly", "every week", "once a week", "once every week"].includes(
+      normalized,
+    )
+  ) {
+    return "week";
+  }
+  if (
+    [
+      "month",
+      "monthly",
+      "every month",
+      "once a month",
+      "once every month",
+    ].includes(normalized)
+  ) {
+    return "month";
+  }
+  const dayMatch = normalized.match(
+    /^(?:once\s+)?(?:every\s+)?(\d{1,2})(?:\s*(?:d|day|days))?$/,
+  );
+  if (dayMatch) {
+    const days = Number.parseInt(dayMatch[1] || "", 10);
+    if (Number.isInteger(days) && days >= 1 && days <= 30) {
+      return days === 1 ? "day" : `every_${days}_days`;
+    }
+  }
+  const storedCustom = original.match(/^every_(\d{1,2})_days$/);
+  if (storedCustom) {
+    const days = Number.parseInt(storedCustom[1] || "", 10);
+    if (Number.isInteger(days) && days >= 1 && days <= 30) {
+      return days === 1 ? "day" : original;
+    }
   }
   return "";
 }
@@ -692,7 +734,7 @@ function readScheduledChatCadence(rest, { fallback = "" } = {}) {
     firstText(readFlag(rest, ["--every", "--cadence", "--frequency"]), fallback),
   );
   if (!cadence) {
-    throw new Error("--every must be day, week, or month.");
+    throw new Error("--every must be day, week, month, or a 1-30 day interval.");
   }
   return cadence;
 }
@@ -704,6 +746,10 @@ function formatScheduledChatCadence(value) {
   }
   if (cadence === "month") {
     return "Once every month";
+  }
+  const custom = cadence.match(/^every_(\d{1,2})_days$/);
+  if (custom) {
+    return `Once every ${Number.parseInt(custom[1] || "", 10)} days`;
   }
   return "Once every day";
 }
@@ -1297,8 +1343,8 @@ function printHelp(stdout) {
       "  codeq8 threads goal <thread-id> --clear",
       "  codeq8 threads state <thread-id> [--limit 50]",
       "  codeq8 scheduled list [--repository owner/repo] [--json]",
-      "  codeq8 scheduled create --message text --every day|week|month [--title title] [--repository owner/repo] [--json]",
-      "  codeq8 scheduled update <scheduled-chat-id> [--title title] [--message text] [--every day|week|month] [--status active|paused] [--assigned-to github-login] [--run-in 3m|--next-run-at iso-or-ms] [--json]",
+      "  codeq8 scheduled create --message text --every day|week|month|Nd [--title title] [--repository owner/repo] [--json]",
+      "  codeq8 scheduled update <scheduled-chat-id> [--title title] [--message text] [--every day|week|month|Nd] [--status active|paused] [--assigned-to github-login] [--run-in 3m|--next-run-at iso-or-ms] [--json]",
       "  codeq8 scheduled reassign <scheduled-chat-id> --to github-login [--json]",
       "  codeq8 scheduled pause|resume|delete <scheduled-chat-id> [--json]",
       "  codeq8 attachments get --attachment <attachment-id> [--thread <thread-id>] [--output file]",
