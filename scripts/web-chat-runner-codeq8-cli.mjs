@@ -655,14 +655,14 @@ function normalizeScheduledChatCadence(value) {
   );
   if (dayMatch) {
     const days = Number.parseInt(dayMatch[1] || "", 10);
-    if (Number.isInteger(days) && days >= 1 && days <= 30) {
+    if (Number.isInteger(days) && days >= 1 && days <= 99) {
       return days === 1 ? "day" : `every_${days}_days`;
     }
   }
   const storedCustom = original.match(/^every_(\d{1,2})_days$/);
   if (storedCustom) {
     const days = Number.parseInt(storedCustom[1] || "", 10);
-    if (Number.isInteger(days) && days >= 1 && days <= 30) {
+    if (Number.isInteger(days) && days >= 1 && days <= 99) {
       return days === 1 ? "day" : original;
     }
   }
@@ -734,7 +734,7 @@ function readScheduledChatCadence(rest, { fallback = "" } = {}) {
     firstText(readFlag(rest, ["--every", "--cadence", "--frequency"]), fallback),
   );
   if (!cadence) {
-    throw new Error("--every must be day, week, month, or a 1-30 day interval.");
+    throw new Error("--every must be day, week, month, or a 1-99 day interval.");
   }
   return cadence;
 }

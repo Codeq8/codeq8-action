@@ -228,7 +228,7 @@ test("runner codeq8 helper creates scheduled chats with custom day cadence", asy
       "--message",
       "Summarize unresolved runner errors.",
       "--every",
-      "3d",
+      "99d",
       "--json",
     ],
     env: testEnv(),
@@ -243,7 +243,7 @@ test("runner codeq8 helper creates scheduled chats with custom day cadence", asy
           title: "Weekly status",
           assigned_to_github_login: "aalzanki",
           prompt: "Summarize unresolved runner errors.",
-          cadence: "every_3_days",
+          cadence: "every_99_days",
           status: "active",
           next_run_at: 1700604800000,
         },
@@ -263,15 +263,39 @@ test("runner codeq8 helper creates scheduled chats with custom day cadence", asy
     workspace_repository: "Codeq8/Codeq8",
     title: "Weekly status",
     prompt: "Summarize unresolved runner errors.",
-    cadence: "every_3_days",
+    cadence: "every_99_days",
   });
 
   const payload = output.readJson();
   assert.equal(payload.ok, true);
   assert.equal(payload.scheduled_chat.scheduled_chat_id, "wcs_custom");
-  assert.equal(payload.scheduled_chat.cadence, "every_3_days");
+  assert.equal(payload.scheduled_chat.cadence, "every_99_days");
   assert.equal(payload.scheduled_chat.assigned_to_github_login, "aalzanki");
   assert.equal(payload.scheduled_chat.prompt_preview, "Summarize unresolved runner errors.");
+});
+
+test("runner codeq8 helper rejects custom day cadence above ninety-nine days", async () => {
+  const output = createOutputCapture();
+  await assert.rejects(
+    () =>
+      handleRunnerCodeq8Cli({
+        argv: [
+          "scheduled",
+          "create",
+          "--message",
+          "Summarize unresolved runner errors.",
+          "--every",
+          "100d",
+        ],
+        env: testEnv(),
+        stdout: output.stream,
+        fetchImpl: async () => {
+          throw new Error("invalid cadence must not fetch");
+        },
+      }),
+    /1-99 day interval/,
+  );
+  assert.equal(output.readText(), "");
 });
 
 test("runner codeq8 helper pauses resumes updates and deletes scheduled chats", async () => {
