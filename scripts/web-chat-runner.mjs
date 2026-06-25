@@ -1290,6 +1290,17 @@ function buildCodexGoalSetParams({
   return params;
 }
 
+function isUnsupportedCodexGoalAppServerError(error) {
+  const message = extractErrorMessage(error);
+  return (
+    /unknown variant [`'"]thread\/goal\//i.test(message) ||
+    (
+      /unknown variant/i.test(message) &&
+      /thread\/goal\//i.test(message)
+    )
+  );
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -8485,6 +8496,7 @@ async function runCodexAppServer({
       runId: appServerContext?.runId,
       reportRunnerDiagnostic: appServerContext?.reportRunnerDiagnostic,
     });
+    let codexGoalAppServerApiSupported = true;
     let controlListener = null;
 
     const child = spawn(codexPath, ["app-server", "--listen", "stdio://"], {
@@ -8864,7 +8876,7 @@ async function runCodexAppServer({
     };
 
     const synchronizeInitialCodexGoal = async () => {
-      if (!goalsEnabled || !appServerThreadId) {
+      if (!goalsEnabled || !appServerThreadId || !codexGoalAppServerApiSupported) {
         return;
       }
       try {
@@ -8884,6 +8896,14 @@ async function runCodexAppServer({
         });
         log("Synchronized Codeq8 Codex goal into AppServer", "action=clear");
       } catch (error) {
+        if (isUnsupportedCodexGoalAppServerError(error)) {
+          codexGoalAppServerApiSupported = false;
+          log(
+            "Codex AppServer goal API is unavailable; continuing without runner-side goal sync",
+            extractErrorMessage(error),
+          );
+          return;
+        }
         await maybeReportGoalSyncFailure({
           event: "runner_codex_goal_initial_sync_failed",
           error,
@@ -8895,7 +8915,7 @@ async function runCodexAppServer({
     };
 
     const captureFinalCodexGoalState = async () => {
-      if (!goalsEnabled || !appServerThreadId) {
+      if (!goalsEnabled || !appServerThreadId || !codexGoalAppServerApiSupported) {
         return null;
       }
       try {
@@ -8921,6 +8941,14 @@ async function runCodexAppServer({
           ? normalizedCodexGoalState
           : normalizeCodexGoalState(null);
       } catch (error) {
+        if (isUnsupportedCodexGoalAppServerError(error)) {
+          codexGoalAppServerApiSupported = false;
+          log(
+            "Codex AppServer goal API is unavailable; skipping final goal read",
+            extractErrorMessage(error),
+          );
+          return null;
+        }
         await maybeReportGoalSyncFailure({
           event: "runner_codex_goal_final_read_failed",
           error,

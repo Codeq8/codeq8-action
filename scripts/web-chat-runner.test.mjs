@@ -1856,6 +1856,68 @@ test("runCodex preserves the web goal when the final AppServer goal read is empt
   assert.equal(goalUpdates.length, 0);
 });
 
+test("runCodex treats unsupported AppServer goal methods as optional", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-goal-unsupported-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await writeFakeCodexAppServer(fakeCodexPath, {
+    requestsOutputPath,
+    agentMessage: "unsupported goal api still runs",
+    goalApisUnsupported: true,
+  });
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "continue without goal api support",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+    },
+    timeoutSeconds: 30,
+    codexThreadGoalsEnabled: true,
+    codexGoalState: null,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "Codeq8/test",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue: () => {},
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+        close: async () => {},
+      }),
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "unsupported goal api still runs");
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  assert.equal(
+    requests.some((request) => request.method === "thread/goal/clear"),
+    true,
+  );
+  assert.equal(
+    requests.some((request) => request.method === "thread/goal/get"),
+    false,
+  );
+  assert.equal(
+    requests.some((request) => request.method === "turn/start"),
+    true,
+  );
+});
+
 test("runCodex materializes AppServer steer attachments before forwarding them", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-steer-attachments-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
@@ -3250,6 +3312,7 @@ async function writeFakeCodexAppServer(
     commandLabel = "npm test",
     delayTurnCompletionMs = 0,
     goalGetReturnsEmpty = false,
+    goalApisUnsupported = false,
   } = {},
 ) {
   await fs.writeFile(
@@ -3265,6 +3328,7 @@ async function writeFakeCodexAppServer(
       `const commandLabel = ${JSON.stringify(commandLabel)};`,
       `const delayTurnCompletionMs = ${JSON.stringify(delayTurnCompletionMs)};`,
       `const goalGetReturnsEmpty = ${JSON.stringify(goalGetReturnsEmpty)};`,
+      `const goalApisUnsupported = ${JSON.stringify(goalApisUnsupported)};`,
       "const agentMessages = Array.isArray(agentMessage) ? agentMessage : [agentMessage];",
       "if (argsOutputPath) await fs.writeFile(argsOutputPath, JSON.stringify(process.argv.slice(2)), 'utf8');",
       "if (envOutputPath) await fs.writeFile(envOutputPath, process.env.NODE_OPTIONS || '', 'utf8');",
@@ -3283,6 +3347,10 @@ async function writeFakeCodexAppServer(
       "  requests.push({ method: message.method, params: message.params || {} });",
       "  await persistRequests();",
       "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
+      "  if (goalApisUnsupported && String(message.method || '').startsWith('thread/goal/')) {",
+      "    send({ id: message.id, error: { message: `Invalid request: unknown variant \\`${message.method}\\`, expected one of \\`initialize\\`, \\`thread/start\\`, \\`thread/resume\\`, \\`turn/start\\`` } });",
+      "    return;",
+      "  }",
       "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
       "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
       "  if (message.method === 'thread/resume') send({ id: message.id, result: { thread: { id: message.params?.threadId || 'thr_app' } } });",
