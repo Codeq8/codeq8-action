@@ -34,27 +34,37 @@ staging mutation guards harness-owned.
    or completes a broader project, problem, or desired outcome, set, update, or
    clear the thread goal through the runner-supported goal surface. Do not turn
    individual commands, checklists, PR mechanics, or transient status into the
-   goal. If the durable goal depends on a Codeq8 skill or repo skill, include
-   the relevant skill name or path so future runs inherit both the outcome and
-   the operating context.
-5. Manage repo skills like goals. Treat repo-owned `.codex/skills` as durable
+   goal.
+5. Carry a goal-linked owner skill. For durable repo projects, recurring
+   subsystems, repeated failures, specialized investigations, or project
+   procedures, identify the repo skill that should guide future runs before
+   answering or implementing. If it exists, read and use it. If it does not
+   exist and write mode allows repo changes, create a focused owner skill in
+   the same branch. Anchor the durable goal to the relevant skill name or path
+   so future runs inherit both the outcome and the operating context. If write
+   mode, scope, or explicit user instructions block the skill update, report
+   the owner-skill candidate and blocker instead of treating skills as optional.
+6. Keep owner skills current. Treat repo-owned `.codex/skills` as durable
    operating context that Codex owns for the repository, not as a user-facing
-   feature the user must ask about. During normal repo work, create, update,
-   split, retire, or validate skills in the same branch when the current work
-   reveals a reusable project procedure, stale guidance, user correction,
-   repeated failure, CI/staging/runtime lesson, or recurring workflow. Prefer
-   updating an existing owner skill before creating a new one; create or split
-   a skill only when future runs need an executable checklist, routing rule,
-   validation pattern, or reusable boundary. Pair skill edits with the smallest
+   feature the user must ask about. During analysis, implementation,
+   validation, and handoff, update, split, retire, or validate skills when the
+   current work reveals reusable debugging fields, project procedures, stale
+   guidance, user corrections, repeated failures, CI/staging/runtime lessons,
+   or recurring workflows. A request to diagnose, explain, or avoid product
+   code does not by itself forbid skill upkeep; respect explicit instructions
+   that forbid all file changes, PRs, or skill updates. Prefer updating an
+   existing owner skill before creating a new one; create or split a skill only
+   when future runs need an executable checklist, routing rule, validation
+   pattern, or reusable boundary. Pair skill edits with the smallest
    deterministic validator, test, source contract, operator guard, or docs
    update that proves the invariant. If the skill change would materially
    expand scope or cross an unrelated rollout boundary, report the exact skill
    candidate, blocker, and validation instead of creating a hidden branch or
    standalone skill-management PR.
-6. Keep user-message precedence. If newer user instructions conflict with an
+7. Keep user-message precedence. If newer user instructions conflict with an
    older plan, follow the newer request within the current safety and repo
    policy.
-7. Finish with evidence: changed files or PR, validation, staging or runtime
+8. Finish with evidence: changed files or PR, validation, staging or runtime
    evidence when required, remaining blockers, and explicit rollout boundaries.
 
 ## Guardrails
@@ -68,6 +78,9 @@ staging mutation guards harness-owned.
   project outcome; repo skills preserve reusable operating procedures and
   validation patterns. Do not store private transcript summaries, incidental
   preferences, or one-off implementation notes as skills.
+- Do not create low-quality skills for one-off facts. Create or update skills
+  when they give future runs an owner boundary, checklist, validation pattern,
+  or reusable debugging procedure.
 - Do not move or thin harness wording until the pinned public runtime actually
   bundles the skill that the harness points to.
 - Do not imply a plugin capability grants live mutation rights, browser auth, or

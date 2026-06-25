@@ -123,7 +123,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
       const skillMarker = await readJson(path.join(skillPath, CODEQ8_PLUGIN_MARKER_FILE));
       assert.equal(skillMarker.target_kind, "skill");
       assert.equal(skillMarker.target_name, skillName);
-      assert.equal(skillMarker.plugin_version, "0.5.2");
+      assert.equal(skillMarker.plugin_version, "0.5.3");
       assert.equal(await pathExists(path.join(skillPath, "SKILL.md")), true);
     }
 
@@ -496,14 +496,22 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(onboardingSource, /Maintain durable thread goals/);
   assert.match(onboardingSource, /set, update, or\s+clear the thread goal/);
   assert.match(onboardingSource, /individual commands, checklists, PR mechanics, or transient status/);
-  assert.match(onboardingSource, /include\s+the relevant skill name or path/);
-  assert.match(onboardingSource, /Manage repo skills like goals/);
+  assert.match(onboardingSource, /Carry a goal-linked owner skill/);
+  assert.match(onboardingSource, /identify the repo skill that should guide future runs before\s+answering or implementing/);
+  assert.match(onboardingSource, /If it exists, read and use it/);
+  assert.match(onboardingSource, /create a focused owner skill in\s+the same branch/);
+  assert.match(onboardingSource, /Anchor the durable goal to the relevant skill name or path/);
+  assert.match(onboardingSource, /treating skills as optional/);
+  assert.match(onboardingSource, /Keep owner skills current/);
   assert.match(onboardingSource, /repo-owned `\.codex\/skills` as durable\s+operating context that Codex owns/);
   assert.match(onboardingSource, /not as a user-facing\s+feature the user must ask about/);
-  assert.match(onboardingSource, /create, update,\s+split, retire, or validate skills in the same branch/);
-  assert.match(onboardingSource, /reusable project procedure, stale guidance, user correction,\s+repeated failure, CI\/staging\/runtime lesson, or recurring workflow/);
-  assert.match(onboardingSource, /Prefer\s+updating an existing owner skill before creating a new one/);
-  assert.match(onboardingSource, /executable checklist, routing rule,\s+validation pattern, or reusable boundary/);
+  assert.match(onboardingSource, /During analysis, implementation,\s+validation, and handoff/);
+  assert.match(onboardingSource, /update, split, retire, or validate skills/);
+  assert.match(onboardingSource, /reusable debugging fields, project procedures, stale\s+guidance, user corrections, repeated failures, CI\/staging\/runtime lessons,\s+or recurring workflows/);
+  assert.match(onboardingSource, /request to diagnose, explain, or avoid product\s+code does not by itself forbid skill upkeep/);
+  assert.match(onboardingSource, /forbid all file changes, PRs, or skill updates/);
+  assert.match(onboardingSource, /Prefer\s+updating an\s+existing owner skill before creating a new one/);
+  assert.match(onboardingSource, /executable checklist, routing rule,\s+validation\s+pattern, or reusable boundary/);
   assert.match(onboardingSource, /deterministic validator, test, source contract, operator guard, or docs\s+update/);
   assert.match(onboardingSource, /hidden branch or\s+standalone skill-management PR/);
   assert.doesNotMatch(onboardingSource, /route to\s+`codeq8-learn`/);
@@ -511,6 +519,7 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.doesNotMatch(onboardingSource, /Codeq8 Repo Learning Sweep/);
   assert.match(onboardingSource, /Do not turn onboarding into a second harness/);
   assert.match(onboardingSource, /Do not use goals or skills as blind memory/);
+  assert.match(onboardingSource, /Do not create low-quality skills for one-off facts/);
 
   assert.match(coordinatorSource, /^name: codeq8-coordinator$/m);
   assert.match(coordinatorSource, /normal managed threads/);
