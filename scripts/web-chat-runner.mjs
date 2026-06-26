@@ -10900,10 +10900,12 @@ async function main() {
   let codexResumeRecoveryCount = 0;
   let lastPersistenceSummary = "";
   let latestAppServerControlRequests = [];
+  let workspacePreparationRunMetadata = {};
   try {
     while (true) {
       assistantMessage = "";
       preparedWorkspace = null;
+      workspacePreparationRunMetadata = {};
       const thread = await loadWebChatThread({
         workerUrl,
         adminToken,
@@ -11071,11 +11073,10 @@ async function main() {
         branch: preparedWorkspace.effectiveWriteBranch,
       });
       markPublicActionStartupTiming(publicActionStartupTimings, "workspace_state_ready");
-      const workspacePreparationRunMetadata =
-        buildWorkspacePreparationRunMetadata({
-          preparedWorkspace,
-          commandEnv,
-        });
+      workspacePreparationRunMetadata = buildWorkspacePreparationRunMetadata({
+        preparedWorkspace,
+        commandEnv,
+      });
 
       const attemptRunRuntime = await createWebChatRunRuntime(threadId);
       runRuntime = attemptRunRuntime;

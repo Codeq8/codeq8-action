@@ -236,6 +236,36 @@ test("Codex session contents reads use a longer bounded JSON timeout", async () 
   );
 });
 
+test("failed web chat run callbacks can read workspace preparation metadata", async () => {
+  const source = await fs.readFile(
+    path.join(process.cwd(), "scripts/web-chat-runner.mjs"),
+    "utf8",
+  );
+  const mainStart = source.indexOf("async function main() {");
+  const exportStart = source.indexOf("\nexport {", mainStart);
+  assert.notEqual(mainStart, -1);
+  assert.notEqual(exportStart, -1);
+  const mainSource = source.slice(mainStart, exportStart);
+
+  assert.match(
+    mainSource,
+    /let workspacePreparationRunMetadata = \{\};[\s\S]*try \{\s*while \(true\)/,
+  );
+  assert.match(
+    mainSource,
+    /preparedWorkspace = null;\s+workspacePreparationRunMetadata = \{\};/,
+  );
+  assert.match(
+    mainSource,
+    /workspacePreparationRunMetadata = buildWorkspacePreparationRunMetadata\(\{/,
+  );
+  assert.doesNotMatch(mainSource, /const workspacePreparationRunMetadata\s*=/);
+  assert.match(
+    mainSource,
+    /status: "failed",[\s\S]*metadata: buildCodexRunMetadata\(\{[\s\S]*extra: \{[\s\S]*\.\.\.workspacePreparationRunMetadata/,
+  );
+});
+
 test("AppServer live bridge uses Firestore instead of runner HTTP polling", async () => {
   const source = await fs.readFile(
     path.join(process.cwd(), "scripts/web-chat-runner.mjs"),
