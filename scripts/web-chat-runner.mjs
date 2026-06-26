@@ -146,6 +146,26 @@ function normalizeBooleanFlag(value) {
   return normalized === "1" || normalized === "true" || normalized === "yes";
 }
 
+function normalizeBoundedMetadataText(value, maxChars = 1000) {
+  return truncate(normalizeText(value), maxChars);
+}
+
+function buildWorkspacePreparationRunMetadata({ preparedWorkspace, commandEnv }) {
+  const metadata = preparedWorkspace?.hostedPrepared
+    ? {
+        hosted_runner_public_action_prepared_workspace: true,
+      }
+    : {};
+  const hostedProgressCallbackWarning = normalizeBoundedMetadataText(
+    commandEnv?.CODEQ8_HOSTED_PROGRESS_CALLBACK_WARNING,
+  );
+  if (hostedProgressCallbackWarning) {
+    metadata.hosted_runner_progress_callback_warning =
+      hostedProgressCallbackWarning;
+  }
+  return metadata;
+}
+
 
 function extractErrorMessage(value, fallback = "") {
   const normalizedFallback = normalizeText(fallback);
@@ -10986,11 +11006,11 @@ async function main() {
         commandEnv,
         branch: preparedWorkspace.effectiveWriteBranch,
       });
-      const workspacePreparationRunMetadata = preparedWorkspace.hostedPrepared
-        ? {
-            hosted_runner_public_action_prepared_workspace: true,
-          }
-        : {};
+      const workspacePreparationRunMetadata =
+        buildWorkspacePreparationRunMetadata({
+          preparedWorkspace,
+          commandEnv,
+        });
 
       const attemptRunRuntime = await createWebChatRunRuntime(threadId);
       runRuntime = attemptRunRuntime;
@@ -12086,6 +12106,7 @@ export {
   appendWebChatRunMarkerToPrompt,
   buildCodexPrompt,
   buildCodexRunMetadata,
+  buildWorkspacePreparationRunMetadata,
   buildGitHubActionsControlPlaneUrl,
   buildWebChatRunMarker,
   buildWebChatRunnerDiagnosticRequest,

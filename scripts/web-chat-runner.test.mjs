@@ -22,6 +22,7 @@ import {
   buildFinalWorkspaceStateCallbackPayload,
   buildCodexPrompt,
   buildCodexRunMetadata,
+  buildWorkspacePreparationRunMetadata,
   buildResumePrompt,
   buildWebChatRunMarker,
   buildWebChatRunnerDiagnosticRequest,
@@ -4122,6 +4123,31 @@ test("prepareHostedPrecheckedWorkspace reuses a VM-prepared checkout without clo
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("workspace preparation metadata carries hosted fast-start hints", () => {
+  assert.deepEqual(
+    buildWorkspacePreparationRunMetadata({
+      preparedWorkspace: { hostedPrepared: true },
+      commandEnv: {
+        CODEQ8_HOSTED_PROGRESS_CALLBACK_WARNING: "fetch failed",
+      },
+    }),
+    {
+      hosted_runner_public_action_prepared_workspace: true,
+      hosted_runner_progress_callback_warning: "fetch failed",
+    },
+  );
+
+  const longWarning = "x".repeat(1_200);
+  const metadata = buildWorkspacePreparationRunMetadata({
+    preparedWorkspace: { hostedPrepared: false },
+    commandEnv: {
+      CODEQ8_HOSTED_PROGRESS_CALLBACK_WARNING: longWarning,
+    },
+  });
+  assert.equal(metadata.hosted_runner_progress_callback_warning.length, 1_000);
+  assert.equal(metadata.hosted_runner_public_action_prepared_workspace, undefined);
 });
 
 test("persistWorkspaceProgress explicitly pushes remembered branches that are ahead of origin", async () => {
