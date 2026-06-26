@@ -50,6 +50,7 @@ import {
   prepareHostedPrecheckedWorkspace,
   prepareGitHubCliAuth,
   prepareWebChatCodexSessionUpload,
+  requestWorkspaceGitToken,
   readFirebaseStorageAttachment,
   readFirebaseStorageSignedAttachment,
   writeFirebaseStorageSignedTextObject,
@@ -3938,6 +3939,31 @@ test("prepareGitHubCliAuth refreshes gh tokens before each invocation", async ()
   assert.match(helperCallLog, /^print-token$/m);
   assert.match(helperCallLog, /^print-token Codeq8\/status$/m);
   assert.match(helperCallLog, /^print-token Codeq8\/codeq8-action$/m);
+});
+
+test("requestWorkspaceGitToken does not fall back to admin tokens", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    return Response.json({ ok: true, token: "unexpected-token" });
+  };
+
+  try {
+    await assert.rejects(
+      () =>
+        requestWorkspaceGitToken({
+          publicBaseUrl: "https://codeq8.example",
+          adminToken: "header.payload.signature",
+          webChatRunToken: "",
+          workspaceRepository: "Codeq8/Codeq8",
+        }),
+      /A scoped CODE_WEB_CHAT_RUN_TOKEN is required to mint a GitHub repository token/,
+    );
+    assert.equal(requestCount, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("hosted prepared workspace plan requires runner pool, matching repo/path, and token", () => {

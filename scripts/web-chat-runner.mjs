@@ -1868,7 +1868,6 @@ async function buildUploadedCodexSessionStoredValue({
 
 async function requestWorkspaceGitToken({
   publicBaseUrl,
-  adminToken,
   webChatRunToken,
   workspaceRepository,
   retries = 3,
@@ -1876,11 +1875,8 @@ async function requestWorkspaceGitToken({
 }) {
   const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
   const normalizedToken = normalizeText(webChatRunToken);
-  const normalizedFallbackToken = normalizeText(adminToken);
   const normalizedWorkspaceRepository = normalizeRepository(workspaceRepository);
-  const authorizationToken =
-    normalizedToken ||
-    (normalizedFallbackToken.split(".").length === 3 ? normalizedFallbackToken : "");
+  const authorizationToken = normalizedToken;
   if (!authorizationToken || authorizationToken.split(".").length !== 3) {
     throw new Error(
       "A scoped CODE_WEB_CHAT_RUN_TOKEN is required to mint a GitHub repository token.",
@@ -2365,13 +2361,11 @@ async function assertWebChatRunnerRuntimeCompatibility({
 
 async function applyWorkspaceGitToken({
   publicBaseUrl,
-  adminToken,
   workspaceRepository,
   commandEnv,
 }) {
   const gitToken = await requestWorkspaceGitToken({
     publicBaseUrl,
-    adminToken,
     webChatRunToken: resolveWebChatRunToken(commandEnv),
     workspaceRepository,
   });
