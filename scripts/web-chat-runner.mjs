@@ -8678,8 +8678,12 @@ function shouldRunHiddenThreadTitlePreturn({
   threadTitle = "",
   threadTitleSource = "",
   promptText = "",
+  executionBackend = "",
 } = {}) {
   if (normalizeText(mode).toLowerCase() !== "fresh") {
+    return false;
+  }
+  if (normalizeRunExecutionBackend(executionBackend) === "runner_pool") {
     return false;
   }
   if (!hasMeaningfulHiddenThreadTitlePrompt(promptText)) {
@@ -8857,6 +8861,8 @@ async function runCodexAppServer({
     threadTitle: appServerContext?.threadTitle,
     threadTitleSource: appServerContext?.threadTitleSource,
     promptText: appServerContext?.promptText,
+    executionBackend:
+      commandEnv?.CODEQ8_EXECUTION_BACKEND || commandEnv?.CODE_CHAT_EXECUTION_BACKEND,
   });
   const hiddenTitleCompletionTimeoutMs = parsePositiveInteger(
     appServerContext?.hiddenThreadTitlePreturnTimeoutMs,

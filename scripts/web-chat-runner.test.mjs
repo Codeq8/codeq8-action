@@ -177,6 +177,16 @@ test("hidden title pre-turn treats placeholder titles as needing runner ownershi
     }),
     true,
   );
+  assert.equal(
+    shouldRunHiddenThreadTitlePreturn({
+      mode: "fresh",
+      threadTitle: "Untitled",
+      threadTitleSource: "provisional_first_message",
+      promptText: "Fix bug",
+      executionBackend: "runner_pool",
+    }),
+    false,
+  );
 });
 
 test("hidden title normalization rejects placeholder title outputs", () => {
@@ -3198,6 +3208,97 @@ test("runCodex skips hidden AppServer title pre-turn for low-signal greeting pro
 
   assert.equal(result.ok, true);
   assert.equal(result.output, "Hi.");
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  const turnStarts = requests.filter((request) => request.method === "turn/start");
+  assert.equal(turnStarts.length, 1);
+  assert.equal(turnStarts[0]?.params?.input?.[0]?.text, "visible work prompt");
+});
+
+test("runCodex skips hidden AppServer title pre-turn for hosted runner pool startup", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-title-hosted-skip-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  const originalFetch = globalThis.fetch;
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  globalThis.fetch = async (url) => {
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import fs from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
+      "const requests = [];",
+      "let persistChain = Promise.resolve();",
+      "const persistRequests = () => {",
+      "  persistChain = persistChain.then(() => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8'));",
+      "  return persistChain;",
+      "};",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', async (line) => {",
+      "  const message = JSON.parse(line);",
+      "  requests.push({ method: message.method, params: message.params || {} });",
+      "  await persistRequests();",
+      "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_main', status: 'inProgress' } } });",
+      "    send({ method: 'turn/started', params: { turn: { id: 'turn_main' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_main', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_main', delta: 'Done.' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_main', type: 'agent_message', text: 'Done.' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_main', status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "visible work prompt",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+      CODEQ8_EXECUTION_BACKEND: "runner_pool",
+    },
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "example-org/example-repo",
+      threadId: "wct_title_hosted_skip",
+      runId: "wcr_title_hosted_skip",
+      threadTitle: "Untitled",
+      threadTitleSource: "provisional_first_message",
+      promptText: "Fix the repeated 120 second timeout before rerunning tests.",
+      reportRunnerDiagnostic: async () => ({ ok: true, status: 200 }),
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue() {},
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+      }),
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "Done.");
   const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
   const turnStarts = requests.filter((request) => request.method === "turn/start");
   assert.equal(turnStarts.length, 1);
