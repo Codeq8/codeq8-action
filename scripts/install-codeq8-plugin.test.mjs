@@ -9,7 +9,7 @@ import {
   CODEQ8_PLUGIN_MARKER_FILE,
   CODEQ8_PLUGIN_NAME,
   CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY,
-  CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS,
+  CODEQ8_PLUGIN_PUBLIC_SKILLS,
   CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS_CAPABILITY,
   CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH,
   OBSOLETE_CODEQ8_PLUGIN_SKILLS,
@@ -25,10 +25,6 @@ const CODEQ8_PLUGIN_CAPABILITIES = [
   CODEQ8_PLUGIN_CAPABILITY,
   CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS_CAPABILITY,
   CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY,
-];
-const CODEQ8_PLUGIN_SKILLS = [
-  ...CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS,
-  "codeq8-plugin",
 ];
 
 test("Codeq8 plugin skill documents public runtime ownership for bundled skills", async () => {
@@ -118,7 +114,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
     assert.equal(pluginMarker.artifact_hash, expectedArtifactHash);
     assert.equal(pluginMarker.target_kind, "plugin");
 
-    for (const skillName of CODEQ8_PLUGIN_SKILLS) {
+    for (const skillName of CODEQ8_PLUGIN_PUBLIC_SKILLS) {
       const skillPath = path.join(codexHome, "skills", skillName);
       const skillMarker = await readJson(path.join(skillPath, CODEQ8_PLUGIN_MARKER_FILE));
       assert.equal(skillMarker.target_kind, "skill");
@@ -183,6 +179,58 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
     assert.equal(await pathExists(path.join(codexHome, "auth.json")), false);
     assert.equal(await pathExists(path.join(codexHome, "config.toml")), false);
     assert.equal(await pathExists(path.join(codexHome, "sessions")), false);
+  });
+});
+
+test("Codeq8 plugin install rejects non-public bundled skills before syncing", async () => {
+  await withTempInstallRoot(async ({ tempRoot, codexHome, env }) => {
+    const tempRepoRoot = path.join(tempRoot, "repo");
+    const sourcePluginPath = path.join(
+      tempRepoRoot,
+      CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH,
+    );
+    await fs.mkdir(path.dirname(sourcePluginPath), { recursive: true });
+    await fs.cp(
+      path.join(process.cwd(), CODEQ8_PLUGIN_SOURCE_RELATIVE_PATH),
+      sourcePluginPath,
+      { recursive: true },
+    );
+    const unexpectedSkillPath = path.join(
+      sourcePluginPath,
+      "skills",
+      "codeq8-internal-product",
+    );
+    await fs.mkdir(unexpectedSkillPath, { recursive: true });
+    await fs.writeFile(
+      path.join(unexpectedSkillPath, "SKILL.md"),
+      [
+        "---",
+        "name: codeq8-internal-product",
+        "description: Internal product planning guidance.",
+        "---",
+        "",
+        "# Internal Product",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = await syncCodeq8PluginInstall({
+      repoRoot: tempRepoRoot,
+      env,
+      sourceRef: "public-action-sha",
+      now: FIXED_NOW,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.status, "skipped");
+    assert.equal(result.code, "invalid_source");
+    assert.match(result.reason, /non-public bundled skills: codeq8-internal-product/);
+    assert.deepEqual(result.capabilities, [CODEQ8_PLUGIN_CAPABILITY]);
+    assert.equal(await pathExists(path.join(codexHome, "plugins", "codeq8")), false);
+    for (const skillName of CODEQ8_PLUGIN_PUBLIC_SKILLS) {
+      assert.equal(await pathExists(path.join(codexHome, "skills", skillName)), false);
+    }
   });
 });
 
@@ -477,7 +525,7 @@ test("Codeq8 plugin bundles onboarding and coordinator runtime skills", async ()
     .map((entry) => entry.name)
     .sort();
 
-  assert.deepEqual(bundledSkillNames, CODEQ8_PLUGIN_SKILLS);
+  assert.deepEqual(bundledSkillNames, CODEQ8_PLUGIN_PUBLIC_SKILLS);
   assert.equal(bundledSkillNames.includes("codeq8-learn"), false);
 });
 

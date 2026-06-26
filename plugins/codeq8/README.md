@@ -12,6 +12,10 @@ Bundled skills:
   workstreams.
 - `codeq8-plugin`: plugin runtime boundaries and rollout checkpoints.
 
+The bundled skill set is intentionally allowlisted. Internal product-domain,
+operator, incident, pricing, admin, and strategy skills remain repo-local until
+a reviewed public-action rollout explicitly promotes one into the public plugin.
+
 Bundled MCP servers:
 
 - `playwright`: authenticated Playwright MCP for Codeq8 staging/browser

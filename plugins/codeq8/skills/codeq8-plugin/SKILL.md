@@ -22,6 +22,10 @@ made available during Codeq8 chat runs.
   public `Codeq8/codeq8-action`. A private app-repo `.codex/skills` change can
   guide internal development, but it is not a shipped runner capability for
   customer repositories.
+- The public plugin may bundle only explicitly allowlisted runtime skills.
+  Internal product-domain, operator, incident, pricing, admin, and strategy
+  skills stay repo-local unless they go through a reviewed public-action
+  rollout decision.
 
 ## Current Capability
 

@@ -27,6 +27,10 @@ export const CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS = [
   "codeq8-coordinator",
   "codeq8-onboarding",
 ];
+export const CODEQ8_PLUGIN_PUBLIC_SKILLS = [
+  ...CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS,
+  "codeq8-plugin",
+];
 export const OBSOLETE_CODEQ8_PLUGIN_SKILLS = [
   "codeq8-child-threads",
   "codeq8-learn",
@@ -189,7 +193,19 @@ async function listBundledSkills(sourcePluginPath, manifest) {
       sourcePath,
     });
   }
-  return skills.sort((left, right) => left.name.localeCompare(right.name));
+  const sortedSkills = skills.sort((left, right) => left.name.localeCompare(right.name));
+  const allowedSkillNames = new Set(CODEQ8_PLUGIN_PUBLIC_SKILLS);
+  const unexpectedSkillNames = sortedSkills
+    .map((skill) => skill.name)
+    .filter((skillName) => !allowedSkillNames.has(skillName));
+  if (unexpectedSkillNames.length > 0) {
+    throw new Error(
+      `Codeq8 plugin source contains non-public bundled skills: ${unexpectedSkillNames.join(
+        ", ",
+      )}. Add public plugin skills to CODEQ8_PLUGIN_PUBLIC_SKILLS only after a reviewed public-action rollout decision.`,
+    );
+  }
+  return sortedSkills;
 }
 
 async function listBundledMcpServerNames(sourcePluginPath, manifest) {
