@@ -5079,6 +5079,107 @@ test("readWebChatCodexSessionState restores session contents through direct stor
   }
 });
 
+test("readWebChatCodexSessionState decrypts source-owned inherited session bundles", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const targetThreadId = "wct_target";
+  const sourceThreadId = "wct_source";
+  const storageKey = "web_chat_codex_session_blob:wct_source:164:nonce";
+  const uploadKey = Buffer.from(
+    Uint8Array.from({ length: 32 }, (_value, index) => 32 - index),
+  ).toString("base64url");
+  const uploadedBundle = await buildUploadedCodexSessionStoredValue({
+    threadId: sourceThreadId,
+    storageKey,
+    uploadKey,
+    wrappedKey: "wrapped-key",
+    wrappedKeyIv: "wrapped-key-iv",
+    sessionFileContents: "source session line 1\nsource session line 2",
+  });
+  const storedValue = uploadedBundle.storedValue;
+
+  globalThis.fetch = async (url, init = {}) => {
+    const parsedUrl = new URL(String(url));
+    calls.push({
+      path: parsedUrl.pathname,
+      query: parsedUrl.search,
+      method: init.method || "GET",
+      body: init.body ? String(init.body) : "",
+    });
+    if (parsedUrl.pathname === "/web-chat/codex-session/read-url") {
+      return Response.json({
+        ok: true,
+        thread: { thread_id: targetThreadId },
+        codex_session_state: {
+          status: "ready",
+          session_id: "019dd643-e3ec-76e1-952c-3dc25053e8c3",
+          session_file_relative_path:
+            "sessions/2026/05/02/rollout-2026-05-02T01-06-49-019dd643-e3ec-76e1-952c-3dc25053e8c3.jsonl",
+          bundle_storage_key: storageKey,
+          bundle_owner_thread_id: sourceThreadId,
+          storage_bucket: "bucket",
+          storage_backend: "firebase_storage",
+          bundle_size_bytes: 43,
+          bundle_compressed_size_bytes: 56,
+          bundle_revision: 164,
+        },
+        session_bundle_read_url: {
+          download_url: "https://storage.example/source-session-bundle",
+          expires_at: Date.now() + 60_000,
+          storage_key: storageKey,
+          storage_bucket: "bucket",
+          storage_backend: "firebase_storage",
+        },
+      });
+    }
+    if (parsedUrl.hostname === "storage.example") {
+      return new Response(storedValue, { status: 200 });
+    }
+    if (parsedUrl.pathname === "/web-chat/codex-session/unwrap-key") {
+      const body = JSON.parse(String(init.body || "{}"));
+      assert.equal(body.thread_id, targetThreadId);
+      assert.equal(body.storage_key, storageKey);
+      assert.equal(body.wrapped_key, "wrapped-key");
+      assert.equal(body.wrapped_key_iv, "wrapped-key-iv");
+      return Response.json({ ok: true, session_bundle_key: uploadKey });
+    }
+    throw new Error(`Unexpected request ${parsedUrl.pathname}`);
+  };
+
+  try {
+    const loaded = await readWebChatCodexSessionState({
+      workerUrl: "https://worker.example.com",
+      adminToken: "secret",
+      threadId: targetThreadId,
+      includeContents: true,
+    });
+
+    assert.equal(
+      loaded.sessionFileContents,
+      "source session line 1\nsource session line 2",
+    );
+    assert.equal(loaded.codexSessionState.bundle_owner_thread_id, sourceThreadId);
+    assert.deepEqual(
+      calls.map((call) => call.path),
+      [
+        "/web-chat/codex-session/read-url",
+        "/source-session-bundle",
+        "/web-chat/codex-session/unwrap-key",
+      ],
+    );
+    assert.equal(
+      calls.some(
+        (call) =>
+          call.path === "/web-chat/codex-session/get" &&
+          call.query.includes("include_contents"),
+      ),
+      false,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("isRecoverableCodexSessionErrorState treats token path mismatches as recoverable stale session state", () => {
   assert.equal(
     isRecoverableCodexSessionErrorState("Authorization token path mismatch."),

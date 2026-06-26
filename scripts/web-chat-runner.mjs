@@ -1157,6 +1157,9 @@ function normalizeCodexSessionState(value) {
     bundle_storage_key: normalizeText(
       normalized.bundle_storage_key || normalized.bundleStorageKey,
     ),
+    bundle_owner_thread_id: normalizeThreadId(
+      normalized.bundle_owner_thread_id || normalized.bundleOwnerThreadId,
+    ),
     bundle_revision: parsePositiveInteger(
       normalized.bundle_revision || normalized.bundleRevision,
       0,
@@ -4654,6 +4657,8 @@ async function readWebChatCodexSessionStateViaDirectBundle({
   const storageKey = normalizeText(
     readUrl.storage_key || readUrl.storageKey || codexSessionState.bundle_storage_key,
   );
+  const bundleOwnerThreadId =
+    codexSessionState.bundle_owner_thread_id || normalizeText(threadId);
   if (!downloadUrl) {
     return {
       ok: true,
@@ -4682,7 +4687,7 @@ async function readWebChatCodexSessionStateViaDirectBundle({
   });
   const sessionFileContents = await decodeCodexSessionBundleWithKey({
     storedValue,
-    threadId,
+    threadId: bundleOwnerThreadId,
     storageKey,
     bundleKey,
   });
