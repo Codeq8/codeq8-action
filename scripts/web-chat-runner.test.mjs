@@ -22,6 +22,7 @@ import {
   buildFinalWorkspaceStateCallbackPayload,
   buildCodexPrompt,
   buildCodexRunMetadata,
+  buildPublicActionStartupTimingMetadata,
   buildWorkspacePreparationRunMetadata,
   buildResumePrompt,
   buildWebChatRunMarker,
@@ -4189,6 +4190,40 @@ test("workspace preparation metadata carries hosted fast-start hints", () => {
   });
   assert.equal(metadata.hosted_runner_progress_callback_warning.length, 1_000);
   assert.equal(metadata.hosted_runner_public_action_prepared_workspace, undefined);
+});
+
+test("public action startup timing metadata is bounded to numeric phases", () => {
+  const metadata = buildPublicActionStartupTimingMetadata({
+    appServerTimings: {
+      before_main_turn: 789.6,
+      ignored: -1,
+    },
+    timings: {
+      runtime_manifest_ready: 12.2,
+      prompt_ready: 456.8,
+      skipped: "not-a-number",
+    },
+  });
+
+  assert.equal(
+    typeof metadata.hosted_runner_public_action_process_started_at_ms,
+    "number",
+  );
+  assert.equal(
+    typeof metadata.hosted_runner_public_action_running_callback_ready_ms,
+    "number",
+  );
+  assert.equal(metadata.hosted_runner_public_action_runtime_manifest_ready_ms, 12);
+  assert.equal(metadata.hosted_runner_public_action_prompt_ready_ms, 457);
+  assert.equal(
+    metadata.hosted_runner_public_action_app_server_before_main_turn_ms,
+    790,
+  );
+  assert.equal(metadata.hosted_runner_public_action_skipped_ms, undefined);
+  assert.equal(
+    metadata.hosted_runner_public_action_app_server_ignored_ms,
+    undefined,
+  );
 });
 
 test("persistWorkspaceProgress explicitly pushes remembered branches that are ahead of origin", async () => {

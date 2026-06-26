@@ -37,6 +37,10 @@ import {
   webChatRunnerPromptResponseSchema,
   webChatRunnerRuntimeManifestResponseSchema,
 } from "../lib/web-chat-runner-runtime-contract.mjs";
+const WEB_CHAT_RUNNER_PROCESS_STARTED_AT_MS = Math.max(
+  0,
+  Math.round(globalThis.performance?.timeOrigin || Date.now()),
+);
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
 const DEFAULT_CODEX_MODEL = "gpt-5.5";
 const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
@@ -148,6 +152,48 @@ function normalizeBooleanFlag(value) {
 
 function normalizeBoundedMetadataText(value, maxChars = 1000) {
   return truncate(normalizeText(value), maxChars);
+}
+
+function elapsedSinceWebChatRunnerProcessStarted() {
+  return Math.max(0, Date.now() - WEB_CHAT_RUNNER_PROCESS_STARTED_AT_MS);
+}
+
+function markPublicActionStartupTiming(timings, key) {
+  if (!timings || !key) {
+    return;
+  }
+  timings[key] = elapsedSinceWebChatRunnerProcessStarted();
+}
+
+function buildPublicActionStartupTimingMetadata({
+  appServerTimings = {},
+  timings = {},
+} = {}) {
+  const metadata = {
+    hosted_runner_public_action_process_started_at_ms:
+      WEB_CHAT_RUNNER_PROCESS_STARTED_AT_MS,
+    hosted_runner_public_action_running_callback_ready_ms:
+      elapsedSinceWebChatRunnerProcessStarted(),
+  };
+  for (const [key, value] of Object.entries(timings || {})) {
+    const normalizedKey = normalizeText(key);
+    const numericValue = Number(value);
+    if (!normalizedKey || !Number.isFinite(numericValue) || numericValue < 0) {
+      continue;
+    }
+    metadata[`hosted_runner_public_action_${normalizedKey}_ms`] =
+      Math.round(numericValue);
+  }
+  for (const [key, value] of Object.entries(appServerTimings || {})) {
+    const normalizedKey = normalizeText(key);
+    const numericValue = Number(value);
+    if (!normalizedKey || !Number.isFinite(numericValue) || numericValue < 0) {
+      continue;
+    }
+    metadata[`hosted_runner_public_action_app_server_${normalizedKey}_ms`] =
+      Math.round(numericValue);
+  }
+  return metadata;
 }
 
 function buildWorkspacePreparationRunMetadata({ preparedWorkspace, commandEnv }) {
@@ -8877,6 +8923,10 @@ async function runCodexAppServer({
     });
     let codexGoalAppServerApiSupported = true;
     let controlListener = null;
+    const appServerStartupTimings = {};
+    const markAppServerStartupTiming = (key) => {
+      appServerStartupTimings[key] = Math.max(0, Date.now() - startMs);
+    };
 
     const child = spawn(codexPath, ["app-server", "--listen", "stdio://"], {
       cwd: workspacePath,
@@ -8884,6 +8934,7 @@ async function runCodexAppServer({
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    markAppServerStartupTiming("spawned");
 
     const appendOutput = (target, chunk) => {
       const nextChunk = String(chunk || "");
@@ -9571,6 +9622,7 @@ async function runCodexAppServer({
         },
       });
       sendNotification("initialized", {});
+      markAppServerStartupTiming("initialized");
       const threadResult =
         normalizedMode === "resume"
           ? await sendRequest("thread/resume", {
@@ -9590,10 +9642,15 @@ async function runCodexAppServer({
       if (!appServerThreadId) {
         throw new Error("Codex app-server did not return a thread id.");
       }
+      markAppServerStartupTiming("thread_ready");
       await synchronizeInitialCodexGoal();
+      markAppServerStartupTiming("goal_sync_ready");
       const hiddenThreadTitleResult = await runHiddenThreadTitlePreturn();
+      markAppServerStartupTiming("hidden_title_ready");
       if (typeof beforeMainTurn === "function") {
+        markAppServerStartupTiming("before_main_turn");
         const beforeMainTurnResult = await beforeMainTurn({
+          appServerStartupTimings: { ...appServerStartupTimings },
           hiddenThreadTitleResult,
           mode: normalizedMode,
         });
@@ -10765,6 +10822,8 @@ async function main() {
     runId,
     messageId,
   });
+  const publicActionStartupTimings = {};
+  let latestPublicActionTimingMetadata = {};
   let runtimeManifest;
   try {
     runtimeManifest = await assertWebChatRunnerRuntimeCompatibility({
@@ -10774,6 +10833,7 @@ async function main() {
       threadId,
       runId,
     });
+    markPublicActionStartupTiming(publicActionStartupTimings, "runtime_manifest_ready");
     await reportRunnerDiagnostic({
       event: "runner_runtime_manifest_validated",
       details: {
@@ -10843,6 +10903,7 @@ async function main() {
         adminToken,
         threadId,
       });
+      markPublicActionStartupTiming(publicActionStartupTimings, "thread_loaded");
       const activeWorkspaceRepository =
         normalizeText(thread.workspace_repository) || workspaceRepository;
       const activeThreadTitle = normalizeText(thread.title) || threadTitle;
@@ -10957,6 +11018,10 @@ async function main() {
             "Reused hosted prepared workspace for web chat run",
             `repository=${activeWorkspaceRepository} path=${preparedWorkspace.workspacePath}`,
           );
+          markPublicActionStartupTiming(
+            publicActionStartupTimings,
+            "hosted_prechecked_workspace_ready",
+          );
         } catch (error) {
           log(
             "WARN",
@@ -10991,6 +11056,7 @@ async function main() {
           githubLogin,
           githubWriteToken: workspaceGitToken,
         });
+        markPublicActionStartupTiming(publicActionStartupTimings, "workspace_ready");
       }
       activeBranchContext.write_branch = preparedWorkspace.durableWriteBranch;
       const workspacePersistenceState = await readWorkspacePersistenceState({
@@ -10998,6 +11064,7 @@ async function main() {
         commandEnv,
         branch: preparedWorkspace.effectiveWriteBranch,
       });
+      markPublicActionStartupTiming(publicActionStartupTimings, "workspace_state_ready");
       const workspacePreparationRunMetadata =
         buildWorkspacePreparationRunMetadata({
           preparedWorkspace,
@@ -11016,6 +11083,7 @@ async function main() {
         commandEnv: codexCommandEnv,
         runtimeHomePath: attemptRunRuntime.homePath,
       });
+      markPublicActionStartupTiming(publicActionStartupTimings, "github_cli_ready");
       if (preparedGitHubCli.available) {
         log(
           "Prepared gh auth for web chat run",
@@ -11035,6 +11103,7 @@ async function main() {
         threadId,
         commandEnv: codexCommandEnv,
       });
+      markPublicActionStartupTiming(publicActionStartupTimings, "attachments_ready");
 
       try {
         log(
@@ -11053,11 +11122,13 @@ async function main() {
               "Codex is not logged in on this self-hosted runner.",
           );
         }
+        markPublicActionStartupTiming(publicActionStartupTimings, "codex_auth_validated");
 
         preparedCodeq8Cli = await prepareCodeq8Cli({
           commandEnv: codexCommandEnv,
           runtimeHomePath: attemptRunRuntime.homePath,
         });
+        markPublicActionStartupTiming(publicActionStartupTimings, "codeq8_cli_ready");
         if (preparedCodeq8Cli.available) {
           log(
             "Prepared codeq8 CLI for web chat run",
@@ -11089,6 +11160,7 @@ async function main() {
             thread,
             reportRunnerDiagnostic,
           });
+          markPublicActionStartupTiming(publicActionStartupTimings, "codex_session_loaded");
           let loadedCodexSession = loadedCodexSessionResult.loadedCodexSession;
           codexSessionState = loadedCodexSessionResult.codexSessionState;
           persistedCodexSessionState = loadedCodexSessionResult.persistedCodexSessionState;
@@ -11203,6 +11275,7 @@ async function main() {
               sessionFileRelativePath: codexSessionState.session_file_relative_path,
               sessionFileContents: loadedCodexSession.sessionFileContents,
             });
+            markPublicActionStartupTiming(publicActionStartupTimings, "codex_session_restored");
             await reportRunnerDiagnostic({
               event: "runner_session_restore_finished",
               mode: "resume",
@@ -11232,6 +11305,7 @@ async function main() {
             });
             prompt = promptPayload.prompt;
             codexGoalState = promptPayload.codexGoalState;
+            markPublicActionStartupTiming(publicActionStartupTimings, "prompt_ready");
           } else {
             executionMode = "fresh";
             const promptPayload = await buildCodexPromptPayload({
@@ -11258,6 +11332,7 @@ async function main() {
               continuityWarning: nonFatalCodexSessionLoadWarning,
             });
             codexGoalState = promptPayload.codexGoalState;
+            markPublicActionStartupTiming(publicActionStartupTimings, "prompt_ready");
           }
         } catch (sessionError) {
           const sessionMessage = extractErrorMessage(sessionError);
@@ -11309,10 +11384,14 @@ async function main() {
           },
         });
 
-        const postVisibleRunningState = async () => {
+        const postVisibleRunningState = async ({ appServerStartupTimings = {} } = {}) => {
           if (!startedAt) {
             startedAt = Date.now();
           }
+          latestPublicActionTimingMetadata = buildPublicActionStartupTimingMetadata({
+            appServerTimings: appServerStartupTimings,
+            timings: publicActionStartupTimings,
+          });
           try {
             const runningCallbackPayload = await postRunCallback({
               publicBaseUrl,
@@ -11335,6 +11414,7 @@ async function main() {
                   mode: executionMode,
                   extra: {
                     ...workspacePreparationRunMetadata,
+                    ...latestPublicActionTimingMetadata,
                     bundle_revision: persistedCodexSessionState.bundle_revision || 0,
                     thread_target_restart_count: threadTargetRestartCount,
                   },
@@ -11552,6 +11632,7 @@ async function main() {
                   appServerControlRequests: latestAppServerControlRequests,
                   extra: {
                     ...workspacePreparationRunMetadata,
+                    ...latestPublicActionTimingMetadata,
                     thread_target_restart_count: threadTargetRestartCount,
                     thread_target_restart_limit_reached: true,
                     thread_target: nextTargetDescription,
@@ -11633,6 +11714,7 @@ async function main() {
                 mode: "resume",
                 extra: {
                   ...workspacePreparationRunMetadata,
+                  ...latestPublicActionTimingMetadata,
                   thread_target_restart: true,
                   thread_target_restart_count: threadTargetRestartCount,
                   thread_target: nextTargetDescription,
@@ -11916,6 +11998,7 @@ async function main() {
               appServerControlRequests: latestAppServerControlRequests,
               extra: {
                 ...workspacePreparationRunMetadata,
+                ...latestPublicActionTimingMetadata,
                 exit_code: execution.exitCode,
                 signal: execution.signal || "",
                 timed_out: execution.timedOut,
@@ -12059,6 +12142,13 @@ async function main() {
             appServerControlRequests: latestAppServerControlRequests,
             extra: {
               ...workspacePreparationRunMetadata,
+              ...(
+                Object.keys(latestPublicActionTimingMetadata).length > 0
+                  ? latestPublicActionTimingMetadata
+                  : buildPublicActionStartupTimingMetadata({
+                      timings: publicActionStartupTimings,
+                    })
+              ),
               codex_session_id: persistedCodexSessionState.session_id,
               codex_session_bundle_revision: persistedCodexSessionState.bundle_revision,
               thread_target_restart_count: threadTargetRestartCount,
@@ -12098,6 +12188,7 @@ export {
   appendWebChatRunMarkerToPrompt,
   buildCodexPrompt,
   buildCodexRunMetadata,
+  buildPublicActionStartupTimingMetadata,
   buildWorkspacePreparationRunMetadata,
   buildGitHubActionsControlPlaneUrl,
   buildWebChatRunMarker,
