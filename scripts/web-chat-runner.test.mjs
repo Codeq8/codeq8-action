@@ -46,6 +46,7 @@ import {
   postWebChatRunnerDiagnostic,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
+  prepareHostedPrecheckedWorkspace,
   prepareGitHubCliAuth,
   prepareWebChatCodexSessionUpload,
   readFirebaseStorageAttachment,
@@ -55,6 +56,7 @@ import {
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
   resolveCodexPath,
+  resolveHostedPrecheckedWorkspacePlan,
   runCodex,
   sessionContainsWebChatRunMarker,
   normalizeHiddenThreadTitle,
@@ -3540,6 +3542,10 @@ function git(workspacePath, args) {
   execFileSync("git", args, { cwd: workspacePath, env: process.env });
 }
 
+function gitWithEnv(workspacePath, args, env) {
+  execFileSync("git", args, { cwd: workspacePath, env });
+}
+
 function runCredentialHelperGet({ helperPath, input, env }) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [helperPath, "get"], {
@@ -3931,6 +3937,191 @@ test("prepareGitHubCliAuth refreshes gh tokens before each invocation", async ()
   assert.match(helperCallLog, /^print-token$/m);
   assert.match(helperCallLog, /^print-token Codeq8\/status$/m);
   assert.match(helperCallLog, /^print-token Codeq8\/codeq8-action$/m);
+});
+
+test("hosted prepared workspace plan requires runner pool, matching repo/path, and token", () => {
+  const baseArgs = {
+    workspacePath: "/tmp/codeq8-hosted-workspace",
+    workspaceRepository: "Codeq8/test",
+    commandEnv: {
+      CODEQ8_EXECUTION_BACKEND: "runner_pool",
+      CODEQ8_HOSTED_PREPARED_WORKSPACE: "1",
+      CODEQ8_HOSTED_PREPARED_WORKSPACE_PATH: "/tmp/codeq8-hosted-workspace",
+      CODEQ8_HOSTED_PREPARED_WORKSPACE_REPOSITORY: "Codeq8/test",
+      CODEX_GITHUB_WRITE_TOKEN: "prepared-token",
+    },
+  };
+
+  assert.deepEqual(resolveHostedPrecheckedWorkspacePlan(baseArgs), {
+    enabled: true,
+    reason: "",
+    gitToken: "prepared-token",
+  });
+  assert.equal(
+    resolveHostedPrecheckedWorkspacePlan({
+      ...baseArgs,
+      commandEnv: {
+        ...baseArgs.commandEnv,
+        CODEQ8_EXECUTION_BACKEND: "github_actions",
+      },
+    }).reason,
+    "not_runner_pool",
+  );
+  assert.equal(
+    resolveHostedPrecheckedWorkspacePlan({
+      ...baseArgs,
+      commandEnv: {
+        ...baseArgs.commandEnv,
+        CODEQ8_HOSTED_PREPARED_WORKSPACE_REPOSITORY: "Codeq8/other",
+      },
+    }).reason,
+    "repository_mismatch",
+  );
+  assert.equal(
+    resolveHostedPrecheckedWorkspacePlan({
+      ...baseArgs,
+      commandEnv: {
+        ...baseArgs.commandEnv,
+        CODEQ8_HOSTED_PREPARED_WORKSPACE_PATH: "/tmp/other-workspace",
+      },
+    }).reason,
+    "path_mismatch",
+  );
+  assert.equal(
+    resolveHostedPrecheckedWorkspacePlan({
+      ...baseArgs,
+      commandEnv: {
+        ...baseArgs.commandEnv,
+        CODEX_GITHUB_WRITE_TOKEN: "",
+        CODEQ8_GITHUB_REPOSITORY_TOKEN: "",
+      },
+    }).reason,
+    "missing_git_token",
+  );
+});
+
+test("prepareHostedPrecheckedWorkspace rejects fork direct-push reuse", async () => {
+  await assert.rejects(
+    () =>
+      prepareHostedPrecheckedWorkspace({
+        workspacePath: "/tmp/codeq8-hosted-workspace",
+        workspaceRepository: "Codeq8/test",
+        sourceType: "pull_request",
+        branchContext: {
+          default_branch: "main",
+          protected_branches: ["main"],
+          production_branch: "production",
+          context_branch: "feature",
+          write_mode: "direct_push",
+          write_branch: "feature",
+          base_branch: "main",
+          pull_request_number: "123",
+          pull_request_head_branch: "feature",
+        },
+        pullRequestHeadRepository: "external/test-fork",
+        commandEnv: {
+          CODE_PUBLIC_BASE_URL: "https://codeq8.example.com",
+          CODEQ8_HOSTED_PREPARED_WORKSPACE_REPOSITORY: "Codeq8/test",
+        },
+        githubLogin: "aalzanki",
+        githubWriteToken: "prepared-token",
+      }),
+    /fork direct-push/,
+  );
+});
+
+test("prepareHostedPrecheckedWorkspace reuses a VM-prepared checkout without cloning", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-hosted-prechecked-"));
+  const remotePath = path.join(tempRoot, "remote.git");
+  const seedPath = path.join(tempRoot, "seed");
+  const workspacePath = path.join(tempRoot, "workspace");
+  const configPath = path.join(tempRoot, "gitconfig");
+  const remoteUrl = "https://github.com/Codeq8/test.git";
+  const commandEnv = {
+    ...process.env,
+    CODE_PUBLIC_BASE_URL: "https://codeq8.example.com",
+    CODEQ8_EXECUTION_BACKEND: "runner_pool",
+    CODEQ8_HOSTED_PREPARED_WORKSPACE: "1",
+    CODEQ8_HOSTED_PREPARED_WORKSPACE_PATH: workspacePath,
+    CODEQ8_HOSTED_PREPARED_WORKSPACE_REPOSITORY: "Codeq8/test",
+    CODEX_GITHUB_WRITE_TOKEN: "prepared-token",
+    GIT_CONFIG_GLOBAL: configPath,
+    GIT_TERMINAL_PROMPT: "0",
+  };
+
+  try {
+    git(tempRoot, ["init", "--bare", remotePath]);
+    await fs.mkdir(seedPath, { recursive: true });
+    git(seedPath, ["init"]);
+    git(seedPath, ["checkout", "-b", "main"]);
+    git(seedPath, ["config", "user.name", "Codeq8 Test"]);
+    git(seedPath, ["config", "user.email", "codeq8@example.com"]);
+    await fs.writeFile(path.join(seedPath, "README.md"), "seed\n");
+    git(seedPath, ["add", "README.md"]);
+    git(seedPath, ["commit", "-m", "Initial commit"]);
+    git(seedPath, ["remote", "add", "origin", remotePath]);
+    git(seedPath, ["push", "-u", "origin", "main"]);
+
+    gitWithEnv(tempRoot, [
+      "config",
+      "--file",
+      configPath,
+      `url.${remotePath}.insteadOf`,
+      remoteUrl,
+    ], commandEnv);
+    gitWithEnv(tempRoot, ["clone", remoteUrl, workspacePath], commandEnv);
+
+    const prepared = await prepareHostedPrecheckedWorkspace({
+      workspacePath,
+      workspaceRepository: "Codeq8/test",
+      sourceType: "default_branch",
+      branchContext: {
+        default_branch: "main",
+        protected_branches: ["main"],
+        production_branch: "production",
+        context_branch: "main",
+        write_mode: "branch_and_pr",
+        write_branch: "codeq8/hosted-fast-start",
+        base_branch: "main",
+      },
+      pullRequestHeadRepository: "",
+      commandEnv,
+      githubLogin: "aalzanki",
+      githubWriteToken: "prepared-token",
+    });
+
+    assert.equal(prepared.workspacePath, workspacePath);
+    assert.equal(prepared.cloneRepository, "Codeq8/test");
+    assert.equal(prepared.effectiveWriteBranch, "codeq8/hosted-fast-start");
+    assert.equal(prepared.durableWriteBranch, "codeq8/hosted-fast-start");
+    assert.equal(prepared.hostedPrepared, true);
+    assert.equal(
+      execFileSync("git", ["branch", "--show-current"], {
+        cwd: workspacePath,
+        env: commandEnv,
+        encoding: "utf8",
+      }).trim(),
+      "codeq8/hosted-fast-start",
+    );
+    assert.equal(
+      execFileSync("git", ["config", "--local", "--get", "remote.origin.url"], {
+        cwd: workspacePath,
+        env: commandEnv,
+        encoding: "utf8",
+      }).trim(),
+      remoteUrl,
+    );
+    assert.match(
+      execFileSync("git", ["config", "--local", "--get-all", "credential.helper"], {
+        cwd: workspacePath,
+        env: commandEnv,
+        encoding: "utf8",
+      }),
+      /codeq8-github-token-helper\.mjs/,
+    );
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test("persistWorkspaceProgress explicitly pushes remembered branches that are ahead of origin", async () => {

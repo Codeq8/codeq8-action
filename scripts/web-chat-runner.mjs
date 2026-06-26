@@ -138,6 +138,14 @@ function normalizeText(value) {
   return String(value || "").trim();
 }
 
+function normalizeBooleanFlag(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = normalizeText(value).toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
 
 function extractErrorMessage(value, fallback = "") {
   const normalizedFallback = normalizeText(fallback);
@@ -2855,6 +2863,29 @@ function buildGithubCloneUrl(repository, token) {
   return `https://x-access-token:${encodedToken}@github.com/${normalizedRepository}.git`;
 }
 
+function normalizeGitHubRemoteRepository(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return "";
+  }
+  let candidate = normalized;
+  const sshMatch = /^git@github\.com:([^?#]+)$/i.exec(candidate);
+  if (sshMatch) {
+    candidate = sshMatch[1];
+  } else {
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.hostname.toLowerCase() !== "github.com") {
+        return "";
+      }
+      candidate = parsed.pathname;
+    } catch {
+      return normalizeRepository(candidate.replace(/^\/+/, "").replace(/\.git$/i, ""));
+    }
+  }
+  return normalizeRepository(candidate.replace(/^\/+/, "").replace(/\.git$/i, ""));
+}
+
 function assertTokenlessWorkspacePushRemoteUrl(remoteUrl) {
   const normalizedRemoteUrl = normalizeText(remoteUrl);
   if (!normalizedRemoteUrl) {
@@ -3744,6 +3775,296 @@ async function ensureWorkspaceRepository({
   }
 
   return normalizedWorkspacePath;
+}
+
+async function assertPreparedHostedWorkspace({
+  workspacePath,
+  workspaceRepository,
+  expectedPreparedRepository,
+  commandEnv,
+}) {
+  const normalizedWorkspacePath = path.resolve(workspacePath);
+  const expectedRepository =
+    normalizeRepository(expectedPreparedRepository) || normalizeRepository(workspaceRepository);
+  if (!expectedRepository) {
+    throw new Error("Prepared hosted workspace is missing an expected repository.");
+  }
+  if (!(await isDirectory(normalizedWorkspacePath))) {
+    throw new Error(`Prepared hosted workspace path is not a directory: ${normalizedWorkspacePath}`);
+  }
+  const realWorkspacePath = await fs.realpath(normalizedWorkspacePath);
+  if (!(await pathExists(path.join(normalizedWorkspacePath, ".git")))) {
+    throw new Error(`Prepared hosted workspace path is not a git repository: ${normalizedWorkspacePath}`);
+  }
+  const gitTopLevel = await runProcessCapture("git", ["rev-parse", "--show-toplevel"], {
+    cwd: normalizedWorkspacePath,
+    env: commandEnv,
+  });
+  if (!gitTopLevel.ok) {
+    throw new Error("Unable to validate prepared hosted workspace git root.");
+  }
+  const resolvedTopLevel = path.resolve(normalizeText(gitTopLevel.stdout));
+  const realTopLevel = await fs.realpath(resolvedTopLevel);
+  if (realTopLevel !== realWorkspacePath) {
+    throw new Error(
+      `Prepared hosted workspace git root mismatch: expected ${normalizedWorkspacePath}, got ${resolvedTopLevel}.`,
+    );
+  }
+  const remoteOrigin = await runProcessCapture("git", ["config", "--get", "remote.origin.url"], {
+    cwd: normalizedWorkspacePath,
+    env: commandEnv,
+  });
+  if (!remoteOrigin.ok) {
+    throw new Error("Prepared hosted workspace is missing origin remote.");
+  }
+  const remoteRepository = normalizeGitHubRemoteRepository(remoteOrigin.stdout);
+  if (
+    !remoteRepository ||
+    remoteRepository.toLowerCase() !== expectedRepository.toLowerCase()
+  ) {
+    throw new Error(
+      `Prepared hosted workspace origin mismatch: expected ${expectedRepository}, got ${remoteRepository || "<unknown>"}.`,
+    );
+  }
+  return normalizedWorkspacePath;
+}
+
+async function ensurePreparedHostedRemoteBranchRef({
+  workspacePath,
+  commandEnv,
+  branch,
+}) {
+  const normalizedBranch = normalizeBranchName(branch);
+  if (!normalizedBranch) {
+    return;
+  }
+  const remoteRef = `refs/remotes/origin/${normalizedBranch}`;
+  const existing = await runProcessCapture(
+    "git",
+    ["show-ref", "--verify", "--quiet", remoteRef],
+    {
+      cwd: workspacePath,
+      env: commandEnv,
+    },
+  );
+  if (existing.ok) {
+    return;
+  }
+  const headCommit = await runProcessCapture("git", ["rev-parse", "--verify", "HEAD"], {
+    cwd: workspacePath,
+    env: commandEnv,
+  });
+  if (!headCommit.ok) {
+    throw new Error(
+      `Prepared hosted workspace cannot seed origin/${normalizedBranch}; HEAD is unavailable.`,
+    );
+  }
+  const updated = await runProcessCapture(
+    "git",
+    ["update-ref", remoteRef, normalizeText(headCommit.stdout)],
+    {
+      cwd: workspacePath,
+      env: commandEnv,
+    },
+  );
+  if (!updated.ok) {
+    throw new Error(`Unable to seed prepared hosted workspace ref origin/${normalizedBranch}.`);
+  }
+}
+
+async function prepareHostedPrecheckedWorkspace({
+  workspacePath,
+  workspaceRepository,
+  sourceType,
+  branchContext,
+  pullRequestHeadRepository,
+  commandEnv,
+  githubLogin,
+  githubWriteToken,
+}) {
+  const hasLinkedPullRequest =
+    parsePositiveInteger(branchContext.pull_request_number, 0) > 0 &&
+    normalizeBranchName(branchContext.pull_request_head_branch);
+  const isForkDirectPush =
+    normalizeText(branchContext.write_mode) === "direct_push" &&
+    hasLinkedPullRequest &&
+    normalizeText(pullRequestHeadRepository) &&
+    normalizeText(pullRequestHeadRepository).toLowerCase() !==
+      normalizeText(workspaceRepository).toLowerCase();
+
+  // Cost boundary: hosted runner prepared-workspace reuse avoids a second
+  // token fetch and full ref refresh only when the private VM already checked
+  // out the same repository for this runner_pool run. Fork PR heads need the
+  // standard prepareWorkspace path so the correct repository is fetched.
+  if (isForkDirectPush) {
+    throw new Error("Prepared hosted workspace cannot be reused for fork direct-push runs.");
+  }
+
+  const cloneRepository = workspaceRepository;
+  const preferredGitToken = normalizeText(githubWriteToken);
+  if (!preferredGitToken) {
+    throw new Error(
+      "A GitHub write token is required for prepared hosted workspace access.",
+    );
+  }
+
+  const preparedWorkspacePath = await assertPreparedHostedWorkspace({
+    workspacePath,
+    workspaceRepository: cloneRepository,
+    expectedPreparedRepository:
+      commandEnv.CODEQ8_HOSTED_PREPARED_WORKSPACE_REPOSITORY,
+    commandEnv,
+  });
+
+  await applyWorkspaceGitIdentity({
+    workspacePath: preparedWorkspacePath,
+    commandEnv,
+    githubLogin,
+  });
+
+  const remoteUrl = buildGithubCloneUrl(cloneRepository, "");
+  if (remoteUrl) {
+    await configureWorkspaceGitCredentialHelper({
+      workspacePath: preparedWorkspacePath,
+      commandEnv,
+      publicBaseUrl: normalizeCodePublicBaseUrl(commandEnv.CODE_PUBLIC_BASE_URL),
+      workspaceRepository: cloneRepository,
+    });
+    await runProcessCapture("git", ["remote", "set-url", "origin", remoteUrl], {
+      cwd: preparedWorkspacePath,
+      env: commandEnv,
+    });
+  }
+
+  const protectedBranches = parseBranchList(branchContext.protected_branches || []);
+  const rememberedWriteBranch = isProtectedBranch(normalizeBranchName(branchContext.write_branch), [
+    ...protectedBranches,
+    branchContext.base_branch,
+    branchContext.default_branch,
+  ])
+    ? ""
+    : normalizeBranchName(branchContext.write_branch);
+  const effectiveWriteBranch = resolveEffectiveWriteBranch({
+    sourceType,
+    branchContext,
+  });
+  const baseBranch = resolveReviewBaseBranch({
+    sourceType,
+    branchContext,
+  });
+  if (!effectiveWriteBranch) {
+    throw new Error("Unable to resolve working branch for prepared hosted workspace.");
+  }
+
+  if (
+    branchContext.write_mode === "direct_push" &&
+    isProtectedBranch(effectiveWriteBranch, protectedBranches)
+  ) {
+    throw new Error(`Refusing to direct-push protected branch: ${effectiveWriteBranch}.`);
+  }
+
+  const originBranch =
+    normalizeBranchName(branchContext.context_branch) ||
+    normalizeBranchName(branchContext.base_branch) ||
+    normalizeBranchName(branchContext.default_branch);
+  if (!originBranch) {
+    throw new Error("Unable to resolve checkout base branch for prepared hosted workspace.");
+  }
+
+  await ensurePreparedHostedRemoteBranchRef({
+    workspacePath: preparedWorkspacePath,
+    commandEnv,
+    branch: originBranch,
+  });
+
+  const checkoutResult = await checkoutPreparedWorkspaceBranch({
+    workspacePath: preparedWorkspacePath,
+    commandEnv,
+    effectiveWriteBranch,
+    originBranch,
+  });
+
+  if (!checkoutResult.ok) {
+    throw new Error(
+      checkoutResult.error || `Unable to checkout working branch ${effectiveWriteBranch}.`,
+    );
+  }
+
+  await configureWorkspacePushPolicy({
+    workspacePath: preparedWorkspacePath,
+    commandEnv,
+    remoteUrl,
+    blockedBranches: Array.from(
+      new Set([
+        ...protectedBranches,
+        branchContext.base_branch,
+        branchContext.default_branch,
+        branchContext.production_branch,
+      ]),
+    ),
+  });
+
+  const codeq8Config = await loadWorkspaceCodeq8Config(preparedWorkspacePath);
+  const bootstrapCommands = readBootstrapInstallCommands(codeq8Config);
+  if (bootstrapCommands.length > 0) {
+    await executeWorkspaceBootstrapCommands({
+      workspacePath: preparedWorkspacePath,
+      commands: bootstrapCommands,
+      commandEnv,
+      stateDirName: "codeq8-web-chat-bootstrap",
+      log,
+    });
+  }
+
+  return {
+    workspacePath: preparedWorkspacePath,
+    cloneRepository,
+    effectiveWriteBranch,
+    durableWriteBranch:
+      normalizeText(branchContext.write_mode) === "direct_push"
+        ? effectiveWriteBranch
+        : rememberedWriteBranch,
+    protectedBranches,
+    baseBranch,
+    hostedPrepared: true,
+  };
+}
+
+function resolveHostedPrecheckedWorkspacePlan({
+  commandEnv,
+  workspacePath,
+  workspaceRepository,
+}) {
+  if (normalizeRunExecutionBackend(commandEnv.CODEQ8_EXECUTION_BACKEND) !== "runner_pool") {
+    return { enabled: false, reason: "not_runner_pool", gitToken: "" };
+  }
+  if (!normalizeBooleanFlag(commandEnv.CODEQ8_HOSTED_PREPARED_WORKSPACE)) {
+    return { enabled: false, reason: "not_requested", gitToken: "" };
+  }
+  const expectedRepository = normalizeRepository(
+    commandEnv.CODEQ8_HOSTED_PREPARED_WORKSPACE_REPOSITORY,
+  );
+  const normalizedWorkspaceRepository = normalizeRepository(workspaceRepository);
+  if (
+    !expectedRepository ||
+    !normalizedWorkspaceRepository ||
+    expectedRepository.toLowerCase() !== normalizedWorkspaceRepository.toLowerCase()
+  ) {
+    return { enabled: false, reason: "repository_mismatch", gitToken: "" };
+  }
+  const expectedPath = path.resolve(
+    normalizeText(commandEnv.CODEQ8_HOSTED_PREPARED_WORKSPACE_PATH) || workspacePath,
+  );
+  if (expectedPath !== path.resolve(workspacePath)) {
+    return { enabled: false, reason: "path_mismatch", gitToken: "" };
+  }
+  const gitToken = normalizeText(
+    commandEnv.CODEX_GITHUB_WRITE_TOKEN || commandEnv.CODEQ8_GITHUB_REPOSITORY_TOKEN,
+  );
+  if (!gitToken) {
+    return { enabled: false, reason: "missing_git_token", gitToken: "" };
+  }
+  return { enabled: true, reason: "", gitToken };
 }
 
 function parseBranchContextFromEnv() {
@@ -10573,40 +10894,103 @@ async function main() {
         readPullRequestHeadRepository(thread.github_context) ||
         fallbackPullRequestHeadRepository;
 
-      const requestedWorkspaceGitToken = await applyWorkspaceGitToken({
-        publicBaseUrl,
-        adminToken,
-        workspaceRepository: activeWorkspaceRepository,
+      const hostedPrecheckedWorkspacePlan = resolveHostedPrecheckedWorkspacePlan({
         commandEnv,
+        workspacePath,
+        workspaceRepository: activeWorkspaceRepository,
       });
-      let workspaceGitToken =
-        requireWebChatGitHubWriteToken(
+      let workspaceGitToken = "";
+      let workspaceGitTokenSource = "";
+      if (hostedPrecheckedWorkspacePlan.enabled) {
+        commandEnv.CODEX_GITHUB_WRITE_TOKEN = hostedPrecheckedWorkspacePlan.gitToken;
+        commandEnv.CODEX_GITHUB_WRITE_TOKEN_SOURCE =
+          normalizeText(commandEnv.CODEX_GITHUB_WRITE_TOKEN_SOURCE) ||
+          "hosted_entrypoint";
+        commandEnv.CODEX_GITHUB_WRITE_TOKEN_ACCESS =
+          normalizeText(commandEnv.CODEX_GITHUB_WRITE_TOKEN_ACCESS) || "write";
+        workspaceGitToken = hostedPrecheckedWorkspacePlan.gitToken;
+        workspaceGitTokenSource = commandEnv.CODEX_GITHUB_WRITE_TOKEN_SOURCE;
+      } else {
+        const requestedWorkspaceGitToken = await applyWorkspaceGitToken({
+          publicBaseUrl,
+          adminToken,
+          workspaceRepository: activeWorkspaceRepository,
+          commandEnv,
+        });
+        workspaceGitToken = requireWebChatGitHubWriteToken(
           commandEnv,
           "Web chat runner repository writes",
         );
-      let workspaceGitTokenSource =
-        normalizeText(requestedWorkspaceGitToken.tokenSource) || "github_app_installation";
+        workspaceGitTokenSource =
+          normalizeText(requestedWorkspaceGitToken.tokenSource) || "github_app_installation";
+      }
       log(
         "Prepared GitHub write credential for web chat run",
-        `repository=${activeWorkspaceRepository} source=${workspaceGitTokenSource} access=${requestedWorkspaceGitToken.repositoryAccess || "write"}`,
+        `repository=${activeWorkspaceRepository} source=${workspaceGitTokenSource} access=${commandEnv.CODEX_GITHUB_WRITE_TOKEN_ACCESS || "write"}`,
       );
 
-      preparedWorkspace = await prepareWorkspace({
-        workspacePath,
-        workspaceRepository: activeWorkspaceRepository,
-        sourceType: activeSourceType,
-        branchContext: activeBranchContext,
-        pullRequestHeadRepository,
-        commandEnv,
-        githubLogin,
-        githubWriteToken: workspaceGitToken,
-      });
+      if (hostedPrecheckedWorkspacePlan.enabled) {
+        try {
+          preparedWorkspace = await prepareHostedPrecheckedWorkspace({
+            workspacePath,
+            workspaceRepository: activeWorkspaceRepository,
+            sourceType: activeSourceType,
+            branchContext: activeBranchContext,
+            pullRequestHeadRepository,
+            commandEnv,
+            githubLogin,
+            githubWriteToken: workspaceGitToken,
+          });
+          log(
+            "Reused hosted prepared workspace for web chat run",
+            `repository=${activeWorkspaceRepository} path=${preparedWorkspace.workspacePath}`,
+          );
+        } catch (error) {
+          log(
+            "WARN",
+            `Hosted prepared workspace was not reusable; falling back to standard workspace preparation | reason=${truncate(extractErrorMessage(error), 500)}`,
+          );
+          commandEnv.CODEX_GITHUB_WRITE_TOKEN = "";
+          commandEnv.CODEX_GITHUB_WRITE_TOKEN_SOURCE = "";
+          commandEnv.CODEX_GITHUB_WRITE_TOKEN_ACCESS = "";
+          const requestedWorkspaceGitToken = await applyWorkspaceGitToken({
+            publicBaseUrl,
+            adminToken,
+            workspaceRepository: activeWorkspaceRepository,
+            commandEnv,
+          });
+          workspaceGitToken = requireWebChatGitHubWriteToken(
+            commandEnv,
+            "Web chat runner repository writes",
+          );
+          workspaceGitTokenSource =
+            normalizeText(requestedWorkspaceGitToken.tokenSource) ||
+            "github_app_installation";
+        }
+      }
+      if (!preparedWorkspace) {
+        preparedWorkspace = await prepareWorkspace({
+          workspacePath,
+          workspaceRepository: activeWorkspaceRepository,
+          sourceType: activeSourceType,
+          branchContext: activeBranchContext,
+          pullRequestHeadRepository,
+          commandEnv,
+          githubLogin,
+          githubWriteToken: workspaceGitToken,
+        });
+      }
       activeBranchContext.write_branch = preparedWorkspace.durableWriteBranch;
       const workspacePersistenceState = await readWorkspacePersistenceState({
         workspacePath: preparedWorkspace.workspacePath,
         commandEnv,
         branch: preparedWorkspace.effectiveWriteBranch,
       });
+      const workspacePreparationRunMetadata = preparedWorkspace.hostedPrepared
+        ? {
+            hosted_runner_public_action_prepared_workspace: true,
+          }
+        : {};
 
       const attemptRunRuntime = await createWebChatRunRuntime(threadId);
       runRuntime = attemptRunRuntime;
@@ -10938,6 +11322,7 @@ async function main() {
                   model: codexModel,
                   mode: executionMode,
                   extra: {
+                    ...workspacePreparationRunMetadata,
                     bundle_revision: persistedCodexSessionState.bundle_revision || 0,
                     thread_target_restart_count: threadTargetRestartCount,
                   },
@@ -11154,6 +11539,7 @@ async function main() {
                   mode: executionMode,
                   appServerControlRequests: latestAppServerControlRequests,
                   extra: {
+                    ...workspacePreparationRunMetadata,
                     thread_target_restart_count: threadTargetRestartCount,
                     thread_target_restart_limit_reached: true,
                     thread_target: nextTargetDescription,
@@ -11234,6 +11620,7 @@ async function main() {
                 model: codexModel,
                 mode: "resume",
                 extra: {
+                  ...workspacePreparationRunMetadata,
                   thread_target_restart: true,
                   thread_target_restart_count: threadTargetRestartCount,
                   thread_target: nextTargetDescription,
@@ -11516,6 +11903,7 @@ async function main() {
               mode: executionMode,
               appServerControlRequests: latestAppServerControlRequests,
               extra: {
+                ...workspacePreparationRunMetadata,
                 exit_code: execution.exitCode,
                 signal: execution.signal || "",
                 timed_out: execution.timedOut,
@@ -11658,6 +12046,7 @@ async function main() {
             mode: executionMode,
             appServerControlRequests: latestAppServerControlRequests,
             extra: {
+              ...workspacePreparationRunMetadata,
               codex_session_id: persistedCodexSessionState.session_id,
               codex_session_bundle_revision: persistedCodexSessionState.bundle_revision,
               thread_target_restart_count: threadTargetRestartCount,
@@ -11726,6 +12115,7 @@ export {
   parseCodexSessionBundleContents,
   isRetryableCodexSessionPersistenceError,
   prepareWebChatCodexSessionUpload,
+  prepareHostedPrecheckedWorkspace,
   persistCapturedCodexSessionBundleWithRetries,
   persistWorkspaceProgress,
   postRunCallback,
@@ -11760,6 +12150,7 @@ export {
   resolvePreferredGitIdentity,
   resolveGitHubCliPath,
   resolveReviewBaseBranch,
+  resolveHostedPrecheckedWorkspacePlan,
   resolveRunControlPlaneContext,
   resolveWebChatGitHubWriteToken,
   resolveWebChatRunnerAdminToken,
