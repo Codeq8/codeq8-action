@@ -3984,6 +3984,21 @@ test("hosted prepared workspace plan requires runner pool, matching repo/path, a
     reason: "",
     gitToken: "prepared-token",
   });
+  assert.deepEqual(
+    resolveHostedPrecheckedWorkspacePlan({
+      ...baseArgs,
+      commandEnv: {
+        ...baseArgs.commandEnv,
+        CODEX_GITHUB_WRITE_TOKEN: "",
+        CODEQ8_GITHUB_REPOSITORY_TOKEN: "compatibility-token",
+      },
+    }),
+    {
+      enabled: false,
+      reason: "missing_hosted_git_token",
+      gitToken: "",
+    },
+  );
   assert.equal(
     resolveHostedPrecheckedWorkspacePlan({
       ...baseArgs,
@@ -4023,7 +4038,7 @@ test("hosted prepared workspace plan requires runner pool, matching repo/path, a
         CODEQ8_GITHUB_REPOSITORY_TOKEN: "",
       },
     }).reason,
-    "missing_git_token",
+    "missing_hosted_git_token",
   );
 });
 
@@ -4919,7 +4934,7 @@ test("workspace git credential helper requests linked repository tokens by path"
       ].join("\n"),
       env: {
         ...process.env,
-        CODE_WEB_CHAT_RUN_TOKEN: "scoped-run-token",
+        CODE_WEB_CHAT_RUN_TOKEN: "scoped.run.token",
       },
     });
 
@@ -4930,10 +4945,67 @@ test("workspace git credential helper requests linked repository tokens by path"
     );
     assert.equal(result.stderr, "");
     assert.equal(requests.length, 1);
-    assert.equal(requests[0]?.authorization, "Bearer scoped-run-token");
+    assert.equal(requests[0]?.authorization, "Bearer scoped.run.token");
     assert.deepEqual(requests[0]?.body, {
       workspace_repository: "miniExtensions/webapp",
     });
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("workspace git credential helper rejects malformed run tokens before refresh", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-credential-helper-"));
+  let requestCount = 0;
+  const server = createServer((request, response) => {
+    requestCount += 1;
+    response.writeHead(500, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ ok: false, error: "unexpected request" }));
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  t.after(() => {
+    server.close();
+  });
+
+  try {
+    git(workspacePath, ["init"]);
+    const address = server.address();
+    assert.equal(typeof address, "object");
+    assert.ok(address);
+    const helperPath = await configureWorkspaceGitCredentialHelper({
+      workspacePath,
+      commandEnv: process.env,
+      publicBaseUrl: `http://127.0.0.1:${address.port}`,
+      workspaceRepository: "Codeq8/Codeq8",
+    });
+
+    const result = await runCredentialHelperGet({
+      helperPath,
+      input: [
+        "protocol=https",
+        "host=github.com",
+        "path=Codeq8/status.git",
+        "",
+      ].join("\n"),
+      env: {
+        ...process.env,
+        CODE_WEB_CHAT_RUN_TOKEN: "not-a-run-token",
+      },
+    });
+
+    assert.notEqual(result.code, 0);
+    assert.equal(result.stdout, "");
+    assert.match(
+      result.stderr,
+      /A scoped CODE_WEB_CHAT_RUN_TOKEN is required to mint a GitHub repository token/,
+    );
+    assert.equal(requestCount, 0);
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
@@ -4980,7 +5052,7 @@ test("workspace git credential helper rejects unrecognized non-empty repository 
       ].join("\n"),
       env: {
         ...process.env,
-        CODE_WEB_CHAT_RUN_TOKEN: "scoped-run-token",
+        CODE_WEB_CHAT_RUN_TOKEN: "scoped.run.token",
       },
     });
 

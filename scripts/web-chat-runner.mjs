@@ -2458,8 +2458,8 @@ function buildWorkspaceGitTokenHelperScript({
     "  if (primaryWorkspaceToken && requestedRepository.toLowerCase() === workspaceRepository.toLowerCase()) {",
     "    return primaryWorkspaceToken;",
     "  }",
-    "  if (!authorizationToken) {",
-    "    throw new Error('CODE_WEB_CHAT_RUN_TOKEN is required to mint a GitHub repository token.');",
+    "  if (!authorizationToken || authorizationToken.split('.').length !== 3) {",
+    "    throw new Error('A scoped CODE_WEB_CHAT_RUN_TOKEN is required to mint a GitHub repository token.');",
     "  }",
     "  const response = await fetch(new URL('/api/github/workspace-git-token', endpointBaseUrl), {",
     "    method: 'POST',",
@@ -4072,11 +4072,9 @@ function resolveHostedPrecheckedWorkspacePlan({
   if (expectedPath !== path.resolve(workspacePath)) {
     return { enabled: false, reason: "path_mismatch", gitToken: "" };
   }
-  const gitToken = normalizeText(
-    commandEnv.CODEX_GITHUB_WRITE_TOKEN || commandEnv.CODEQ8_GITHUB_REPOSITORY_TOKEN,
-  );
+  const gitToken = normalizeText(commandEnv.CODEX_GITHUB_WRITE_TOKEN);
   if (!gitToken) {
-    return { enabled: false, reason: "missing_git_token", gitToken: "" };
+    return { enabled: false, reason: "missing_hosted_git_token", gitToken: "" };
   }
   return { enabled: true, reason: "", gitToken };
 }
