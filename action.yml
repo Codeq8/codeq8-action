@@ -88,6 +88,117 @@ runs:
           --repo-root "$codeq8_action_repo_root" \
           --workspace-path "${GITHUB_WORKSPACE:-}"
 
+        if command -v gh >/dev/null 2>&1; then
+          real_gh_path="$(command -v gh)"
+          gh_wrapper_dir="${RUNNER_TEMP:-/tmp}/codeq8-gh-wrapper-${GITHUB_RUN_ID:-run}-${GITHUB_RUN_ATTEMPT:-0}"
+          mkdir -p "$gh_wrapper_dir"
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'set -euo pipefail'
+            printf 'real_gh_path=%q\n' "$real_gh_path"
+            cat <<'GH_WRAPPER'
+resolve_gh_api_endpoint_argument() {
+  local expect_endpoint=0
+  local skip_next=0
+  local arg
+  for arg in "$@"; do
+    if [ "$expect_endpoint" -eq 0 ]; then
+      [ "$arg" = "api" ] || continue
+      expect_endpoint=1
+      continue
+    fi
+    if [ "$skip_next" -eq 1 ]; then
+      skip_next=0
+      continue
+    fi
+    case "$arg" in
+      --method|-X|--header|-H|--field|-f|--raw-field|-F|--input|--jq|--template)
+        skip_next=1
+        continue
+        ;;
+      --method=*|-X*|--header=*|-H*|--field=*|-f*|--raw-field=*|-F*|--input=*|--jq=*|--template=*)
+        continue
+        ;;
+      --*|-*)
+        continue
+        ;;
+    esac
+    printf "%s\n" "$arg"
+    return 0
+  done
+  return 1
+}
+
+resolve_gh_api_method_argument() {
+  local expect_method=0
+  local method="GET"
+  local arg
+  for arg in "$@"; do
+    if [ "$expect_method" -eq 1 ]; then
+      method="$arg"
+      expect_method=0
+      continue
+    fi
+    case "$arg" in
+      --method|-X)
+        expect_method=1
+        ;;
+      --method=*)
+        method="${arg#--method=}"
+        ;;
+      -X=*)
+        method="${arg#-X=}"
+        ;;
+      -X?*)
+        method="${arg#-X}"
+        ;;
+    esac
+  done
+  method="$(printf "%s" "$method" | tr "[:lower:]" "[:upper:]")"
+  printf "%s\n" "${method:-GET}"
+}
+
+gh_api_has_mutation_payload_flag() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --field|-f|--raw-field|-F|--input|--field=*|-f*|--raw-field=*|-F*|--input=*)
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "setup-git" ]; then
+  echo "::error::Codeq8 runner git auth is owned by the scoped credential helper; do not run gh auth setup-git as a push fallback." >&2
+  exit 1
+fi
+
+endpoint="$(resolve_gh_api_endpoint_argument "$@" || true)"
+if [ -n "$endpoint" ]; then
+  endpoint="${endpoint#https://api.github.com/}"
+  endpoint="${endpoint#http://api.github.com/}"
+  endpoint="${endpoint#api.github.com/}"
+  endpoint="${endpoint#/}"
+  case "$endpoint" in
+    repos/*/*/git/blobs*|repos/*/*/git/trees*|repos/*/*/git/commits*|repos/*/*/git/refs*|repos/*/*/git/ref*)
+      method="$(resolve_gh_api_method_argument "$@")"
+      if [ "$method" != "GET" ] || gh_api_has_mutation_payload_flag "$@"; then
+        echo "::error::Git database write fallback is not allowed for branch publishing; fix the Codeq8 Git credential helper and use git push." >&2
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
+exec "$real_gh_path" "$@"
+GH_WRAPPER
+          } > "$gh_wrapper_dir/gh"
+          chmod 700 "$gh_wrapper_dir/gh"
+          echo "$gh_wrapper_dir" >> "$GITHUB_PATH"
+        fi
+
     - name: Run Codeq8 chat bridge
       shell: bash
       env:

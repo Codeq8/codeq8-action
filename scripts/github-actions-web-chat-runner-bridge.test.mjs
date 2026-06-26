@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import {
@@ -7,6 +8,18 @@ import {
   normalizeGitHubActionsChatRunPayload,
   readGitHubActionsChatRunPayload,
 } from "./github-actions-web-chat-runner-bridge.mjs";
+
+test("public action gh wrapper rejects branch-publish fallbacks", () => {
+  const source = fs.readFileSync(new URL("../action.yml", import.meta.url), "utf8");
+
+  assert.match(source, /codeq8-gh-wrapper/);
+  assert.match(source, /gh auth setup-git as a push fallback/);
+  assert.match(source, /Git database write fallback is not allowed/);
+  assert.match(source, /repos\/\*\/\*\/git\/trees/);
+  assert.match(source, /repos\/\*\/\*\/git\/commits/);
+  assert.match(source, /repos\/\*\/\*\/git\/refs/);
+  assert.match(source, /exec "\$real_gh_path" "\$@"/);
+});
 
 test("readGitHubActionsChatRunPayload reads workflow_dispatch JSON input", async () => {
   const payload = await readGitHubActionsChatRunPayload({
