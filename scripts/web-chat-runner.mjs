@@ -8244,12 +8244,54 @@ async function createAppServerFirestoreBridge(appServerContext = {}) {
 
 function isPlaceholderThreadTitle(value) {
   const normalized = normalizeText(value).toLowerCase();
-  return !normalized || normalized === "untitled" || normalized === "new thread";
+  return (
+    !normalized ||
+    normalized === "untitled" ||
+    normalized === "new thread" ||
+    normalized === "new chat" ||
+    normalized === "no title" ||
+    normalized === "none" ||
+    normalized === "n/a" ||
+    normalized === "na"
+  );
 }
 
 function isFinalThreadTitleSource(value) {
   const normalized = normalizeText(value).toLowerCase();
   return normalized === "manual" || normalized === "generated";
+}
+
+function hasMeaningfulHiddenThreadTitlePrompt(promptText = "") {
+  const normalized = normalizeText(promptText);
+  if (!normalized) {
+    return false;
+  }
+  const lowSignalPrompt = normalized
+    .toLowerCase()
+    .replace(/[.!?;:,\s]+$/g, "")
+    .trim();
+  if (
+    new Set([
+      "hi",
+      "hello",
+      "hey",
+      "yo",
+      "test",
+      "ok",
+      "okay",
+      "thanks",
+      "thank you",
+    ]).has(lowSignalPrompt)
+  ) {
+    return false;
+  }
+  const signalWords = normalized
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[^A-Za-z0-9\s/-]/g, " ")
+    .split(/\s+/g)
+    .map((word) => word.replace(/^[-/]+|[-/]+$/g, ""))
+    .filter((word) => word.length > 1);
+  return signalWords.length >= 2;
 }
 
 function shouldRunHiddenThreadTitlePreturn({
@@ -8261,7 +8303,7 @@ function shouldRunHiddenThreadTitlePreturn({
   if (normalizeText(mode).toLowerCase() !== "fresh") {
     return false;
   }
-  if (!normalizeText(promptText)) {
+  if (!hasMeaningfulHiddenThreadTitlePrompt(promptText)) {
     return false;
   }
   if (isPlaceholderThreadTitle(threadTitle)) {
@@ -8357,8 +8399,7 @@ function buildFallbackThreadTitle(promptText = "") {
     .map((word) => word.replace(/^[-/]+|[-/]+$/g, ""))
     .filter((word) => word.length > 1 && !stopwords.has(word.toLowerCase()))
     .slice(0, 4);
-  const title = words.length > 0 ? words.join(" ") : "New chat";
-  return normalizeHiddenThreadTitle(title) || "New chat";
+  return normalizeHiddenThreadTitle(words.join(" "));
 }
 
 async function writeRunnerThreadTitle({
@@ -8820,6 +8861,20 @@ async function runCodexAppServer({
         activeTurnPurpose = "main";
         activeTurnId = "";
         resetAgentMessageCapture();
+      }
+
+      if (!title) {
+        log("Skipped hidden Codeq8 thread title before main Codex turn; no durable title candidate.");
+        await reportHiddenTitleDiagnostic({
+          event: "runner_hidden_thread_title_preturn_finished",
+          ok: true,
+          severity: "trace",
+          details: {
+            fallback_used: usedFallback,
+            title_written: false,
+          },
+        });
+        return null;
       }
 
       try {
@@ -11717,6 +11772,8 @@ export {
   shouldLookUpPullRequest,
   shouldStopBeforeCodexForRunCallbackPayload,
   shouldTreatCodexFailureAsCompleted,
+  normalizeHiddenThreadTitle,
+  buildFallbackThreadTitle,
   shouldRunHiddenThreadTitlePreturn,
   stripLeadingCodexTransportNoise,
   extractUserVisibleFailureHeadline,
