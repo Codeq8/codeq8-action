@@ -48,6 +48,9 @@ async function withMcpConfigFixture(fn) {
       PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath,
       CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE: "secret-cookie-value",
       CODE_WEB_CHAT_RUN_TOKEN: "secret-run-token",
+      CODE_WORKSPACE_REPOSITORY: "example-org/example-repo",
+      CODE_CHAT_THREAD_ID: "wct_example",
+      CODE_CHAT_RUN_ID: "wcr_example",
     };
     const installResult = await syncCodeq8PluginInstall({
       repoRoot: process.cwd(),
@@ -106,9 +109,15 @@ test("sync Codeq8 Playwright MCP config creates a managed Codex config block wit
     assert.match(config, /env_vars = \[/);
     assert.match(config, /"CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE"/);
     assert.match(config, /"CODE_WEB_CHAT_RUN_TOKEN"/);
+    assert.match(config, /"CODE_WORKSPACE_REPOSITORY"/);
+    assert.match(config, /"CODE_CHAT_THREAD_ID"/);
+    assert.match(config, /"CODE_CHAT_RUN_ID"/);
     assert.match(config, /"PLAYWRIGHT_BROWSERS_PATH"/);
     assert.doesNotMatch(config, /secret-cookie-value/);
     assert.doesNotMatch(config, /secret-run-token/);
+    assert.doesNotMatch(config, /example-org\/example-repo/);
+    assert.doesNotMatch(config, /wct_example/);
+    assert.doesNotMatch(config, /wcr_example/);
     assert.doesNotMatch(config, /^env =/m);
     assert.equal(await pathExists(path.join(codexHome, "auth.json")), false);
     assert.equal(await pathExists(path.join(codexHome, "sessions")), false);

@@ -466,7 +466,7 @@ export async function exposeCodeq8McpRunTokenRouteProbe({
   fetchImpl?: FetchLike;
   page: PageLike;
 }): Promise<boolean> {
-  if (!readCodeq8McpRunToken(env) || typeof page.exposeFunction !== "function") {
+  if (typeof page.exposeFunction !== "function") {
     return false;
   }
   await page.exposeFunction(RUN_TOKEN_ROUTE_PROBE_NAME, async (input: unknown) =>

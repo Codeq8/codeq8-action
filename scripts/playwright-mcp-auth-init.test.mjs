@@ -390,6 +390,35 @@ test("Playwright MCP auth init exposes run-token route probe without requiring a
   assert.equal(state.events.size, 0);
 });
 
+test("Playwright MCP auth init exposes a blocked route probe when the run token is unavailable", async () => {
+  const state = createPage({
+    currentUrl:
+      "https://codeq8-git-route-auth-iscoot.vercel.app/Codeq8/Codeq8/thread/wct_parent",
+  });
+  await initCodeq8PlaywrightMcpAuth({
+    env: {},
+    page: state.page,
+  });
+
+  const probe = state.exposedFunctions.get("__codeq8McpRunTokenRouteProbe");
+  assert.equal(typeof probe, "function");
+  assert.deepEqual(
+    await probe({
+      path: "/api/chat/runs/delegated-thread-state",
+      query: {
+        target_thread_id: "wct_target",
+      },
+    }),
+    {
+      ok: false,
+      blocked: true,
+      error: "CODE_WEB_CHAT_RUN_TOKEN is unavailable to the Codeq8 MCP route probe.",
+    },
+  );
+  assert.equal(state.cookies.length, 0);
+  assert.equal(state.events.size, 0);
+});
+
 test("Playwright MCP auth init does not leak cookie values through logging or storage state", () => {
   const source = fs.readFileSync(
     path.join(REPO_ROOT, "plugins", "codeq8", "playwright-mcp-auth-init.ts"),
