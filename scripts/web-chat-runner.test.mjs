@@ -880,6 +880,64 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   assert.equal(bridgeCloseCount, 1);
 });
 
+test("runCodex preserves AppServer usage-limit failures as the terminal reason", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-usage-limit-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "let goal = null;",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'thread/goal/set') {",
+      "    goal = { objective: message.params?.objective || 'ship fix', status: 'active' };",
+      "    send({ id: message.id, result: { goal } });",
+      "  }",
+      "  if (message.method === 'thread/goal/get') send({ id: message.id, result: { goal } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    goal = { objective: 'ship fix', status: 'usageLimited' };",
+      "    send({ method: 'thread/goal/updated', params: { goal } });",
+      "    send({ method: 'account/rateLimits/updated', params: { status: 'usageLimited' } });",
+      "    send({ method: 'error', params: { code: 'usageLimited', message: 'usage limit reached' } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'failed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "use app server",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+    codexThreadGoalsEnabled: true,
+    codexGoalState: {
+      objective: "ship fix",
+      status: "active",
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /Codex account on this runner has reached its usage limit/);
+  assert.doesNotMatch(result.reason, /turn completed with status failed/i);
+  assert.equal(result.codexGoalState.status, "usageLimited");
+});
+
 test("runCodex reports AppServer Firestore session HTTP failure details", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-session-http-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
@@ -5859,6 +5917,16 @@ test("isRecoverableCodexResumeFailure retries zero-output AppServer terminal fai
       reason: "Codex app-server turn completed with status failed.",
       output: "apply_patch verification failed",
     }),
+      false,
+    );
+});
+
+test("isRecoverableCodexResumeFailure does not retry account usage-limit failures", () => {
+  assert.equal(
+    isRecoverableCodexResumeFailure({
+      reason: "The Codex account on this runner has reached its usage limit. Retry after the limit resets.",
+      output: "",
+    }),
     false,
   );
 });
@@ -6011,6 +6079,15 @@ test("toUserVisibleRunnerFailureMessage maps model capacity errors to retry guid
   `);
 
   assert.equal(message, "The selected Codex model is temporarily at capacity. Retry the run.");
+});
+
+test("toUserVisibleRunnerFailureMessage maps usage-limit errors to account guidance", () => {
+  const message = toUserVisibleRunnerFailureMessage("usageLimited");
+
+  assert.equal(
+    message,
+    "The Codex account on this runner has reached its usage limit. Retry after the limit resets.",
+  );
 });
 
 test("buildUploadedCodexSessionStoredValue builds a wrapped version 3 envelope", async () => {

@@ -108,6 +108,10 @@ const CODEX_AUTH_PRECHECK_TIMEOUT_SECONDS = 45;
 const WEB_CHAT_RUNNER_DIAGNOSTIC_SOURCE = "web_chat_runner_diagnostic";
 const WEB_CHAT_RUN_MARKER_VERSION = "v1";
 const WEB_CHAT_RUN_MARKER_PREFIX = "codeq8-run-marker";
+const CODEX_USAGE_LIMIT_REACHED_MESSAGE =
+  "The Codex account on this runner has reached its usage limit. Retry after the limit resets.";
+const CODEX_BUDGET_LIMIT_REACHED_MESSAGE =
+  "This Codex run reached its configured budget limit.";
 const CODEX_SESSION_COMPACTION_TYPES = new Set([
   "compaction",
   "context_compacted",
@@ -778,6 +782,9 @@ function shouldTreatCodexFailureAsCompleted({
 
 function toUserVisibleRunnerFailureMessage(value) {
   const rawMessage = normalizeText(extractErrorMessage(value));
+  if (/usage\s*limit|usageLimited|rate\s*limit|quota/i.test(rawMessage)) {
+    return CODEX_USAGE_LIMIT_REACHED_MESSAGE;
+  }
   if (/selected model is at capacity/i.test(rawMessage)) {
     return "The selected Codex model is temporarily at capacity. Retry the run.";
   }
@@ -7001,6 +7008,66 @@ function extractAppServerTurnStatus(value) {
   return normalizeText(turn.status || object.status || "");
 }
 
+function isCodexUsageLimitMessage(value) {
+  return /usage\s*limit|usageLimited|rate\s*limit|quota/i.test(normalizeText(value));
+}
+
+function normalizeAppServerFailureMessage(value) {
+  const message = normalizeText(redactDiagnosticText(extractErrorMessage(value)));
+  if (!message) {
+    return "";
+  }
+  if (isCodexUsageLimitMessage(message)) {
+    return CODEX_USAGE_LIMIT_REACHED_MESSAGE;
+  }
+  return truncate(message, 1000);
+}
+
+function buildCodexGoalLimitFailureMessage(goalState) {
+  const status = normalizeCodexGoalState(goalState).status;
+  if (status === "usageLimited") {
+    return CODEX_USAGE_LIMIT_REACHED_MESSAGE;
+  }
+  if (status === "budgetLimited") {
+    return CODEX_BUDGET_LIMIT_REACHED_MESSAGE;
+  }
+  return "";
+}
+
+function extractAppServerTurnFailureMessage(value) {
+  const object = normalizeObject(value);
+  const turn = normalizeObject(object.turn);
+  return normalizeAppServerFailureMessage(
+    turn.error ||
+      turn.message ||
+      turn.reason ||
+      turn.statusReason ||
+      turn.status_reason ||
+      object.error ||
+      object.message ||
+      object.reason ||
+      object.statusReason ||
+      object.status_reason,
+  );
+}
+
+function extractAppServerFailureNotificationMessage(method, params = {}) {
+  const normalizedMethod = normalizeAppServerMethod(method);
+  if (normalizedMethod === "thread/goal/updated") {
+    return buildCodexGoalLimitFailureMessage(
+      normalizeCodexGoalNotification(params).goal,
+    );
+  }
+  if (normalizedMethod === "error") {
+    return normalizeAppServerFailureMessage(params);
+  }
+  if (normalizedMethod === "account/rateLimits/updated") {
+    const message = normalizeAppServerFailureMessage(params);
+    return isCodexUsageLimitMessage(message) ? CODEX_USAGE_LIMIT_REACHED_MESSAGE : "";
+  }
+  return "";
+}
+
 function extractAppServerAgentDelta(params) {
   const object = normalizeObject(params);
   const source = Object.prototype.hasOwnProperty.call(object, "delta") ? object.delta : object;
@@ -8929,6 +8996,7 @@ async function runCodexAppServer({
     });
     let codexGoalAppServerApiSupported = true;
     let controlListener = null;
+    let latestAppServerFailureMessage = "";
     const appServerStartupTimings = {};
     const markAppServerStartupTiming = (key) => {
       appServerStartupTimings[key] = Math.max(0, Date.now() - startMs);
@@ -9429,6 +9497,12 @@ async function runCodexAppServer({
         return;
       }
       const hiddenTitleTurnActive = activeTurnPurpose === "hidden_thread_title";
+      const appServerFailureMessage = hiddenTitleTurnActive
+        ? ""
+        : extractAppServerFailureNotificationMessage(normalizedMethod, params);
+      if (appServerFailureMessage) {
+        latestAppServerFailureMessage = appServerFailureMessage;
+      }
       if (!hiddenTitleTurnActive) {
         actionsReasoningTranscript.recordNotification(normalizedMethod, params);
       }
@@ -9490,6 +9564,11 @@ async function runCodexAppServer({
       if (normalizedMethod === "turn/completed") {
         const status = extractAppServerTurnStatus(params);
         const ok = !/failed|error|cancel/i.test(status);
+        const failureMessage = ok
+          ? ""
+          : extractAppServerTurnFailureMessage(params) ||
+            latestAppServerFailureMessage ||
+            `Codex app-server turn completed with status ${status || "unknown"}.`;
         if (hiddenTitleTurnActive) {
           completeHiddenTitleTurn({
             ok,
@@ -9502,7 +9581,7 @@ async function runCodexAppServer({
           ok,
           output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
           diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
-          reason: ok ? "" : `Codex app-server turn completed with status ${status || "unknown"}.`,
+          reason: failureMessage,
           exitCode: ok ? 0 : 1,
           signal: "",
           timedOut: false,
