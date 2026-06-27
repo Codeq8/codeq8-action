@@ -47,6 +47,7 @@ async function withMcpConfigFixture(fn) {
       PATH: `${binPath}:${process.env.PATH || ""}`,
       PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath,
       CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE: "secret-cookie-value",
+      CODE_WEB_CHAT_RUN_TOKEN: "secret-run-token",
     };
     const installResult = await syncCodeq8PluginInstall({
       repoRoot: process.cwd(),
@@ -104,8 +105,10 @@ test("sync Codeq8 Playwright MCP config creates a managed Codex config block wit
     assert.match(config, new RegExp(JSON.stringify(initPagePath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(config, /env_vars = \[/);
     assert.match(config, /"CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE"/);
+    assert.match(config, /"CODE_WEB_CHAT_RUN_TOKEN"/);
     assert.match(config, /"PLAYWRIGHT_BROWSERS_PATH"/);
     assert.doesNotMatch(config, /secret-cookie-value/);
+    assert.doesNotMatch(config, /secret-run-token/);
     assert.doesNotMatch(config, /^env =/m);
     assert.equal(await pathExists(path.join(codexHome, "auth.json")), false);
     assert.equal(await pathExists(path.join(codexHome, "sessions")), false);

@@ -138,11 +138,16 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
       "CODEQ8_E2E_GITHUB_WEB_SESSION_COOKIE",
       "CODEQ8_GITHUB_WEB_SESSION_COOKIE",
       "CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE",
+      "CODE_WEB_CHAT_RUN_TOKEN",
+      "CODE_WORKSPACE_REPOSITORY",
+      "CODE_CHAT_THREAD_ID",
+      "CODE_CHAT_RUN_ID",
       "CODEQ8_MCP_AUTH_HOSTS",
       "PLAYWRIGHT_MCP_AUTH_HOSTS",
       "CODEQ8_MCP_AUTH_URLS",
       "PLAYWRIGHT_MCP_AUTH_URLS",
       "CODE_DEPLOYED_PUBLIC_URL",
+      "CODE_PUBLIC_BASE_URL",
       "PLAYWRIGHT_TEST_BASE_URL",
       "PLAYWRIGHT_BROWSERS_PATH",
     ]);
@@ -496,10 +501,15 @@ test("Codeq8 plugin manifest bundles Playwright MCP without raw secrets", async 
     mcpConfig.playwright.env_vars.includes("CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE"),
     true,
   );
+  assert.equal(mcpConfig.playwright.env_vars.includes("CODE_WEB_CHAT_RUN_TOKEN"), true);
+  assert.equal(mcpConfig.playwright.env_vars.includes("CODE_WORKSPACE_REPOSITORY"), true);
+  assert.equal(mcpConfig.playwright.env_vars.includes("CODE_CHAT_THREAD_ID"), true);
+  assert.equal(mcpConfig.playwright.env_vars.includes("CODE_CHAT_RUN_ID"), true);
   assert.equal(mcpConfig.playwright.env_vars.includes("PLAYWRIGHT_BROWSERS_PATH"), true);
   assert.equal(mcpConfigSource.includes("code_github_session="), false);
   assert.doesNotMatch(mcpConfigSource, /^\s*"env"\s*:/m);
   assert.doesNotMatch(mcpConfigSource, /^\s*"CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE"\s*:/m);
+  assert.doesNotMatch(mcpConfigSource, /^\s*"CODE_WEB_CHAT_RUN_TOKEN"\s*:/m);
 });
 
 test("Codeq8 plugin install source does not mutate CODEX_HOME or Codex auth state", async () => {

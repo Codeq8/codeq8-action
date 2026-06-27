@@ -21,5 +21,9 @@ Bundled MCP servers:
 - `playwright`: authenticated Playwright MCP for Codeq8 staging/browser
   verification. The public action installs the pinned `@playwright/mcp` runner
   tool and prepares a Codeq8-owned Playwright browser cache before Codex
-  starts. The MCP server uses only runner-provided session cookie environment
-  names and the plugin-owned auth init bridge.
+  starts. The MCP server uses only runner-provided session cookie and run-token
+  environment names and the plugin-owned auth init bridge. The bridge exposes a
+  sanitized `window.__codeq8McpRunTokenRouteProbe(...)` helper for read-only
+  `/api/chat/runs/*` route checks on allowed Codeq8 preview/local hosts, so PR
+  staging MCP can exercise run-token-backed helper routes without printing,
+  pasting, or persisting the token.

@@ -4,10 +4,14 @@ import path from "node:path";
 import test from "node:test";
 
 import initCodeq8PlaywrightMcpAuth, {
+  exposeCodeq8McpRunTokenRouteProbe,
   isCodeq8McpAuthHostAllowed,
+  isCodeq8McpRunTokenRouteAllowed,
   listCodeq8McpAuthOrigins,
   normalizeCodeq8McpAuthCookie,
   readCodeq8McpAuthCookie,
+  readCodeq8McpRunToken,
+  requestCodeq8McpRunTokenRoute,
   seedCodeq8McpAuthCookie,
 } from "../plugins/codeq8/playwright-mcp-auth-init.ts";
 
@@ -16,10 +20,12 @@ const REPO_ROOT = process.cwd();
 function createPage({ currentUrl = "about:blank" } = {}) {
   const cookies = [];
   const events = new Map();
+  const exposedFunctions = new Map();
   let reloadCount = 0;
   return {
     cookies,
     events,
+    exposedFunctions,
     get reloadCount() {
       return reloadCount;
     },
@@ -33,6 +39,9 @@ function createPage({ currentUrl = "about:blank" } = {}) {
       },
       on(eventName, callback) {
         events.set(eventName, callback);
+      },
+      async exposeFunction(functionName, callback) {
+        exposedFunctions.set(functionName, callback);
       },
       async reload() {
         reloadCount += 1;
@@ -127,6 +136,158 @@ test("Playwright MCP auth init lists only allowed seed origins", () => {
   );
 });
 
+test("Playwright MCP run-token route probe exposes a read-only run route helper", async () => {
+  const requested = [];
+  const fetchImpl = async (url, init) => {
+    requested.push({ url, init });
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          return name.toLowerCase() === "content-type" ? "application/json" : "";
+        },
+      },
+      async text() {
+        return JSON.stringify({
+          ok: true,
+          thread: {
+            thread_id: "wct_target",
+            title: "Safe target",
+          },
+          authorization: "Bearer should-not-return",
+          nested: {
+            code_github_session: "secret-cookie",
+          },
+        });
+      },
+    };
+  };
+  const state = createPage({
+    currentUrl:
+      "https://codeq8-git-route-auth-iscoot.vercel.app/Codeq8/Codeq8/thread/wct_parent",
+  });
+
+  const exposed = await exposeCodeq8McpRunTokenRouteProbe({
+    env: {
+      CODE_WEB_CHAT_RUN_TOKEN: "secret-run-token",
+      CODE_WORKSPACE_REPOSITORY: "Codeq8/Codeq8",
+      CODE_CHAT_THREAD_ID: "wct_parent",
+      CODE_CHAT_RUN_ID: "wcr_parent",
+    },
+    fetchImpl,
+    page: state.page,
+  });
+
+  assert.equal(exposed, true);
+  const probe = state.exposedFunctions.get("__codeq8McpRunTokenRouteProbe");
+  assert.equal(typeof probe, "function");
+  const result = await probe({
+    path: "/api/chat/runs/delegated-thread-state",
+    query: {
+      target_thread_id: "wct_target",
+      limit: 3,
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 200);
+  assert.equal(result.method, "GET");
+  assert.equal(
+    result.url,
+    "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/runs/delegated-thread-state?target_thread_id=wct_target&limit=3&workspace_repository=Codeq8%2FCodeq8&thread_id=wct_parent&run_id=wcr_parent",
+  );
+  assert.equal(result.json.thread.thread_id, "wct_target");
+  assert.equal(result.json.authorization, "[redacted]");
+  assert.equal(result.json.nested.code_github_session, "[redacted]");
+  assert.equal(requested.length, 1);
+  assert.equal(requested[0].init.method, "GET");
+  assert.equal(requested[0].init.headers.authorization, "Bearer secret-run-token");
+  assert.doesNotMatch(JSON.stringify(result), /secret-run-token|secret-cookie|should-not-return/);
+});
+
+test("Playwright MCP run-token route probe rejects missing token, unsafe routes, and mutating methods", async () => {
+  let fetchCount = 0;
+  const fetchImpl = async () => {
+    fetchCount += 1;
+    throw new Error("fetch should not run for rejected probe requests");
+  };
+  const pageUrl =
+    "https://codeq8-git-route-auth-iscoot.vercel.app/Codeq8/Codeq8/thread/wct_parent";
+
+  assert.equal(readCodeq8McpRunToken({ CODE_WEB_CHAT_RUN_TOKEN: "run-token" }), "run-token");
+  assert.equal(
+    isCodeq8McpRunTokenRouteAllowed({
+      method: "GET",
+      targetUrl:
+        "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/runs/delegated-thread-state",
+    }),
+    true,
+  );
+  assert.equal(
+    isCodeq8McpRunTokenRouteAllowed({
+      method: "POST",
+      targetUrl:
+        "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/runs/delegated-thread-state",
+    }),
+    false,
+  );
+  assert.equal(
+    isCodeq8McpRunTokenRouteAllowed({
+      method: "GET",
+      targetUrl: "https://codeq8.com/api/chat/runs/delegated-thread-state",
+    }),
+    false,
+  );
+  assert.equal(
+    isCodeq8McpRunTokenRouteAllowed({
+      method: "GET",
+      targetUrl: "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/threads",
+    }),
+    false,
+  );
+
+  assert.deepEqual(
+    await requestCodeq8McpRunTokenRoute({
+      env: {},
+      fetchImpl,
+      input: { path: "/api/chat/runs/delegated-thread-state" },
+      pageUrl,
+    }),
+    {
+      ok: false,
+      blocked: true,
+      error: "CODE_WEB_CHAT_RUN_TOKEN is unavailable to the Codeq8 MCP route probe.",
+    },
+  );
+
+  const rejectedMethod = await requestCodeq8McpRunTokenRoute({
+    env: { CODE_WEB_CHAT_RUN_TOKEN: "run-token" },
+    fetchImpl,
+    input: {
+      method: "POST",
+      path: "/api/chat/runs/delegated-thread-state",
+    },
+    pageUrl,
+  });
+  assert.equal(rejectedMethod.ok, false);
+  assert.equal(rejectedMethod.blocked, true);
+  assert.match(rejectedMethod.error, /not an allowed read-only run route/);
+
+  const rejectedRoute = await requestCodeq8McpRunTokenRoute({
+    env: { CODE_WEB_CHAT_RUN_TOKEN: "run-token" },
+    fetchImpl,
+    input: {
+      path: "/api/chat/threads",
+    },
+    pageUrl,
+  });
+  assert.equal(rejectedRoute.ok, false);
+  assert.equal(rejectedRoute.blocked, true);
+
+  assert.equal(fetchCount, 0);
+});
+
 test("Playwright MCP auth init seeds the signed cookie for an allowed target", async () => {
   const { cookies, page } = createPage();
   const seeded = await seedCodeq8McpAuthCookie({
@@ -212,6 +373,23 @@ test("Playwright MCP auth init can attach on first preview navigation and reload
   assert.equal(state.reloadCount, 1);
 });
 
+test("Playwright MCP auth init exposes run-token route probe without requiring a web session cookie", async () => {
+  const state = createPage({
+    currentUrl:
+      "https://codeq8-git-route-auth-iscoot.vercel.app/Codeq8/Codeq8/thread/wct_parent",
+  });
+  await initCodeq8PlaywrightMcpAuth({
+    env: {
+      CODE_WEB_CHAT_RUN_TOKEN: "run-token",
+    },
+    page: state.page,
+  });
+
+  assert.equal(state.exposedFunctions.has("__codeq8McpRunTokenRouteProbe"), true);
+  assert.equal(state.cookies.length, 0);
+  assert.equal(state.events.size, 0);
+});
+
 test("Playwright MCP auth init does not leak cookie values through logging or storage state", () => {
   const source = fs.readFileSync(
     path.join(REPO_ROOT, "plugins", "codeq8", "playwright-mcp-auth-init.ts"),
@@ -220,5 +398,6 @@ test("Playwright MCP auth init does not leak cookie values through logging or st
 
   assert.doesNotMatch(source, /console\.(log|warn|error|info|debug)/);
   assert.doesNotMatch(source, /storage-state|storageState/);
+  assert.doesNotMatch(source, /localStorage|sessionStorage/);
   assert.doesNotMatch(source, /writeFile|appendFile|createWriteStream/);
 });

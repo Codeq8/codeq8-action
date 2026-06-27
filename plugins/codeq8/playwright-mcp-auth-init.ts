@@ -6,6 +6,10 @@ const GITHUB_WEB_SESSION_COOKIE_ENV_NAMES = [
   "CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE",
 ] as const;
 
+const RUN_TOKEN_ENV_NAMES = [
+  "CODE_WEB_CHAT_RUN_TOKEN",
+] as const;
+
 const AUTH_HOST_ENV_NAMES = [
   "CODEQ8_MCP_AUTH_HOSTS",
   "PLAYWRIGHT_MCP_AUTH_HOSTS",
@@ -15,8 +19,18 @@ const AUTH_URL_ENV_NAMES = [
   "CODEQ8_MCP_AUTH_URLS",
   "PLAYWRIGHT_MCP_AUTH_URLS",
   "CODE_DEPLOYED_PUBLIC_URL",
+  "CODE_PUBLIC_BASE_URL",
   "PLAYWRIGHT_TEST_BASE_URL",
 ] as const;
+
+const RUN_TOKEN_ROUTE_PROBE_NAME = "__codeq8McpRunTokenRouteProbe";
+const RUN_TOKEN_ROUTE_PREFIX = "/api/chat/runs/";
+const RUN_TOKEN_ROUTE_METHODS = new Set(["GET", "HEAD"]);
+const SECRET_FIELD_PATTERN =
+  /(?:authorization|cookie|token|secret|password|private[_-]?key|webhook[_-]?secret|session)/i;
+const MAX_SANITIZED_STRING_LENGTH = 2000;
+const MAX_SANITIZED_ARRAY_LENGTH = 25;
+const MAX_SANITIZED_OBJECT_KEYS = 60;
 
 type EnvLike = Record<string, string | undefined>;
 
@@ -42,10 +56,29 @@ type FrameLike = {
 
 type PageLike = {
   context(): BrowserContextLike;
+  exposeFunction?: (
+    functionName: string,
+    callback: (input: unknown) => Promise<unknown>,
+  ) => Promise<void>;
   on(eventName: "framenavigated", callback: (frame: FrameLike) => void): void;
   reload(options?: { waitUntil?: "domcontentloaded" }): Promise<unknown>;
   url(): string;
 };
+
+type FetchLike = (
+  url: string,
+  init: {
+    method: string;
+    headers: Record<string, string>;
+  },
+) => Promise<{
+  ok: boolean;
+  status: number;
+  headers?: {
+    get?(name: string): string | null;
+  };
+  text(): Promise<string>;
+}>;
 
 function splitEnvList(value: unknown): string[] {
   return String(value || "")
@@ -81,6 +114,110 @@ function normalizeOrigin(value: unknown): string {
   } catch {
     return "";
   }
+}
+
+function normalizeMethod(value: unknown): string {
+  return String(value || "GET").trim().toUpperCase() || "GET";
+}
+
+function normalizeText(value: unknown): string {
+  return String(value ?? "").trim();
+}
+
+function payloadObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function appendQueryValue(searchParams: URLSearchParams, key: string, value: unknown) {
+  if (!key || value === undefined || value === null) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      appendQueryValue(searchParams, key, entry);
+    }
+    return;
+  }
+  searchParams.append(key, String(value));
+}
+
+function appendQueryObject(searchParams: URLSearchParams, query: unknown) {
+  for (const [key, value] of Object.entries(payloadObject(query))) {
+    appendQueryValue(searchParams, key, value);
+  }
+}
+
+function appendDefaultRunContext({
+  env,
+  input,
+  searchParams,
+}: {
+  env: EnvLike;
+  input: Record<string, unknown>;
+  searchParams: URLSearchParams;
+}) {
+  if (input.include_run_context === false || input.includeRunContext === false) {
+    return;
+  }
+  const defaults: Array<[string, string | undefined]> = [
+    ["workspace_repository", env.CODE_WORKSPACE_REPOSITORY],
+    ["thread_id", env.CODE_CHAT_THREAD_ID],
+    ["run_id", env.CODE_CHAT_RUN_ID],
+  ];
+  for (const [key, value] of defaults) {
+    const normalizedValue = normalizeText(value);
+    if (!searchParams.has(key) && normalizedValue) {
+      searchParams.set(key, normalizedValue);
+    }
+  }
+}
+
+function fallbackProbeBaseUrl({
+  env,
+  pageUrl,
+}: {
+  env: EnvLike;
+  pageUrl: unknown;
+}): string {
+  return (
+    normalizeOrigin(pageUrl) ||
+    normalizeOrigin(env.CODE_DEPLOYED_PUBLIC_URL) ||
+    normalizeOrigin(env.CODE_PUBLIC_BASE_URL) ||
+    normalizeOrigin(env.PLAYWRIGHT_TEST_BASE_URL)
+  );
+}
+
+function buildRunTokenProbeUrl({
+  env,
+  input,
+  pageUrl,
+}: {
+  env: EnvLike;
+  input: Record<string, unknown>;
+  pageUrl: unknown;
+}): URL | null {
+  const rawUrl = normalizeText(input.url);
+  const rawPath = normalizeText(input.path || input.pathname);
+  const baseUrl = normalizeText(input.base_url || input.baseUrl) ||
+    fallbackProbeBaseUrl({ env, pageUrl });
+  if (!rawUrl && !rawPath) {
+    return null;
+  }
+  if (!rawUrl && !baseUrl) {
+    return null;
+  }
+
+  let targetUrl: URL;
+  try {
+    targetUrl = rawUrl ? new URL(rawUrl) : new URL(rawPath, baseUrl);
+  } catch {
+    return null;
+  }
+  appendQueryObject(targetUrl.searchParams, input.query);
+  appendDefaultRunContext({ env, input, searchParams: targetUrl.searchParams });
+  return targetUrl;
 }
 
 function hostMatchesPattern(host: string, pattern: string): boolean {
@@ -123,6 +260,16 @@ export function readCodeq8McpAuthCookie(env: EnvLike = process.env): string {
     const cookie = normalizeCodeq8McpAuthCookie(env[envName]);
     if (cookie) {
       return cookie;
+    }
+  }
+  return "";
+}
+
+export function readCodeq8McpRunToken(env: EnvLike = process.env): string {
+  for (const envName of RUN_TOKEN_ENV_NAMES) {
+    const token = normalizeText(env[envName]);
+    if (token) {
+      return token;
     }
   }
   return "";
@@ -175,6 +322,163 @@ export function listCodeq8McpAuthOrigins(env: EnvLike = process.env): string[] {
   return Array.from(origins);
 }
 
+export function isCodeq8McpRunTokenRouteAllowed({
+  env = process.env,
+  method,
+  targetUrl,
+}: {
+  env?: EnvLike;
+  method: unknown;
+  targetUrl: unknown;
+}): boolean {
+  const normalizedMethod = normalizeMethod(method);
+  if (!RUN_TOKEN_ROUTE_METHODS.has(normalizedMethod)) {
+    return false;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(String(targetUrl || ""));
+  } catch {
+    return false;
+  }
+  if (!isCodeq8McpAuthHostAllowed({ env, host: parsed.hostname })) {
+    return false;
+  }
+  return parsed.pathname.startsWith(RUN_TOKEN_ROUTE_PREFIX);
+}
+
+function sanitizeMcpProbePayload(value: unknown, key = "", depth = 0): unknown {
+  if (SECRET_FIELD_PATTERN.test(key)) {
+    return "[redacted]";
+  }
+  if (value === null || value === undefined) {
+    return value;
+  }
+  if (typeof value === "string") {
+    if (/code_github_session=|Bearer\s+\S+|authorization=/i.test(value)) {
+      return "[redacted]";
+    }
+    return value.length > MAX_SANITIZED_STRING_LENGTH
+      ? `${value.slice(0, MAX_SANITIZED_STRING_LENGTH)}...[truncated]`
+      : value;
+  }
+  if (typeof value !== "object") {
+    return value;
+  }
+  if (depth >= 5) {
+    return "[max-depth]";
+  }
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, MAX_SANITIZED_ARRAY_LENGTH)
+      .map((entry) => sanitizeMcpProbePayload(entry, "", depth + 1));
+  }
+  const result: Record<string, unknown> = {};
+  for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)
+    .slice(0, MAX_SANITIZED_OBJECT_KEYS)) {
+    result[entryKey] = sanitizeMcpProbePayload(entryValue, entryKey, depth + 1);
+  }
+  return result;
+}
+
+function contentTypeFromHeaders(headers: unknown): string {
+  const candidate = headers && typeof headers === "object" ? headers as {
+    get?: (name: string) => string | null;
+  } : {};
+  return normalizeText(typeof candidate.get === "function"
+    ? candidate.get("content-type")
+    : "");
+}
+
+export async function requestCodeq8McpRunTokenRoute({
+  env = process.env,
+  fetchImpl = globalThis.fetch as unknown as FetchLike,
+  input,
+  pageUrl,
+}: {
+  env?: EnvLike;
+  fetchImpl?: FetchLike;
+  input: unknown;
+  pageUrl?: unknown;
+}): Promise<Record<string, unknown>> {
+  const token = readCodeq8McpRunToken(env);
+  if (!token) {
+    return {
+      ok: false,
+      blocked: true,
+      error: "CODE_WEB_CHAT_RUN_TOKEN is unavailable to the Codeq8 MCP route probe.",
+    };
+  }
+  if (typeof fetchImpl !== "function") {
+    return {
+      ok: false,
+      blocked: true,
+      error: "Fetch is unavailable to the Codeq8 MCP route probe.",
+    };
+  }
+
+  const inputObject = payloadObject(input);
+  const method = normalizeMethod(inputObject.method);
+  const targetUrl = buildRunTokenProbeUrl({ env, input: inputObject, pageUrl });
+  if (!targetUrl || !isCodeq8McpRunTokenRouteAllowed({ env, method, targetUrl })) {
+    return {
+      ok: false,
+      blocked: true,
+      error: "Codeq8 MCP route probe target is not an allowed read-only run route.",
+      method,
+      url: targetUrl ? `${targetUrl.origin}${targetUrl.pathname}` : "",
+    };
+  }
+
+  const response = await fetchImpl(targetUrl.toString(), {
+    method,
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${token}`,
+    },
+  });
+  const text = await response.text();
+  let json: unknown = undefined;
+  let textPrefix = "";
+  try {
+    json = JSON.parse(text);
+  } catch {
+    textPrefix = text.slice(0, MAX_SANITIZED_STRING_LENGTH);
+  }
+  return {
+    ok: Boolean(response.ok),
+    status: Number(response.status || 0),
+    method,
+    url: `${targetUrl.origin}${targetUrl.pathname}${targetUrl.search}`,
+    content_type: contentTypeFromHeaders(response.headers),
+    ...(json === undefined
+      ? { text: sanitizeMcpProbePayload(textPrefix) }
+      : { json: sanitizeMcpProbePayload(json) }),
+  };
+}
+
+export async function exposeCodeq8McpRunTokenRouteProbe({
+  env = process.env,
+  fetchImpl,
+  page,
+}: {
+  env?: EnvLike;
+  fetchImpl?: FetchLike;
+  page: PageLike;
+}): Promise<boolean> {
+  if (!readCodeq8McpRunToken(env) || typeof page.exposeFunction !== "function") {
+    return false;
+  }
+  await page.exposeFunction(RUN_TOKEN_ROUTE_PROBE_NAME, async (input: unknown) =>
+    requestCodeq8McpRunTokenRoute({
+      env,
+      fetchImpl,
+      input,
+      pageUrl: page.url(),
+    }));
+  return true;
+}
+
 export async function seedCodeq8McpAuthCookie({
   env = process.env,
   page,
@@ -209,6 +513,8 @@ export default async function initCodeq8PlaywrightMcpAuth({
   env?: EnvLike;
   page: PageLike;
 }) {
+  await exposeCodeq8McpRunTokenRouteProbe({ env, page });
+
   if (!readCodeq8McpAuthCookie(env)) {
     return;
   }
