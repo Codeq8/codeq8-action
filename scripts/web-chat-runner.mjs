@@ -128,6 +128,8 @@ const RUN_EXECUTION_BACKEND_VALUES = new Set(["runner_pool", "github_actions"]);
 const WEB_CHAT_CODEX_SESSION_ENCRYPTED_BLOB_SCOPE = "web_chat_codex_session_bundle";
 const WEB_CHAT_CODEX_SESSION_READ_URL_PATH = "/web-chat/codex-session/read-url";
 const WEB_CHAT_CODEX_SESSION_UNWRAP_KEY_PATH = "/web-chat/codex-session/unwrap-key";
+const WEB_CHAT_HOSTED_CODEX_AUTH_INVALIDATE_PATH =
+  "/web-chat/hosted-codex-auth/invalidate";
 const RETRYABLE_WEB_CHAT_ATTACHMENT_READ_STATUSES = new Set([
   408,
   425,
@@ -780,7 +782,17 @@ function shouldTreatCodexFailureAsCompleted({
   );
 }
 
-function toUserVisibleRunnerFailureMessage(value) {
+function isCodexAuthRefreshFailure(value) {
+  const message = normalizeText(extractUserVisibleFailureHeadline(value));
+  return Boolean(
+    /failed to refresh token/i.test(message) ||
+      /refresh_token_reused/i.test(message) ||
+      /access token could not be refreshed/i.test(message) ||
+      /please try signing in again/i.test(message)
+  );
+}
+
+function toUserVisibleRunnerFailureMessage(value, { executionBackend = "" } = {}) {
   const rawMessage = normalizeText(extractErrorMessage(value));
   if (/usage\s*limit|usageLimited|rate\s*limit|quota/i.test(rawMessage)) {
     return CODEX_USAGE_LIMIT_REACHED_MESSAGE;
@@ -792,12 +804,10 @@ function toUserVisibleRunnerFailureMessage(value) {
   if (!message) {
     return "I couldn't complete that run.";
   }
-  if (
-    /failed to refresh token/i.test(message) ||
-    /refresh_token_reused/i.test(message) ||
-    /access token could not be refreshed/i.test(message) ||
-    /please try signing in again/i.test(message)
-  ) {
+  if (isCodexAuthRefreshFailure(message)) {
+    if (normalizeRunExecutionBackend(executionBackend) === "runner_pool") {
+      return "Your ChatGPT connection expired. Connect ChatGPT again, then retry.";
+    }
     return "Codex is not logged in on this self-hosted runner. Sign in on the runner, then retry.";
   }
   if (/protected branch/i.test(message)) {
@@ -1660,6 +1670,73 @@ async function workerJsonRequest({
     },
     ...(method === "POST" ? { body: JSON.stringify(body || {}) } : {}),
   });
+}
+
+function runtimeManifestSupportsScopedPath(manifest, path) {
+  const normalizedPath = normalizeText(path);
+  if (!normalizedPath) {
+    return false;
+  }
+  return [
+    ...(Array.isArray(manifest?.authorized_paths) ? manifest.authorized_paths : []),
+    ...(Array.isArray(manifest?.scoped_authorized_paths)
+      ? manifest.scoped_authorized_paths
+      : []),
+  ].some((entry) => normalizeText(entry) === normalizedPath);
+}
+
+async function invalidateHostedCodexAuthAfterRefreshFailure({
+  workerUrl,
+  adminToken,
+  runtimeManifest,
+  threadId,
+  runId,
+  reason,
+}) {
+  if (
+    !runtimeManifestSupportsScopedPath(
+      runtimeManifest,
+      WEB_CHAT_HOSTED_CODEX_AUTH_INVALIDATE_PATH,
+    )
+  ) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "runtime_path_unavailable",
+      status: 0,
+    };
+  }
+  try {
+    const response = await workerJsonRequest({
+      workerUrl,
+      adminToken,
+      path: WEB_CHAT_HOSTED_CODEX_AUTH_INVALIDATE_PATH,
+      method: "POST",
+      body: {
+        thread_id: normalizeThreadId(threadId) || normalizeText(threadId),
+        run_id: normalizeRunId(runId) || normalizeText(runId),
+        reason: truncate(normalizeText(reason), 1000),
+      },
+      timeoutMs: 10_000,
+    });
+    return {
+      ok: response.ok && response.payload?.ok !== false,
+      skipped: false,
+      reason: normalizeText(response.payload?.skipped_reason),
+      status: response.status,
+      error: normalizeText(response.payload?.error || response.payload?.message),
+      invalidated: response.payload?.invalidated === true,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      skipped: false,
+      reason: "request_failed",
+      status: 0,
+      error: extractErrorMessage(error),
+      invalidated: false,
+    };
+  }
 }
 
 async function workerTextRequest({ workerUrl, adminToken, path, method, query, body }) {
@@ -10957,6 +11034,9 @@ async function main() {
   const codexThreadGoalsEnabled = supportsCodexThreadGoals(runtimeManifest);
   const appServerProgressHistoryEnabled =
     supportsAppServerProgressHistory(runtimeManifest);
+  const runExecutionBackend = normalizeRunExecutionBackend(
+    commandEnv.CODEQ8_EXECUTION_BACKEND || commandEnv.CODE_CHAT_EXECUTION_BACKEND,
+  );
   log(
     "Resolved Codex thread goals capability",
     codexThreadGoalsEnabled ? "enabled" : "disabled",
@@ -11977,8 +12057,41 @@ async function main() {
               .map((entry) => normalizeText(entry))
               .filter(Boolean)
               .join("\n\n") || "Web chat runner failed.";
+          if (
+            runExecutionBackend === "runner_pool" &&
+            isCodexAuthRefreshFailure(executionFailureDetails)
+          ) {
+            const invalidatedAuth =
+              await invalidateHostedCodexAuthAfterRefreshFailure({
+                workerUrl,
+                adminToken,
+                runtimeManifest,
+                threadId,
+                runId,
+                reason: executionFailureDetails,
+              });
+            await reportRunnerDiagnostic({
+              event: "runner_hosted_codex_auth_invalidated",
+              failureClass: invalidatedAuth.ok
+                ? "runner_hosted_codex_auth_invalidated"
+                : "runner_hosted_codex_auth_invalidation_failed",
+              severity: invalidatedAuth.ok || invalidatedAuth.skipped ? "warning" : "error",
+              ok: invalidatedAuth.ok,
+              mode: executionMode,
+              details: {
+                invalidated: Boolean(invalidatedAuth.invalidated),
+                skipped: Boolean(invalidatedAuth.skipped),
+                reason:
+                  invalidatedAuth.reason ||
+                  invalidatedAuth.error ||
+                  "unknown",
+                status: invalidatedAuth.status || 0,
+              },
+            });
+          }
           const userVisibleFailureMessage = toUserVisibleRunnerFailureMessage(
             executionFailureDetails,
+            { executionBackend: runExecutionBackend },
           );
           assistantMessage = truncate(
             [
@@ -12216,7 +12329,9 @@ async function main() {
           assistant_message:
             truncate(
               assistantMessage ||
-                toUserVisibleRunnerFailureMessage(message),
+                toUserVisibleRunnerFailureMessage(message, {
+                  executionBackend: runExecutionBackend,
+                }),
               MAX_OUTPUT_CHARS,
             ),
           final_workspace_state: failureFinalWorkspaceState || undefined,
@@ -12357,6 +12472,9 @@ export {
   buildFallbackThreadTitle,
   shouldRunHiddenThreadTitlePreturn,
   stripLeadingCodexTransportNoise,
+  isCodexAuthRefreshFailure,
+  invalidateHostedCodexAuthAfterRefreshFailure,
+  runtimeManifestSupportsScopedPath,
   extractUserVisibleFailureHeadline,
   fetchJson,
   toUserVisibleRunnerFailureMessage,

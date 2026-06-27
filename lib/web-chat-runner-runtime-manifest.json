@@ -38,6 +38,7 @@
   "optional_paths": [
     "/api/chat/runs/goal",
     "/api/chat/runs/thread-title",
-    "/api/chat/runs/thread-pull-request"
+    "/api/chat/runs/thread-pull-request",
+    "/web-chat/hosted-codex-auth/invalidate"
   ]
 }

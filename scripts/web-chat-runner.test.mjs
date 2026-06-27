@@ -40,7 +40,10 @@ import {
   isRecoverableCodexResumeFailure,
   isRecoverableCodexTransportFailure,
   isRecoverableCodexSessionErrorState,
+  isCodexAuthRefreshFailure,
   isSupersededWebChatRunError,
+  invalidateHostedCodexAuthAfterRefreshFailure,
+  runtimeManifestSupportsScopedPath,
   isTerminalWebChatRunPromptRefusal,
   materializeWebChatAttachments,
   normalizeAttachmentRecord,
@@ -124,6 +127,7 @@ test("runtime manifest baseline matches the public startup contract", () => {
     "/api/chat/runs/goal",
     "/api/chat/runs/thread-title",
     "/api/chat/runs/thread-pull-request",
+    "/web-chat/hosted-codex-auth/invalidate",
   ]);
 });
 
@@ -6088,6 +6092,100 @@ test("toUserVisibleRunnerFailureMessage maps usage-limit errors to account guida
     message,
     "The Codex account on this runner has reached its usage limit. Retry after the limit resets.",
   );
+});
+
+test("toUserVisibleRunnerFailureMessage maps hosted revoked auth to reconnect guidance", () => {
+  const revokedReason =
+    "Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.";
+
+  assert.equal(isCodexAuthRefreshFailure(revokedReason), true);
+  assert.equal(
+    toUserVisibleRunnerFailureMessage(revokedReason, {
+      executionBackend: "runner_pool",
+    }),
+    "Your ChatGPT connection expired. Connect ChatGPT again, then retry.",
+  );
+  assert.equal(
+    toUserVisibleRunnerFailureMessage(revokedReason, {
+      executionBackend: "github_actions",
+    }),
+    "Codex is not logged in on this self-hosted runner. Sign in on the runner, then retry.",
+  );
+});
+
+test("invalidateHostedCodexAuthAfterRefreshFailure calls optional scoped route", async (t) => {
+  const requests = [];
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        authorization: request.headers.authorization,
+        body: body ? JSON.parse(body) : {},
+      });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true, invalidated: true }));
+    });
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  const workerUrl = `http://127.0.0.1:${address.port}`;
+
+  assert.equal(
+    runtimeManifestSupportsScopedPath(
+      {
+        scoped_authorized_paths: ["/web-chat/hosted-codex-auth/invalidate"],
+      },
+      "/web-chat/hosted-codex-auth/invalidate",
+    ),
+    true,
+  );
+  const result = await invalidateHostedCodexAuthAfterRefreshFailure({
+    workerUrl,
+    adminToken: "header.payload.signature",
+    runtimeManifest: {
+      scoped_authorized_paths: ["/web-chat/hosted-codex-auth/invalidate"],
+    },
+    threadId: "wct_run",
+    runId: "wcr_run",
+    reason: "Your access token could not be refreshed because your refresh token was revoked.",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.invalidated, true);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "POST");
+  assert.equal(requests[0].url, "/web-chat/hosted-codex-auth/invalidate");
+  assert.equal(requests[0].authorization, "Bearer header.payload.signature");
+  assert.deepEqual(requests[0].body, {
+    thread_id: "wct_run",
+    run_id: "wcr_run",
+    reason: "Your access token could not be refreshed because your refresh token was revoked.",
+  });
+});
+
+test("invalidateHostedCodexAuthAfterRefreshFailure skips older runtimes", async () => {
+  const result = await invalidateHostedCodexAuthAfterRefreshFailure({
+    workerUrl: "https://codeq8.example",
+    adminToken: "header.payload.signature",
+    runtimeManifest: {
+      scoped_authorized_paths: ["/web-chat/hosted-codex-auth/get"],
+    },
+    threadId: "wct_run",
+    runId: "wcr_run",
+    reason: "Your access token could not be refreshed.",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, "runtime_path_unavailable");
 });
 
 test("buildUploadedCodexSessionStoredValue builds a wrapped version 3 envelope", async () => {
