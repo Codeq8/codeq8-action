@@ -26,6 +26,9 @@ const AUTH_URL_ENV_NAMES = [
 const RUN_TOKEN_ROUTE_PROBE_NAME = "__codeq8McpRunTokenRouteProbe";
 const RUN_TOKEN_ROUTE_PREFIX = "/api/chat/runs/";
 const RUN_TOKEN_ROUTE_METHODS = new Set(["GET", "HEAD"]);
+const RUN_TOKEN_MUTATION_ROUTES = new Map([
+  ["/api/chat/runs/thread-goal", new Set(["POST"])],
+]);
 const SECRET_FIELD_PATTERN =
   /(?:authorization|cookie|token|secret|password|private[_-]?key|webhook[_-]?secret|session)/i;
 const MAX_SANITIZED_STRING_LENGTH = 2000;
@@ -70,6 +73,7 @@ type FetchLike = (
   init: {
     method: string;
     headers: Record<string, string>;
+    body?: string;
   },
 ) => Promise<{
   ok: boolean;
@@ -174,6 +178,31 @@ function appendDefaultRunContext({
   }
 }
 
+function appendDefaultRunContextToBody({
+  env,
+  input,
+  body,
+}: {
+  env: EnvLike;
+  input: Record<string, unknown>;
+  body: Record<string, unknown>;
+}) {
+  if (input.include_run_context === false || input.includeRunContext === false) {
+    return;
+  }
+  const defaults: Array<[string, string | undefined]> = [
+    ["workspace_repository", env.CODE_WORKSPACE_REPOSITORY],
+    ["thread_id", env.CODE_CHAT_THREAD_ID],
+    ["run_id", env.CODE_CHAT_RUN_ID],
+  ];
+  for (const [key, value] of defaults) {
+    const normalizedValue = normalizeText(value);
+    if (body[key] === undefined && normalizedValue) {
+      body[key] = normalizedValue;
+    }
+  }
+}
+
 function fallbackProbeBaseUrl({
   env,
   pageUrl,
@@ -192,10 +221,12 @@ function fallbackProbeBaseUrl({
 function buildRunTokenProbeUrl({
   env,
   input,
+  method,
   pageUrl,
 }: {
   env: EnvLike;
   input: Record<string, unknown>;
+  method: string;
   pageUrl: unknown;
 }): URL | null {
   const rawUrl = normalizeText(input.url);
@@ -216,7 +247,9 @@ function buildRunTokenProbeUrl({
     return null;
   }
   appendQueryObject(targetUrl.searchParams, input.query);
-  appendDefaultRunContext({ env, input, searchParams: targetUrl.searchParams });
+  if (method === "GET" || method === "HEAD") {
+    appendDefaultRunContext({ env, input, searchParams: targetUrl.searchParams });
+  }
   return targetUrl;
 }
 
@@ -332,9 +365,6 @@ export function isCodeq8McpRunTokenRouteAllowed({
   targetUrl: unknown;
 }): boolean {
   const normalizedMethod = normalizeMethod(method);
-  if (!RUN_TOKEN_ROUTE_METHODS.has(normalizedMethod)) {
-    return false;
-  }
   let parsed: URL;
   try {
     parsed = new URL(String(targetUrl || ""));
@@ -344,7 +374,30 @@ export function isCodeq8McpRunTokenRouteAllowed({
   if (!isCodeq8McpAuthHostAllowed({ env, host: parsed.hostname })) {
     return false;
   }
-  return parsed.pathname.startsWith(RUN_TOKEN_ROUTE_PREFIX);
+  if (RUN_TOKEN_ROUTE_METHODS.has(normalizedMethod)) {
+    return parsed.pathname.startsWith(RUN_TOKEN_ROUTE_PREFIX);
+  }
+  const allowedMutationMethods = RUN_TOKEN_MUTATION_ROUTES.get(parsed.pathname);
+  return Boolean(allowedMutationMethods?.has(normalizedMethod));
+}
+
+function buildRunTokenProbeJsonBody({
+  env,
+  input,
+  method,
+}: {
+  env: EnvLike;
+  input: Record<string, unknown>;
+  method: string;
+}): string | undefined {
+  if (method === "GET" || method === "HEAD") {
+    return undefined;
+  }
+  const body = {
+    ...payloadObject(input.body || input.json || input.payload),
+  };
+  appendDefaultRunContextToBody({ env, input, body });
+  return JSON.stringify(body);
 }
 
 function sanitizeMcpProbePayload(value: unknown, key = "", depth = 0): unknown {
@@ -419,23 +472,31 @@ export async function requestCodeq8McpRunTokenRoute({
 
   const inputObject = payloadObject(input);
   const method = normalizeMethod(inputObject.method);
-  const targetUrl = buildRunTokenProbeUrl({ env, input: inputObject, pageUrl });
+  const targetUrl = buildRunTokenProbeUrl({
+    env,
+    input: inputObject,
+    method,
+    pageUrl,
+  });
   if (!targetUrl || !isCodeq8McpRunTokenRouteAllowed({ env, method, targetUrl })) {
     return {
       ok: false,
       blocked: true,
-      error: "Codeq8 MCP route probe target is not an allowed read-only run route.",
+      error: "Codeq8 MCP route probe target is not an allowed run-token route.",
       method,
       url: targetUrl ? `${targetUrl.origin}${targetUrl.pathname}` : "",
     };
   }
 
+  const body = buildRunTokenProbeJsonBody({ env, input: inputObject, method });
   const response = await fetchImpl(targetUrl.toString(), {
     method,
     headers: {
       accept: "application/json",
       authorization: `Bearer ${token}`,
+      ...(body ? { "content-type": "application/json" } : {}),
     },
+    ...(body ? { body } : {}),
   });
   const text = await response.text();
   let json: unknown = undefined;

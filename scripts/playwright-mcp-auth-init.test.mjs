@@ -206,7 +206,84 @@ test("Playwright MCP run-token route probe exposes a read-only run route helper"
   assert.doesNotMatch(JSON.stringify(result), /secret-run-token|secret-cookie|should-not-return/);
 });
 
-test("Playwright MCP run-token route probe rejects missing token, unsafe routes, and mutating methods", async () => {
+test("Playwright MCP run-token route probe exposes bounded thread-goal mutation helper", async () => {
+  const requested = [];
+  const fetchImpl = async (url, init) => {
+    requested.push({ url, init });
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          return name.toLowerCase() === "content-type" ? "application/json" : "";
+        },
+      },
+      async text() {
+        return JSON.stringify({
+          ok: true,
+          updated: true,
+          target_thread_id: "wct_target",
+          codex_goal_state: {
+            objective: "Verified through MCP",
+            status: "active",
+          },
+          authorization: "Bearer should-not-return",
+        });
+      },
+    };
+  };
+  const state = createPage({
+    currentUrl:
+      "https://codeq8-git-route-auth-iscoot.vercel.app/Codeq8/Codeq8/thread/wct_parent",
+  });
+
+  const exposed = await exposeCodeq8McpRunTokenRouteProbe({
+    env: {
+      CODE_WEB_CHAT_RUN_TOKEN: "secret-run-token",
+      CODE_WORKSPACE_REPOSITORY: "Codeq8/Codeq8",
+      CODE_CHAT_THREAD_ID: "wct_parent",
+      CODE_CHAT_RUN_ID: "wcr_parent",
+    },
+    fetchImpl,
+    page: state.page,
+  });
+
+  assert.equal(exposed, true);
+  const probe = state.exposedFunctions.get("__codeq8McpRunTokenRouteProbe");
+  assert.equal(typeof probe, "function");
+  const result = await probe({
+    method: "POST",
+    path: "/api/chat/runs/thread-goal",
+    body: {
+      target_thread_id: "wct_target",
+      objective: "Verified through MCP",
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 200);
+  assert.equal(result.method, "POST");
+  assert.equal(
+    result.url,
+    "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/runs/thread-goal",
+  );
+  assert.equal(result.json.updated, true);
+  assert.equal(result.json.authorization, "[redacted]");
+  assert.equal(requested.length, 1);
+  assert.equal(requested[0].init.method, "POST");
+  assert.equal(requested[0].init.headers.authorization, "Bearer secret-run-token");
+  assert.equal(requested[0].init.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(requested[0].init.body), {
+    target_thread_id: "wct_target",
+    objective: "Verified through MCP",
+    workspace_repository: "Codeq8/Codeq8",
+    thread_id: "wct_parent",
+    run_id: "wcr_parent",
+  });
+  assert.doesNotMatch(JSON.stringify(result), /secret-run-token|should-not-return/);
+});
+
+test("Playwright MCP run-token route probe rejects missing token, unsafe routes, and unapproved mutating methods", async () => {
   let fetchCount = 0;
   const fetchImpl = async () => {
     fetchCount += 1;
@@ -231,6 +308,14 @@ test("Playwright MCP run-token route probe rejects missing token, unsafe routes,
         "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/runs/delegated-thread-state",
     }),
     false,
+  );
+  assert.equal(
+    isCodeq8McpRunTokenRouteAllowed({
+      method: "POST",
+      targetUrl:
+        "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/runs/thread-goal",
+    }),
+    true,
   );
   assert.equal(
     isCodeq8McpRunTokenRouteAllowed({
@@ -272,7 +357,7 @@ test("Playwright MCP run-token route probe rejects missing token, unsafe routes,
   });
   assert.equal(rejectedMethod.ok, false);
   assert.equal(rejectedMethod.blocked, true);
-  assert.match(rejectedMethod.error, /not an allowed read-only run route/);
+  assert.match(rejectedMethod.error, /not an allowed run-token route/);
 
   const rejectedRoute = await requestCodeq8McpRunTokenRoute({
     env: { CODE_WEB_CHAT_RUN_TOKEN: "run-token" },
