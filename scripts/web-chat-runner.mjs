@@ -8822,12 +8822,8 @@ function shouldRunHiddenThreadTitlePreturn({
   threadTitle = "",
   threadTitleSource = "",
   promptText = "",
-  executionBackend = "",
 } = {}) {
   if (normalizeText(mode).toLowerCase() !== "fresh") {
-    return false;
-  }
-  if (normalizeRunExecutionBackend(executionBackend) === "runner_pool") {
     return false;
   }
   if (!hasMeaningfulHiddenThreadTitlePrompt(promptText)) {
