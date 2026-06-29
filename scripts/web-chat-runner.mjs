@@ -60,6 +60,7 @@ const APP_SERVER_PROGRESS_BATCH_INTERVAL_MS = 3000;
 const APP_SERVER_PROGRESS_MAX_BATCH_SIZE = 12;
 const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 10;
 const APP_SERVER_CONTROL_MAX_REQUESTS_PER_RUN = 20;
+const APP_SERVER_CONTROL_FINAL_CONTINUATION_MAX_TURNS = 3;
 const APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS = 2500;
 // AppServer live chat transport must not be implemented as recurring runner
 // HTTP calls. The runner gets one Firebase session, then uses Firestore
@@ -67,7 +68,9 @@ const APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS = 2500;
 const APP_SERVER_FIRESTORE_SESSION_PATH =
   "/api/chat/runs/app-server/firebase-session";
 const APP_SERVER_PROGRESS_HISTORY_PATH = "/api/chat/runs/app-server/events";
+const APP_SERVER_CONTROL_PATH = "/api/chat/runs/app-server/control";
 const APP_SERVER_PROGRESS_HISTORY_MAX_EVENTS_PER_REQUEST = 10;
+const APP_SERVER_CONTROL_FINAL_CHECKPOINT_FETCH_TIMEOUT_MS = 15_000;
 const APP_SERVER_ATTACHMENT_TURN_CONTROL_CAPABILITY =
   "codex_app_server_attachment_turn_control";
 const CODEX_GOAL_UPDATE_PATH = "/api/chat/runs/goal";
@@ -2126,6 +2129,89 @@ async function requestWebChatRunnerRuntimeJson({
     throw new Error(`${normalizeText(responseLabel) || "Codeq8 runner runtime response"} is invalid.`);
   }
   return parsed.data;
+}
+
+async function fetchPendingAppServerControlRequests({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+}) {
+  const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
+  const normalizedToken = normalizeText(webChatRunToken);
+  if (!normalizedToken || normalizedToken.split(".").length !== 3) {
+    throw new Error("A scoped CODE_WEB_CHAT_RUN_TOKEN is required for AppServer control reads.");
+  }
+  const endpoint = new URL(APP_SERVER_CONTROL_PATH, normalizedPublicBaseUrl);
+  endpoint.search = new URLSearchParams({
+    workspace_repository: normalizeText(workspaceRepository),
+    thread_id: normalizeText(threadId),
+    run_id: normalizeText(runId),
+    after_sequence: "0",
+  }).toString();
+  const response = await fetchJson(endpoint.toString(), {
+    method: "GET",
+    timeoutMs: APP_SERVER_CONTROL_FINAL_CHECKPOINT_FETCH_TIMEOUT_MS,
+    headers: {
+      Authorization: `Bearer ${normalizedToken}`,
+    },
+  });
+  if (!response.ok || response.payload?.ok === false) {
+    throw new Error(
+      normalizeText(response.payload?.error || response.payload?.message || response.textBody) ||
+        `AppServer control request read failed (${response.status}).`,
+    );
+  }
+  return normalizeAppServerControlRequestsForRunMetadata(response.payload?.requests)
+    .filter((request) => request.kind === "steer" && request.status === "pending");
+}
+
+async function acknowledgeAppServerControlRequests({
+  publicBaseUrl,
+  webChatRunToken,
+  workspaceRepository,
+  threadId,
+  runId,
+  requests,
+}) {
+  const normalizedRequests = normalizeAppServerControlRequestsForRunMetadata(requests)
+    .filter((request) => request.kind === "steer" && request.status === "pending");
+  if (normalizedRequests.length === 0) {
+    return { ok: true, acknowledgedCount: 0 };
+  }
+  const normalizedPublicBaseUrl = normalizeCodePublicBaseUrl(publicBaseUrl);
+  const normalizedToken = normalizeText(webChatRunToken);
+  if (!normalizedToken || normalizedToken.split(".").length !== 3) {
+    throw new Error("A scoped CODE_WEB_CHAT_RUN_TOKEN is required for AppServer control acknowledgements.");
+  }
+  const response = await fetchJson(new URL(APP_SERVER_CONTROL_PATH, normalizedPublicBaseUrl).toString(), {
+    method: "POST",
+    timeoutMs: APP_SERVER_CONTROL_FINAL_CHECKPOINT_FETCH_TIMEOUT_MS,
+    headers: {
+      Authorization: `Bearer ${normalizedToken}`,
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify({
+      workspace_repository: normalizeText(workspaceRepository),
+      thread_id: normalizeText(threadId),
+      run_id: normalizeText(runId),
+      acknowledgements: normalizedRequests.map((request) => ({
+        request_id: request.request_id,
+        status: "accepted",
+      })),
+    }),
+  });
+  if (!response.ok || response.payload?.ok === false) {
+    throw new Error(
+      normalizeText(response.payload?.error || response.payload?.message || response.textBody) ||
+        `AppServer control acknowledgement failed (${response.status}).`,
+    );
+  }
+  return {
+    ok: true,
+    acknowledgedCount: parsePositiveInteger(response.payload?.acknowledged_count, 0),
+  };
 }
 
 async function postCodexGoalUpdate({
@@ -8211,6 +8297,115 @@ function buildAppServerSteerInputText({
   ].join("\n");
 }
 
+function buildAppServerFinalContinuationInputText({
+  requests,
+}) {
+  const normalizedRequests = (Array.isArray(requests) ? requests : [])
+    .map((request) => normalizeObject(request))
+    .filter((request) => normalizeText(request.request_id || request.requestId));
+  const sections = normalizedRequests.map((request, index) => {
+    const content = normalizeText(request.content);
+    const attachments = parseAttachmentList(request.materialized_attachments);
+    return [
+      `Message ${index + 1}:`,
+      content || "(no text)",
+      ...(attachments.length > 0
+        ? [
+            "",
+            "Attachments materialized locally:",
+            ...attachments.map((attachment) =>
+              describeMaterializedAppServerAttachment(attachment),
+            ),
+          ]
+        : []),
+    ].join("\n");
+  });
+  return [
+    "User follow-up messages arrived while this GitHub Actions run was still active, but the previous Codex turn completed before they could be delivered.",
+    "Provide the new final response based on the conversation so far and the late user messages below.",
+    "Do not treat the previous assistant response as final if these messages change the answer.",
+    "",
+    "Late user messages:",
+    "",
+    ...sections,
+  ].join("\n\n");
+}
+
+async function materializeAppServerContinuationRequests({
+  requests,
+  attachmentRootPath,
+  workerUrl,
+  adminToken,
+  threadId,
+  commandEnv = process.env,
+  materializeWebChatAttachmentsImpl = materializeWebChatAttachments,
+}) {
+  const normalizedRequests = normalizeAppServerControlRequestsForRunMetadata(requests)
+    .filter((request) => request.kind === "steer" && request.status === "pending");
+  const materializedRequests = [];
+  for (const request of normalizedRequests) {
+    const requestId = normalizeText(request.request_id || request.requestId);
+    const attachments = parseAttachmentList(request.attachments);
+    const materializedAttachments = attachments.length > 0
+      ? await materializeWebChatAttachmentsImpl({
+          attachments,
+          attachmentRootPath: path.join(
+            normalizeText(attachmentRootPath) || os.tmpdir(),
+            requestId.replace(/[^A-Za-z0-9._:-]/g, "-"),
+          ),
+          workerUrl,
+          adminToken,
+          threadId,
+          commandEnv,
+        })
+      : [];
+    materializedRequests.push({
+      ...request,
+      materialized_attachments: materializedAttachments,
+    });
+  }
+  return materializedRequests;
+}
+
+function mergeAppServerControlRequestSnapshots(...requestLists) {
+  const merged = new Map();
+  for (const requests of requestLists) {
+    for (const request of normalizeAppServerControlRequestsForRunMetadata(requests)) {
+      merged.set(request.request_id, request);
+    }
+  }
+  return [...merged.values()]
+    .sort((left, right) => {
+      const leftSequence = Number(left.sequence || 0) || 0;
+      const rightSequence = Number(right.sequence || 0) || 0;
+      if (leftSequence !== rightSequence) {
+        return leftSequence - rightSequence;
+      }
+      const leftRequestedAt = Number(left.requested_at || 0) || 0;
+      const rightRequestedAt = Number(right.requested_at || 0) || 0;
+      return leftRequestedAt - rightRequestedAt;
+    })
+    .slice(-APP_SERVER_CONTROL_MAX_REQUESTS_PER_RUN);
+}
+
+function filterUnhandledPendingAppServerControlRequests({
+  pendingRequests,
+  handledRequests,
+}) {
+  const handledStatusById = new Map();
+  for (const request of normalizeAppServerControlRequestsForRunMetadata(handledRequests)) {
+    if (request.status === "accepted" || request.status === "failed") {
+      handledStatusById.set(request.request_id, request.status);
+    }
+  }
+  return normalizeAppServerControlRequestsForRunMetadata(pendingRequests)
+    .filter((request) =>
+      request.kind === "steer" &&
+      request.status === "pending" &&
+      !handledStatusById.has(request.request_id),
+    );
+}
+
 function readAppServerLiveStatusThread(data, threadId, runId) {
   const threads = normalizeObject(normalizeObject(data).threads);
   const threadStatus = normalizeObject(threads[threadId]);
@@ -8344,6 +8539,7 @@ function createAppServerFirestoreControlListener({
   getAppServerThreadId,
   getAppServerTurnId,
   setAppServerTurnId = () => {},
+  handledControlRequestIds = [],
 }) {
   // Control is event-driven through Firestore onSnapshot. Do not replace this
   // with periodic HTTP fetches to the private app; that failure mode has caused
@@ -8378,6 +8574,12 @@ function createAppServerFirestoreControlListener({
   let unsubscribe = () => {};
   let latestSnapshotData = null;
   let latestControlRequests = [];
+  let processingPaused = false;
+  const handledRequestIds = new Set(
+    (Array.isArray(handledControlRequestIds) ? handledControlRequestIds : [])
+      .map((requestId) => normalizeText(requestId))
+      .filter(Boolean),
+  );
   const processingRequestIds = new Set();
   const processingPromises = new Set();
 
@@ -8385,10 +8587,71 @@ function createAppServerFirestoreControlListener({
     latestControlRequests = normalizeAppServerControlRequestsForRunMetadata(requests);
   };
 
+  const markAcknowledgedLocally = (acknowledgements) => {
+    const normalizedAcknowledgements = (Array.isArray(acknowledgements)
+      ? acknowledgements
+      : [])
+      .map((acknowledgement) => {
+        const requestId = normalizeText(
+          acknowledgement?.request_id || acknowledgement?.requestId,
+        );
+        const status = normalizeText(acknowledgement?.status).toLowerCase();
+        if (!requestId || (status !== "accepted" && status !== "failed")) {
+          return null;
+        }
+        handledRequestIds.add(requestId);
+        return {
+          request_id: requestId,
+          status,
+          error: truncate(extractErrorMessage(acknowledgement?.error), 500),
+        };
+      })
+      .filter(Boolean);
+    if (normalizedAcknowledgements.length === 0) {
+      return;
+    }
+    const currentRequests = latestSnapshotData
+      ? readAppServerLiveStatusControlRequests(
+          latestSnapshotData,
+          normalizedThreadId,
+          normalizedRunId,
+        )
+      : latestControlRequests;
+    const acknowledged = applyAppServerControlAcknowledgementsToRequests({
+      acknowledgements: normalizedAcknowledgements,
+      requests: currentRequests,
+    });
+    if (!acknowledged.changed) {
+      return;
+    }
+    updateLatestControlRequests(acknowledged.requests);
+    if (latestSnapshotData) {
+      const now = Date.now();
+      const normalizedData = normalizeObject(latestSnapshotData);
+      const threads = normalizeObject(normalizedData.threads);
+      const threadStatus = normalizeObject(threads[normalizedThreadId]);
+      latestSnapshotData = {
+        ...normalizedData,
+        threads: {
+          ...threads,
+          [normalizedThreadId]: {
+            ...threadStatus,
+            appServerControlRequests: acknowledged.requests,
+            appServerControlRevision: `${normalizedRunId}:${now}`,
+            updatedAt: now,
+          },
+        },
+        revision: String(now),
+        updatedAt: now,
+      };
+    }
+  };
+
   const acknowledge = async (acknowledgements) => {
     if (!Array.isArray(acknowledgements) || acknowledgements.length === 0) {
       return;
     }
+    markAcknowledgedLocally(acknowledgements);
     await runTransactionImpl(firestore, async (transaction) => {
       const snapshot = await transaction.get(docRef);
       const data = snapshot.exists() ? snapshot.data() : {};
@@ -8477,12 +8740,31 @@ function createAppServerFirestoreControlListener({
     await acknowledge(acknowledgements);
   };
 
+  const materializeSteerRequestAttachments = async (request) => {
+    const attachments = parseAttachmentList(request.attachments);
+    if (attachments.length === 0) {
+      return [];
+    }
+    const requestId = normalizeText(request.request_id || request.requestId);
+    return await materializeWebChatAttachmentsImpl({
+      attachments,
+      attachmentRootPath: path.join(
+        normalizedAttachmentRootPath || os.tmpdir(),
+        requestId.replace(/[^A-Za-z0-9._:-]/g, "-"),
+      ),
+      workerUrl: normalizedWorkerUrl,
+      adminToken: normalizedAdminToken,
+      threadId: normalizedThreadId,
+      commandEnv,
+    });
+  };
+
   const processRequest = async (rawRequest) => {
     const request = normalizeObject(rawRequest);
     const requestId = normalizeText(request.request_id || request.requestId);
     const kind = normalizeText(request.kind).toLowerCase();
     const appServerThreadId = getAppServerThreadId();
-    if (!requestId || !appServerThreadId || stopped) {
+    if (!requestId || handledRequestIds.has(requestId) || !appServerThreadId || stopped) {
       return;
     }
     const acknowledgements = [];
@@ -8496,20 +8778,7 @@ function createAppServerFirestoreControlListener({
       }
       if (kind === "steer") {
         const content = normalizeText(request.content);
-        const attachments = parseAttachmentList(request.attachments);
-        const materializedAttachments = attachments.length > 0
-          ? await materializeWebChatAttachmentsImpl({
-              attachments,
-              attachmentRootPath: path.join(
-                normalizedAttachmentRootPath || os.tmpdir(),
-                requestId.replace(/[^A-Za-z0-9._:-]/g, "-"),
-              ),
-              workerUrl: normalizedWorkerUrl,
-              adminToken: normalizedAdminToken,
-              threadId: normalizedThreadId,
-              commandEnv,
-            })
-          : [];
+        const materializedAttachments = await materializeSteerRequestAttachments(request);
         const inputText = buildAppServerSteerInputText({
           content,
           attachments: materializedAttachments,
@@ -8574,11 +8843,18 @@ function createAppServerFirestoreControlListener({
     if (stopped || (stopping && !allowWhileStopping)) {
       return;
     }
+    if (processingPaused) {
+      return;
+    }
     if (!getAppServerThreadId() || !getAppServerTurnId()) {
       return;
     }
     for (const request of requests) {
       if (normalizeText(request.status || "pending").toLowerCase() !== "pending") {
+        continue;
+      }
+      const requestId = normalizeText(request.request_id || request.requestId);
+      if (handledRequestIds.has(requestId)) {
         continue;
       }
       enqueueRequest(request);
@@ -8636,7 +8912,20 @@ function createAppServerFirestoreControlListener({
     readControlRequests() {
       return [...latestControlRequests];
     },
-    async stop() {
+    pauseProcessing() {
+      processingPaused = true;
+    },
+    resumeProcessing() {
+      processingPaused = false;
+      flushPending();
+    },
+    async acknowledgeRequests(acknowledgements) {
+      await acknowledge(acknowledgements);
+    },
+    markRequestsAcknowledgedLocally(acknowledgements) {
+      markAcknowledgedLocally(acknowledgements);
+    },
+    async stop({ failPending = true } = {}) {
       flushPending({ allowWhileStopping: true });
       stopping = true;
       try {
@@ -8647,10 +8936,49 @@ function createAppServerFirestoreControlListener({
       if (processingPromises.size > 0) {
         await Promise.allSettled([...processingPromises]);
       }
-      await failObservedPendingRequests(
-        "Codex finished before this follow-up could be delivered.",
-      );
+      if (failPending) {
+        await failObservedPendingRequests(
+          "Codex finished before this follow-up could be delivered.",
+        );
+      } else {
+        const requests = readAppServerLiveStatusControlRequests(
+          latestSnapshotData,
+          normalizedThreadId,
+          normalizedRunId,
+        );
+        updateLatestControlRequests(requests);
+      }
       stopped = true;
+    },
+    async takePendingSteerRequestsForContinuation() {
+      flushPending({ allowWhileStopping: true });
+      if (processingPromises.size > 0) {
+        await Promise.allSettled([...processingPromises]);
+      }
+      const requests = readAppServerLiveStatusControlRequests(
+        latestSnapshotData,
+        normalizedThreadId,
+        normalizedRunId,
+      );
+      updateLatestControlRequests(requests);
+      const pendingSteerRequests = [];
+      for (const request of requests) {
+        if (
+          normalizeText(request.status || "pending").toLowerCase() !== "pending" ||
+          normalizeText(request.kind).toLowerCase() !== "steer"
+        ) {
+          continue;
+        }
+        const requestId = normalizeText(request.request_id || request.requestId);
+        if (handledRequestIds.has(requestId)) {
+          continue;
+        }
+        pendingSteerRequests.push({
+          ...request,
+          materialized_attachments: await materializeSteerRequestAttachments(request),
+        });
+      }
+      return pendingSteerRequests.slice(-APP_SERVER_CONTROL_MAX_REQUESTS_PER_RUN);
     },
   };
 }
@@ -8996,14 +9324,20 @@ async function runCodexAppServer({
   const normalizedSessionId = normalizeCodexSessionId(sessionId);
   const normalizedCodexGoalState = normalizeCodexGoalState(codexGoalState);
   const goalsEnabled = Boolean(codexThreadGoalsEnabled);
-  const hiddenTitlePreturnEnabled = shouldRunHiddenThreadTitlePreturn({
-    mode: normalizedMode,
-    threadTitle: appServerContext?.threadTitle,
-    threadTitleSource: appServerContext?.threadTitleSource,
-    promptText: appServerContext?.promptText,
-    executionBackend:
-      commandEnv?.CODEQ8_EXECUTION_BACKEND || commandEnv?.CODE_CHAT_EXECUTION_BACKEND,
-  });
+  const initialContinuationControlRequests =
+    normalizeAppServerControlRequestsForRunMetadata(
+      appServerContext?.initialContinuationControlRequests,
+    ).filter((request) => request.kind === "steer" && request.status === "pending");
+  const hiddenTitlePreturnEnabled =
+    initialContinuationControlRequests.length === 0 &&
+    shouldRunHiddenThreadTitlePreturn({
+      mode: normalizedMode,
+      threadTitle: appServerContext?.threadTitle,
+      threadTitleSource: appServerContext?.threadTitleSource,
+      promptText: appServerContext?.promptText,
+      executionBackend:
+        commandEnv?.CODEQ8_EXECUTION_BACKEND || commandEnv?.CODE_CHAT_EXECUTION_BACKEND,
+    });
   const hiddenTitleCompletionTimeoutMs = parsePositiveInteger(
     appServerContext?.hiddenThreadTitlePreturnTimeoutMs,
     HIDDEN_THREAD_TITLE_COMPLETION_TIMEOUT_MS,
@@ -9048,6 +9382,7 @@ async function runCodexAppServer({
     let appServerThreadId = "";
     let activeTurnId = "";
     let activeTurnPurpose = "main";
+    let appServerContinuationTurnCount = 0;
     let nextRequestId = 1;
     let appServerTraceCount = 0;
     let hiddenTitleTurnCompletion = null;
@@ -9187,7 +9522,7 @@ async function runCodexAppServer({
       }
       settled = true;
       clearTimeout(timeoutHandle);
-      await controlListener?.stop?.();
+      await controlListener?.stop?.({ failPending: false });
       await progressReporter.flush();
       await goalReporter.flush();
       if (firestoreBridge?.close) {
@@ -9548,10 +9883,113 @@ async function runCodexAppServer({
       }
     };
 
+    const acknowledgeInitialContinuationControlRequests = async () => {
+      if (initialContinuationControlRequests.length === 0) {
+        return;
+      }
+      const acknowledgements = initialContinuationControlRequests
+        .map((request) => ({
+          request_id: normalizeText(request.request_id || request.requestId),
+          status: "accepted",
+        }))
+        .filter((acknowledgement) => acknowledgement.request_id);
+      controlListener?.markRequestsAcknowledgedLocally?.(acknowledgements);
+      const acknowledgeImpl =
+        appServerContext?.acknowledgeAppServerControlRequestsImpl ||
+        acknowledgeAppServerControlRequests;
+      try {
+        await acknowledgeImpl({
+          publicBaseUrl: appServerContext?.publicBaseUrl,
+          webChatRunToken: appServerContext?.webChatRunToken,
+          workspaceRepository: appServerContext?.workspaceRepository,
+          threadId: appServerContext?.threadId,
+          runId: appServerContext?.runId,
+          requests: initialContinuationControlRequests,
+        });
+      } catch (error) {
+        const reason = extractErrorMessage(error);
+        log(
+          "WARN",
+          "Late AppServer control acknowledgement failed after continuation turn start",
+          reason,
+        );
+        await maybeReportRunnerDiagnostic(appServerContext?.reportRunnerDiagnostic, {
+          event: "runner_app_server_final_continuation_acknowledgement_failed",
+          failureClass: "runner_app_server_final_continuation_acknowledgement_failed",
+          severity: "warning",
+          ok: false,
+          details: {
+            error: reason,
+            request_count: acknowledgements.length,
+          },
+        });
+      }
+      log(
+        "Acknowledged late AppServer control requests after continuation turn start",
+        `count=${initialContinuationControlRequests.length}`,
+      );
+    };
+
+    const startAppServerMainTurn = async (inputText) => {
+      activeTurnPurpose = "main";
+      activeTurnId = "";
+      resetAgentMessageCapture();
+      const turnResult = await sendRequest("turn/start", {
+        threadId: appServerThreadId,
+        input: [{ type: "text", text: inputText }],
+        cwd: workspacePath,
+        model: normalizedModel,
+        approvalPolicy: "never",
+        sandboxPolicy: {
+          type: "dangerFullAccess",
+        },
+        effort: DEFAULT_CODEX_REASONING_EFFORT,
+      });
+      activeTurnId = extractAppServerTurnId(turnResult) || activeTurnId;
+      controlListener?.flushPending?.();
+    };
+
+    const startFinalContinuationTurnIfNeeded = async () => {
+      if (!controlListener || appServerContinuationTurnCount >= APP_SERVER_CONTROL_FINAL_CONTINUATION_MAX_TURNS) {
+        return false;
+      }
+      activeTurnId = "";
+      controlListener.pauseProcessing?.();
+      const pendingSteerRequests =
+        await controlListener.takePendingSteerRequestsForContinuation?.();
+      if (!Array.isArray(pendingSteerRequests) || pendingSteerRequests.length === 0) {
+        controlListener.resumeProcessing?.();
+        return false;
+      }
+      appServerContinuationTurnCount += 1;
+      log(
+        "Continuing Codex app-server turn for late user follow-ups",
+        `count=${pendingSteerRequests.length} continuation=${appServerContinuationTurnCount}/${APP_SERVER_CONTROL_FINAL_CONTINUATION_MAX_TURNS}`,
+      );
+      const continuationInput = buildAppServerFinalContinuationInputText({
+        requests: pendingSteerRequests,
+      });
+      await startAppServerMainTurn(continuationInput);
+      await controlListener.acknowledgeRequests?.(
+        pendingSteerRequests
+          .map((request) => ({
+            request_id: normalizeText(request.request_id || request.requestId),
+            status: "accepted",
+          }))
+          .filter((acknowledgement) => acknowledgement.request_id),
+      );
+      controlListener.resumeProcessing?.();
+      return true;
+    };
+
     const finishAfterTurnCompleted = async (result) => {
+      if (await startFinalContinuationTurnIfNeeded(result.completedTurnId)) {
+        return;
+      }
       const codexGoalState = await captureFinalCodexGoalState();
       await finish({
         ...result,
+        completedTurnId: undefined,
         ...(codexGoalState ? { codexGoalState } : {}),
       });
     };
@@ -9650,6 +10088,8 @@ async function runCodexAppServer({
           });
           return;
         }
+        activeTurnId = "";
+        controlListener?.pauseProcessing?.();
         void finishAfterTurnCompleted({
           ok,
           output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
@@ -9658,6 +10098,7 @@ async function runCodexAppServer({
           exitCode: ok ? 0 : 1,
           signal: "",
           timedOut: false,
+          completedTurnId: notificationTurnId,
         });
       }
     };
@@ -9834,21 +10275,19 @@ async function runCodexAppServer({
           activeTurnId = normalizeCodexSessionId(turnId) || activeTurnId;
           controlListener?.flushPending?.();
         },
+        handledControlRequestIds: initialContinuationControlRequests
+          .map((request) => normalizeText(request.request_id || request.requestId))
+          .filter(Boolean),
       }) || null;
+      if (initialContinuationControlRequests.length > 0) {
+        controlListener?.pauseProcessing?.();
+      }
       controlListener?.start?.();
-      const turnResult = await sendRequest("turn/start", {
-        threadId: appServerThreadId,
-        input: [{ type: "text", text: normalizedTask }],
-        cwd: workspacePath,
-        model: normalizedModel,
-        approvalPolicy: "never",
-        sandboxPolicy: {
-          type: "dangerFullAccess",
-        },
-        effort: DEFAULT_CODEX_REASONING_EFFORT,
-      });
-      activeTurnId = extractAppServerTurnId(turnResult) || activeTurnId;
-      controlListener?.flushPending?.();
+      await startAppServerMainTurn(normalizedTask);
+      await acknowledgeInitialContinuationControlRequests();
+      if (initialContinuationControlRequests.length > 0) {
+        controlListener?.resumeProcessing?.();
+      }
     })().catch((error) => {
       void finish({
         ok: false,
@@ -11055,6 +11494,8 @@ async function main() {
   let codexResumeRecoveryCount = 0;
   let lastPersistenceSummary = "";
   let latestAppServerControlRequests = [];
+  let pendingAppServerContinuationRequests = [];
+  let appServerFinalContinuationRestartCount = 0;
   let workspacePreparationRunMetadata = {};
   try {
     while (true) {
@@ -11235,6 +11676,11 @@ async function main() {
 
       const attemptRunRuntime = await createWebChatRunRuntime(threadId);
       runRuntime = attemptRunRuntime;
+      const continuationRequestsForAttempt =
+        normalizeAppServerControlRequestsForRunMetadata(
+          pendingAppServerContinuationRequests,
+        ).filter((request) => request.kind === "steer" && request.status === "pending");
+      pendingAppServerContinuationRequests = [];
       const codexCommandEnv = { ...commandEnv };
       applyCodeq8CliRuntimeEnv({
         commandEnv: codexCommandEnv,
@@ -11257,14 +11703,41 @@ async function main() {
           preparedGitHubCli.reason || "Unavailable.",
         );
       }
-      const materializedAttachments = await materializeWebChatAttachments({
-        attachments: latestMessageAttachments,
-        attachmentRootPath: path.join(attemptRunRuntime.homePath, "attachments"),
-        workerUrl,
-        adminToken,
-        threadId,
-        commandEnv: codexCommandEnv,
-      });
+      const materializedAttachments = continuationRequestsForAttempt.length > 0
+        ? []
+        : await materializeWebChatAttachments({
+            attachments: latestMessageAttachments,
+            attachmentRootPath: path.join(attemptRunRuntime.homePath, "attachments"),
+            workerUrl,
+            adminToken,
+            threadId,
+            commandEnv: codexCommandEnv,
+          });
+      const materializedContinuationRequests =
+        continuationRequestsForAttempt.length > 0
+          ? await materializeAppServerContinuationRequests({
+              requests: continuationRequestsForAttempt,
+              attachmentRootPath: path.join(
+                attemptRunRuntime.homePath,
+                "final-control-attachments",
+              ),
+              workerUrl,
+              adminToken,
+              threadId,
+              commandEnv: codexCommandEnv,
+            })
+          : [];
+      const activePromptText = materializedContinuationRequests.length > 0
+        ? buildAppServerFinalContinuationInputText({
+            requests: materializedContinuationRequests,
+          })
+        : promptText;
+      if (materializedContinuationRequests.length > 0) {
+        latestAppServerControlRequests = mergeAppServerControlRequestSnapshots(
+          latestAppServerControlRequests,
+          materializedContinuationRequests,
+        );
+      }
       markPublicActionStartupTiming(publicActionStartupTimings, "attachments_ready");
 
       try {
@@ -11456,7 +11929,7 @@ async function main() {
               branchContext: activeBranchContext,
               workspacePersistenceState,
               threadSpecText,
-              promptText,
+              promptText: activePromptText,
               recentUserMessagesPromptText,
               recentChecksPromptText,
               threadTitleSource: activeThreadTitleSource,
@@ -11482,7 +11955,7 @@ async function main() {
               branchContext: activeBranchContext,
               workspacePersistenceState,
               threadSpecText,
-              promptText,
+              promptText: activePromptText,
               recentChecksPromptText,
               threadTitleSource: activeThreadTitleSource,
               codeq8Cli: preparedCodeq8Cli,
@@ -11540,6 +12013,7 @@ async function main() {
             prompt_chars: prompt.length,
             marker_hash: hashDiagnosticValue(currentRunMarker),
             attachments_count: materializedAttachments.length,
+            final_continuation_message_count: materializedContinuationRequests.length,
             referenced_threads_count: referencedThreads.length,
             target_shift: resumeTargetShift,
             thread_target_restart_count: threadTargetRestartCount,
@@ -11566,18 +12040,30 @@ async function main() {
                 workspace_repository: activeWorkspaceRepository,
                 status: "running",
                 summary:
-                  threadTargetRestartCount > 0
-                    ? "Restarting on the updated thread context."
-                    : "Codex is working.",
+                  materializedContinuationRequests.length > 0
+                    ? `Continuing with ${materializedContinuationRequests.length} late follow-up message${materializedContinuationRequests.length === 1 ? "" : "s"}.`
+                    : threadTargetRestartCount > 0
+                      ? "Restarting on the updated thread context."
+                      : "Codex is working.",
                 resolved_write_branch: preparedWorkspace.durableWriteBranch || undefined,
                 started_at: startedAt,
                 metadata: buildCodexRunMetadata({
                   model: codexModel,
                   mode: executionMode,
+                  appServerControlRequests: latestAppServerControlRequests,
                   extra: {
                     ...workspacePreparationRunMetadata,
                     ...latestPublicActionTimingMetadata,
                     bundle_revision: persistedCodexSessionState.bundle_revision || 0,
+                    ...(materializedContinuationRequests.length > 0
+                      ? {
+                          app_server_final_continuation_attempt: true,
+                          app_server_final_continuation_message_count:
+                            materializedContinuationRequests.length,
+                          app_server_final_continuation_restart_count:
+                            appServerFinalContinuationRestartCount,
+                        }
+                      : {}),
                     thread_target_restart_count: threadTargetRestartCount,
                   },
                 }),
@@ -11635,13 +12121,14 @@ async function main() {
             runId,
             threadTitle: activeThreadTitle,
             threadTitleSource: activeThreadTitleSource,
-            promptText,
+            promptText: activePromptText,
             workerUrl,
             adminToken,
             attachmentRootPath: path.join(attemptRunRuntime.homePath, "control-attachments"),
             commandEnv: codexCommandEnv,
             reportRunnerDiagnostic,
             progressHistoryEnabled: appServerProgressHistoryEnabled,
+            initialContinuationControlRequests: materializedContinuationRequests,
           },
         });
         if (execution.stoppedBeforeCodex) {
@@ -12110,6 +12597,121 @@ async function main() {
           );
         }
 
+        let pendingFinalContinuationRequests = [];
+        try {
+          pendingFinalContinuationRequests = await fetchPendingAppServerControlRequests({
+            publicBaseUrl,
+            webChatRunToken: resolveWebChatRunToken(commandEnv),
+            workspaceRepository: activeWorkspaceRepository,
+            threadId,
+            runId,
+          });
+        } catch (error) {
+          const checkpointError = extractErrorMessage(error);
+          log(
+            "WARN",
+            "Unable to read final AppServer control checkpoint before terminal callback",
+            checkpointError,
+          );
+          await reportRunnerDiagnostic({
+            event: "runner_app_server_final_continuation_checkpoint_failed",
+            failureClass: "runner_app_server_final_continuation_checkpoint_failed",
+            severity: "warning",
+            ok: false,
+            mode: executionMode,
+            details: {
+              error: checkpointError,
+              route_path: APP_SERVER_CONTROL_PATH,
+            },
+          });
+        }
+        pendingFinalContinuationRequests =
+          filterUnhandledPendingAppServerControlRequests({
+            pendingRequests: pendingFinalContinuationRequests,
+            handledRequests: latestAppServerControlRequests,
+          });
+        if (pendingFinalContinuationRequests.length > 0) {
+          latestAppServerControlRequests = mergeAppServerControlRequestSnapshots(
+            latestAppServerControlRequests,
+            pendingFinalContinuationRequests,
+          );
+          if (
+            appServerFinalContinuationRestartCount <
+            APP_SERVER_CONTROL_FINAL_CONTINUATION_MAX_TURNS
+          ) {
+            appServerFinalContinuationRestartCount += 1;
+            pendingAppServerContinuationRequests = pendingFinalContinuationRequests;
+            log(
+              "Detected late AppServer follow-up before terminal callback; restarting Codex in the same Actions run",
+              `count=${pendingFinalContinuationRequests.length} continuation=${appServerFinalContinuationRestartCount}/${APP_SERVER_CONTROL_FINAL_CONTINUATION_MAX_TURNS}`,
+            );
+            await reportRunnerDiagnostic({
+              event: "runner_app_server_final_continuation_restart",
+              mode: "resume",
+              details: {
+                pending_request_count: pendingFinalContinuationRequests.length,
+                continuation_restart_count: appServerFinalContinuationRestartCount,
+                session_state: summarizeCodexSessionStateForDiagnostic(
+                  persistedCodexSessionState,
+                ),
+              },
+            });
+            await postRunCallback({
+              publicBaseUrl,
+              workerUrl,
+              adminToken,
+              body: {
+                thread_id: threadId,
+                run_id: runId,
+                message_id: messageId,
+                workspace_repository: activeWorkspaceRepository,
+                status: "running",
+                summary: `Continuing with ${pendingFinalContinuationRequests.length} late follow-up message${pendingFinalContinuationRequests.length === 1 ? "" : "s"}.`,
+                resolved_write_branch:
+                  persistenceResult.resolvedWriteBranch ||
+                  preparedWorkspace.durableWriteBranch ||
+                  undefined,
+                resolved_pull_request_number: resolvedPullRequestNumber,
+                resolved_pull_request_url: resolvedPullRequestUrl,
+                resolved_pull_request_title: persistenceResult.pullRequestTitle || "",
+                final_workspace_state: callbackFinalWorkspaceState || undefined,
+                started_at: startedAt,
+                metadata: buildCodexRunMetadata({
+                  model: codexModel,
+                  mode: "resume",
+                  appServerControlRequests: latestAppServerControlRequests,
+                  extra: {
+                    ...workspacePreparationRunMetadata,
+                    ...latestPublicActionTimingMetadata,
+                    app_server_final_continuation_restart: true,
+                    app_server_final_continuation_message_count:
+                      pendingFinalContinuationRequests.length,
+                    app_server_final_continuation_restart_count:
+                      appServerFinalContinuationRestartCount,
+                    codex_session_id: persistedCodexSessionState.session_id,
+                    codex_session_bundle_revision:
+                      persistedCodexSessionState.bundle_revision,
+                  },
+                }),
+              },
+            });
+            continue;
+          }
+          await reportRunnerDiagnostic({
+            event: "runner_app_server_final_continuation_limit_reached",
+            failureClass: "runner_app_server_final_continuation_limit_reached",
+            severity: "warning",
+            ok: false,
+            mode: executionMode,
+            details: {
+              pending_request_count: pendingFinalContinuationRequests.length,
+              continuation_restart_count: appServerFinalContinuationRestartCount,
+              continuation_restart_limit:
+                APP_SERVER_CONTROL_FINAL_CONTINUATION_MAX_TURNS,
+            },
+          });
+        }
+
         assistantMessage = workspaceRescueMetadata && lastPersistenceSummary
           ? truncate(
               [assistantMessage, lastPersistenceSummary].filter(Boolean).join("\n\n"),
@@ -12473,6 +13075,7 @@ export {
   runtimeManifestSupportsScopedPath,
   extractUserVisibleFailureHeadline,
   fetchJson,
+  filterUnhandledPendingAppServerControlRequests,
   toUserVisibleRunnerFailureMessage,
 };
 

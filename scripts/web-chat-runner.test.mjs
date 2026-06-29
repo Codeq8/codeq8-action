@@ -75,6 +75,7 @@ import {
   uploadPreparedWebChatCodexSessionBundle,
   discardPreparedWebChatCodexSessionBundle,
   fetchJson,
+  filterUnhandledPendingAppServerControlRequests,
 } from "./web-chat-runner.mjs";
 
 const CONTRACT_VERSION = "web_chat_runner_runtime_v1";
@@ -127,6 +128,7 @@ test("runtime manifest baseline matches the public startup contract", () => {
     "/api/chat/runs/goal",
     "/api/chat/runs/thread-title",
     "/api/chat/runs/thread-pull-request",
+    "/api/chat/runs/app-server/control",
     "/web-chat/hosted-codex-auth/invalidate",
   ]);
 });
@@ -294,6 +296,27 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
   assert.match(source, /The bridge owns the AppServer live-cost boundary/);
   assert.match(source, /APP_SERVER_FIRESTORE_SESSION_PATH/);
   assert.match(source, /APP_SERVER_PROGRESS_HISTORY_PATH/);
+  assert.match(source, /APP_SERVER_CONTROL_PATH/);
+  assert.match(source, /fetchPendingAppServerControlRequests/);
+  assert.match(source, /runner_app_server_final_continuation_restart/);
+  const mainSource = source.slice(
+    source.indexOf("async function main() {"),
+    source.indexOf("\nexport {"),
+  );
+  const finalCheckpointIndex = mainSource.indexOf(
+    "pendingFinalContinuationRequests = await fetchPendingAppServerControlRequests",
+  );
+  const terminalAssistantMessageIndex = mainSource.indexOf(
+    "assistantMessage = workspaceRescueMetadata",
+    finalCheckpointIndex,
+  );
+  assert.notEqual(finalCheckpointIndex, -1);
+  assert.notEqual(terminalAssistantMessageIndex, -1);
+  assert.ok(finalCheckpointIndex < terminalAssistantMessageIndex);
+  assert.match(
+    mainSource,
+    /runner_app_server_final_continuation_restart[\s\S]{0,2500}status: "running"[\s\S]{0,2500}continue;/,
+  );
   assert.match(source, /history_only:\s*true/);
   assert.match(source, /supportsAppServerProgressHistory/);
   assert.match(source, /progressHistoryEnabled/);
@@ -309,7 +332,7 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
     /normalizedMethod\s*===\s*["']item\/agentMessage\/delta["'][\s\S]{0,900}\bprogressReporter\.enqueue\s*\(/,
   );
   assert.doesNotMatch(source, /function createAppServerControlPoller/);
-  assert.doesNotMatch(source, /\/api\/chat\/runs\/app-server\/control/);
+  assert.doesNotMatch(source, /setInterval[\s\S]{0,700}APP_SERVER_CONTROL_PATH/);
   assert.doesNotMatch(source, /\bsetInterval\s*\(/);
 });
 
@@ -1527,6 +1550,168 @@ test("runCodex sends AppServer steer requests with the active expected turn id",
   assert.deepEqual(acknowledgementBodies.at(-1)?.acknowledgements, [
     { request_id: "wcasr_steer", status: "accepted" },
   ]);
+});
+
+test("final AppServer continuation ignores route-pending requests already handled live", () => {
+  const pendingRequests = [
+    {
+      request_id: "wcasr_live",
+      sequence: 1,
+      kind: "steer",
+      content: "already delivered",
+      status: "pending",
+    },
+    {
+      request_id: "wcasr_late",
+      sequence: 2,
+      kind: "steer",
+      content: "needs final continuation",
+      status: "pending",
+    },
+  ];
+  const filtered = filterUnhandledPendingAppServerControlRequests({
+    pendingRequests,
+    handledRequests: [
+      {
+        request_id: "wcasr_live",
+        sequence: 1,
+        kind: "steer",
+        content: "already delivered",
+        status: "accepted",
+      },
+    ],
+  });
+  assert.deepEqual(
+    filtered.map((request) => request.request_id),
+    ["wcasr_late"],
+  );
+});
+
+test("runCodex continues an AppServer turn for follow-ups visible at turn completion", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-final-continuation-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import fs from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
+      "const requests = [];",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "const persistRequests = async () => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8');",
+      "let turnStartCount = 0;",
+      "rl.on('line', async (line) => {",
+      "  const message = JSON.parse(line);",
+      "  requests.push({ method: message.method, params: message.params || {} });",
+      "  await persistRequests();",
+      "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    turnStartCount += 1;",
+      "    const turnId = `turn_${turnStartCount}`;",
+      "    const text = turnStartCount === 1 ? 'first answer' : 'final answer with late follow-up';",
+      "    send({ id: message.id, result: { turn: { id: turnId, status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { item: { id: `msg_${turnStartCount}`, type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: `msg_${turnStartCount}`, delta: text } });",
+      "    send({ method: 'item/completed', params: { item: { id: `msg_${turnStartCount}`, type: 'agent_message', text } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const acknowledged = [];
+  let consumedPending = false;
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "answer before late follow-up",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+    },
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "runner_token",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue: () => {},
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          flushPending: () => {},
+          pauseProcessing: () => {},
+          resumeProcessing: () => {},
+          takePendingSteerRequestsForContinuation: async () => {
+            if (consumedPending) {
+              return [];
+            }
+            consumedPending = true;
+            return [
+              {
+                request_id: "wcasr_late",
+                sequence: 1,
+                kind: "steer",
+                content: "Actually include the late clarification.",
+                attachments: [],
+                status: "pending",
+              },
+            ];
+          },
+          acknowledgeRequests: async (acknowledgements) => {
+            acknowledged.push(...acknowledgements);
+          },
+          readControlRequests: () => [
+            {
+              request_id: "wcasr_late",
+              sequence: 1,
+              kind: "steer",
+              content: "Actually include the late clarification.",
+              attachments: [],
+              status: acknowledged.length > 0 ? "accepted" : "pending",
+            },
+          ],
+          stop: async (options) => {
+            assert.deepEqual(options, { failPending: false });
+          },
+        }),
+      }),
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "final answer with late follow-up");
+  assert.deepEqual(acknowledged, [
+    { request_id: "wcasr_late", status: "accepted" },
+  ]);
+  assert.equal(result.appServerControlRequests[0]?.status, "accepted");
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  const turnStarts = requests.filter((request) => request.method === "turn/start");
+  assert.equal(turnStarts.length, 2);
+  assert.match(
+    turnStarts[1]?.params?.input?.[0]?.text || "",
+    /late user messages/i,
+  );
+  assert.match(
+    turnStarts[1]?.params?.input?.[0]?.text || "",
+    /Actually include the late clarification/,
+  );
+  assert.equal(requests.some((request) => request.method === "turn/steer"), false);
 });
 
 test("AppServer Firestore control listener retries stale active turn id rejections", async () => {

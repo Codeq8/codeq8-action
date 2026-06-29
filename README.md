@@ -27,6 +27,11 @@ and do not introduce `setInterval` loops for live chat transport. Those patterns
 can multiply into very large infrastructure bills even when each individual
 request looks cheap.
 
+The runner may use `/api/chat/runs/app-server/control` as a bounded final
+checkpoint after Codex session/workspace persistence and before the terminal
+callback. That one-shot check catches user follow-ups accepted while the GitHub
+Actions job is still alive but the local AppServer turn has already completed.
+
 Do not publish partial `item/agentMessage/delta` text as live progress. The
 runner may receive deltas from Codex's local stdio AppServer stream, but
 Firestore progress publication should happen on completed assistant message
