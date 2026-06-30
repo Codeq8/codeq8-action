@@ -9151,19 +9151,28 @@ function shouldRunHiddenThreadTitlePreturn({
   threadTitleSource = "",
   promptText = "",
 } = {}) {
-  if (normalizeText(mode).toLowerCase() !== "fresh") {
+  const normalizedMode = normalizeText(mode).toLowerCase();
+  const normalizedThreadTitleSource = normalizeText(threadTitleSource).toLowerCase();
+  const placeholderTitle = isPlaceholderThreadTitle(threadTitle);
+  const provisionalFirstMessageTitle =
+    normalizedThreadTitleSource === "provisional_first_message";
+  if (
+    normalizedMode !== "fresh" &&
+    !placeholderTitle &&
+    !provisionalFirstMessageTitle
+  ) {
     return false;
   }
   if (!hasMeaningfulHiddenThreadTitlePrompt(promptText)) {
     return false;
   }
-  if (isPlaceholderThreadTitle(threadTitle)) {
+  if (placeholderTitle) {
     return true;
   }
   if (isFinalThreadTitleSource(threadTitleSource)) {
     return false;
   }
-  return normalizeText(threadTitleSource).toLowerCase() === "provisional_first_message";
+  return provisionalFirstMessageTitle;
 }
 
 function buildHiddenThreadTitlePrompt({ promptText = "" } = {}) {

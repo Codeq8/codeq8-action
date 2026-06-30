@@ -163,6 +163,15 @@ test("hidden title pre-turn treats placeholder titles as needing runner ownershi
       threadTitleSource: "provisional_first_message",
       promptText: "Investigate unread state",
     }),
+    true,
+  );
+  assert.equal(
+    shouldRunHiddenThreadTitlePreturn({
+      mode: "resume",
+      threadTitle: "Unread state bug",
+      threadTitleSource: "manual",
+      promptText: "Investigate unread state",
+    }),
     false,
   );
   assert.equal(
