@@ -1316,6 +1316,7 @@ test("runner codeq8 helper creates delegated threads with compact safe output", 
   assert.equal(body.thread_id, "wct_parent");
   assert.equal(body.run_id, "wcr_parent");
   assert.equal(body.title, "Investigate");
+  assert.equal(body.idempotency_key, "runner-helper:create");
   assert.equal(body.initial_message.content, "Please inspect this.");
   assert.equal(body.assigned_to_kind, "codeq8");
   const text = output.readText();
@@ -1331,6 +1332,48 @@ test("runner codeq8 helper creates delegated threads with compact safe output", 
   assert.match(text, /Follow-up message: codeq8 threads message wct_managed --text "\.\.\."/);
   assert.ok(text.length < 900);
   assertNoRawCredentialPayload(text);
+});
+
+test("runner codeq8 helper forwards explicit delegated create idempotency keys", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: [
+      "threads",
+      "create",
+      "--title",
+      "Investigate auth",
+      "--message",
+      "Please inspect this.",
+      "--idempotency-key",
+      "auth-followup-2",
+      "--json",
+    ],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        delegated: true,
+        target_thread_id: "wct_managed",
+        thread: {
+          thread_id: "wct_managed",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Investigate auth",
+        },
+      });
+    },
+  });
+
+  assert.equal(new URL(calls[0]?.url).pathname, "/api/chat/runs/delegated-threads");
+  const body = JSON.parse(String(calls[0]?.init?.body || "{}"));
+  assert.equal(body.idempotency_key, "auth-followup-2");
+  assert.equal(body.title, "Investigate auth");
+  assert.equal(body.initial_message.content, "Please inspect this.");
+  const payload = output.readJson();
+  assert.equal(payload.target_thread_id, "wct_managed");
+  assertNoRawCredentialPayload(output.readText());
 });
 
 test("runner codeq8 helper create json returns a compact redacted snapshot", async () => {
