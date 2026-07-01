@@ -27,6 +27,8 @@ const RUN_TOKEN_ROUTE_PROBE_NAME = "__codeq8McpRunTokenRouteProbe";
 const RUN_TOKEN_ROUTE_PREFIX = "/api/chat/runs/";
 const RUN_TOKEN_ROUTE_METHODS = new Set(["GET", "HEAD"]);
 const RUN_TOKEN_MUTATION_ROUTES = new Map([
+  ["/api/chat/runs/delegated-threads", new Set(["POST"])],
+  ["/api/chat/runs/thread-archive", new Set(["POST"])],
   ["/api/chat/runs/thread-goal", new Set(["POST"])],
 ]);
 const SECRET_FIELD_PATTERN =
@@ -128,6 +130,10 @@ function normalizeText(value: unknown): string {
   return String(value ?? "").trim();
 }
 
+function normalizeBooleanFalse(value: unknown): boolean {
+  return value === false || normalizeText(value).toLowerCase() === "false";
+}
+
 function payloadObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -201,6 +207,77 @@ function appendDefaultRunContextToBody({
       body[key] = normalizedValue;
     }
   }
+}
+
+function isMcpProbeMutation(body: Record<string, unknown>): boolean {
+  return body.mcp_probe === true || body.mcpProbe === true;
+}
+
+function readBodyText(
+  body: Record<string, unknown>,
+  keys: string[],
+): string {
+  for (const key of keys) {
+    const value = normalizeText(body[key]);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function validateRunTokenProbeMutation({
+  body,
+  env,
+  method,
+  pathname,
+}: {
+  body: Record<string, unknown> | undefined;
+  env: EnvLike;
+  method: string;
+  pathname: string;
+}): string {
+  if (method === "GET" || method === "HEAD") {
+    return "";
+  }
+  const bodyObject = body || {};
+  if (pathname === "/api/chat/runs/delegated-threads") {
+    const initialMessage = payloadObject(
+      bodyObject.initial_message || bodyObject.initialMessage,
+    );
+    const initialMetadata = payloadObject(initialMessage.metadata);
+    const assignment = readBodyText(bodyObject, [
+      "assigned_to_kind",
+      "assignedToKind",
+      "assigned_to",
+      "assignedTo",
+    ]).toLowerCase();
+    if (
+      !isMcpProbeMutation(bodyObject) ||
+      assignment !== "codeq8" ||
+      !readBodyText(bodyObject, ["idempotency_key", "idempotencyKey"]) ||
+      !normalizeText(initialMessage.content) ||
+      !normalizeBooleanFalse(initialMetadata.dispatch)
+    ) {
+      return "Delegated thread create probes must be marked mcp_probe=true, assigned to codeq8, dispatch=false, and include idempotency_key.";
+    }
+    return "";
+  }
+  if (pathname === "/api/chat/runs/thread-archive") {
+    const targetThreadId = readBodyText(bodyObject, [
+      "target_thread_id",
+      "targetThreadId",
+    ]);
+    if (
+      !isMcpProbeMutation(bodyObject) ||
+      !targetThreadId ||
+      targetThreadId === normalizeText(env.CODE_CHAT_THREAD_ID)
+    ) {
+      return "Thread archive probes must be marked mcp_probe=true and target a non-parent thread id.";
+    }
+    return "";
+  }
+  return "";
 }
 
 function fallbackProbeBaseUrl({
@@ -381,7 +458,7 @@ export function isCodeq8McpRunTokenRouteAllowed({
   return Boolean(allowedMutationMethods?.has(normalizedMethod));
 }
 
-function buildRunTokenProbeJsonBody({
+function buildRunTokenProbeJsonBodyPayload({
   env,
   input,
   method,
@@ -389,7 +466,7 @@ function buildRunTokenProbeJsonBody({
   env: EnvLike;
   input: Record<string, unknown>;
   method: string;
-}): string | undefined {
+}): Record<string, unknown> | undefined {
   if (method === "GET" || method === "HEAD") {
     return undefined;
   }
@@ -397,7 +474,7 @@ function buildRunTokenProbeJsonBody({
     ...payloadObject(input.body || input.json || input.payload),
   };
   appendDefaultRunContextToBody({ env, input, body });
-  return JSON.stringify(body);
+  return body;
 }
 
 function sanitizeMcpProbePayload(value: unknown, key = "", depth = 0): unknown {
@@ -488,12 +565,36 @@ export async function requestCodeq8McpRunTokenRoute({
     };
   }
 
-  const body = buildRunTokenProbeJsonBody({ env, input: inputObject, method });
+  const bodyPayload = buildRunTokenProbeJsonBodyPayload({
+    env,
+    input: inputObject,
+    method,
+  });
+  const mutationError = validateRunTokenProbeMutation({
+    body: bodyPayload,
+    env,
+    method,
+    pathname: targetUrl.pathname,
+  });
+  if (mutationError) {
+    return {
+      ok: false,
+      blocked: true,
+      error: `Codeq8 MCP route probe mutation is not allowed: ${mutationError}`,
+      method,
+      url: `${targetUrl.origin}${targetUrl.pathname}`,
+    };
+  }
+  const body = bodyPayload ? JSON.stringify(bodyPayload) : undefined;
+  const sessionCookie = readCodeq8McpAuthCookie(env);
   const response = await fetchImpl(targetUrl.toString(), {
     method,
     headers: {
       accept: "application/json",
       authorization: `Bearer ${token}`,
+      ...(sessionCookie
+        ? { cookie: `${GITHUB_WEB_SESSION_COOKIE_NAME}=${sessionCookie}` }
+        : {}),
       ...(body ? { "content-type": "application/json" } : {}),
     },
     ...(body ? { body } : {}),

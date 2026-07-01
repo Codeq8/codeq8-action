@@ -283,6 +283,126 @@ test("Playwright MCP run-token route probe exposes bounded thread-goal mutation 
   assert.doesNotMatch(JSON.stringify(result), /secret-run-token|should-not-return/);
 });
 
+test("Playwright MCP run-token route probe exposes bounded delegated create and archive helpers", async () => {
+  const requested = [];
+  const fetchImpl = async (url, init) => {
+    requested.push({ url, init });
+    const pathname = new URL(url).pathname;
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get(name) {
+          return name.toLowerCase() === "content-type" ? "application/json" : "";
+        },
+      },
+      async text() {
+        if (pathname.endsWith("/delegated-threads")) {
+          return JSON.stringify({
+            ok: true,
+            delegated: true,
+            target_thread_id: "wct_target",
+            authorization: "Bearer should-not-return",
+            nested: {
+              code_github_session: "secret-cookie",
+            },
+          });
+        }
+        return JSON.stringify({
+          ok: true,
+          archived: true,
+          target_thread_id: "wct_target",
+          cookie: "secret-cookie",
+        });
+      },
+    };
+  };
+  const state = createPage({
+    currentUrl:
+      "https://codeq8-git-route-auth-iscoot.vercel.app/Codeq8/Codeq8/thread/wct_parent",
+  });
+
+  await exposeCodeq8McpRunTokenRouteProbe({
+    env: {
+      CODE_WEB_CHAT_RUN_TOKEN: "secret-run-token",
+      CODEQ8_TRIGGERING_GITHUB_WEB_SESSION_COOKIE: "secret-cookie",
+      CODE_WORKSPACE_REPOSITORY: "Codeq8/Codeq8",
+      CODE_CHAT_THREAD_ID: "wct_parent",
+      CODE_CHAT_RUN_ID: "wcr_parent",
+    },
+    fetchImpl,
+    page: state.page,
+  });
+
+  const probe = state.exposedFunctions.get("__codeq8McpRunTokenRouteProbe");
+  const createResult = await probe({
+    method: "POST",
+    path: "/api/chat/runs/delegated-threads",
+    body: {
+      mcp_probe: true,
+      title: "Disposable MCP delegated smoke",
+      assigned_to_kind: "codeq8",
+      idempotency_key: "mcp-smoke-1",
+      initial_message: {
+        role: "user",
+        content: "Disposable MCP smoke.",
+        metadata: {
+          dispatch: false,
+        },
+      },
+    },
+  });
+  const archiveResult = await probe({
+    method: "POST",
+    path: "/api/chat/runs/thread-archive",
+    body: {
+      mcp_probe: true,
+      target_thread_id: "wct_target",
+    },
+  });
+
+  assert.equal(createResult.ok, true);
+  assert.equal(createResult.json.target_thread_id, "wct_target");
+  assert.equal(createResult.json.authorization, "[redacted]");
+  assert.equal(createResult.json.nested.code_github_session, "[redacted]");
+  assert.equal(archiveResult.ok, true);
+  assert.equal(archiveResult.json.archived, true);
+  assert.equal(archiveResult.json.cookie, "[redacted]");
+  assert.equal(requested.length, 2);
+  assert.deepEqual(JSON.parse(requested[0].init.body), {
+    mcp_probe: true,
+    title: "Disposable MCP delegated smoke",
+    assigned_to_kind: "codeq8",
+    idempotency_key: "mcp-smoke-1",
+    initial_message: {
+      role: "user",
+      content: "Disposable MCP smoke.",
+      metadata: {
+        dispatch: false,
+      },
+    },
+    workspace_repository: "Codeq8/Codeq8",
+    thread_id: "wct_parent",
+    run_id: "wcr_parent",
+  });
+  assert.deepEqual(JSON.parse(requested[1].init.body), {
+    mcp_probe: true,
+    target_thread_id: "wct_target",
+    workspace_repository: "Codeq8/Codeq8",
+    thread_id: "wct_parent",
+    run_id: "wcr_parent",
+  });
+  for (const request of requested) {
+    assert.equal(request.init.headers.authorization, "Bearer secret-run-token");
+    assert.equal(request.init.headers.cookie, "code_github_session=secret-cookie");
+    assert.equal(request.init.headers["content-type"], "application/json");
+  }
+  assert.doesNotMatch(
+    JSON.stringify({ createResult, archiveResult }),
+    /secret-run-token|secret-cookie|should-not-return/,
+  );
+});
+
 test("Playwright MCP run-token route probe rejects missing token, unsafe routes, and unapproved mutating methods", async () => {
   let fetchCount = 0;
   const fetchImpl = async () => {
@@ -314,6 +434,22 @@ test("Playwright MCP run-token route probe rejects missing token, unsafe routes,
       method: "POST",
       targetUrl:
         "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/runs/thread-goal",
+    }),
+    true,
+  );
+  assert.equal(
+    isCodeq8McpRunTokenRouteAllowed({
+      method: "POST",
+      targetUrl:
+        "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/runs/delegated-threads",
+    }),
+    true,
+  );
+  assert.equal(
+    isCodeq8McpRunTokenRouteAllowed({
+      method: "POST",
+      targetUrl:
+        "https://codeq8-git-route-auth-iscoot.vercel.app/api/chat/runs/thread-archive",
     }),
     true,
   );
@@ -369,6 +505,50 @@ test("Playwright MCP run-token route probe rejects missing token, unsafe routes,
   });
   assert.equal(rejectedRoute.ok, false);
   assert.equal(rejectedRoute.blocked, true);
+
+  const rejectedDelegatedCreate = await requestCodeq8McpRunTokenRoute({
+    env: { CODE_WEB_CHAT_RUN_TOKEN: "run-token" },
+    fetchImpl,
+    input: {
+      method: "POST",
+      path: "/api/chat/runs/delegated-threads",
+      body: {
+        mcp_probe: true,
+        assigned_to_kind: "github_user",
+        idempotency_key: "mcp-smoke-1",
+        initial_message: {
+          content: "Unsafe smoke.",
+          metadata: {
+            dispatch: true,
+          },
+        },
+      },
+    },
+    pageUrl,
+  });
+  assert.equal(rejectedDelegatedCreate.ok, false);
+  assert.equal(rejectedDelegatedCreate.blocked, true);
+  assert.match(rejectedDelegatedCreate.error, /Delegated thread create probes/);
+
+  const rejectedArchiveParent = await requestCodeq8McpRunTokenRoute({
+    env: {
+      CODE_WEB_CHAT_RUN_TOKEN: "run-token",
+      CODE_CHAT_THREAD_ID: "wct_parent",
+    },
+    fetchImpl,
+    input: {
+      method: "POST",
+      path: "/api/chat/runs/thread-archive",
+      body: {
+        mcp_probe: true,
+        target_thread_id: "wct_parent",
+      },
+    },
+    pageUrl,
+  });
+  assert.equal(rejectedArchiveParent.ok, false);
+  assert.equal(rejectedArchiveParent.blocked, true);
+  assert.match(rejectedArchiveParent.error, /target a non-parent thread id/);
 
   assert.equal(fetchCount, 0);
 });
