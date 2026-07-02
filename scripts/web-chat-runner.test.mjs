@@ -851,6 +851,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
 
   const progressEvents = [];
   let bridgeCloseCount = 0;
+  let progressReporterCloseCount = 0;
   const result = await runCodex({
     codexPath: fakeCodexPath,
     model: "gpt-5.5",
@@ -874,6 +875,9 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
             }
           },
           flush: async () => {},
+          close: () => {
+            progressReporterCloseCount += 1;
+          },
         },
         createControlListener: () => ({
           start: () => {},
@@ -905,6 +909,89 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
     false,
   );
   assert.equal(bridgeCloseCount, 1);
+  assert.equal(progressReporterCloseCount, 1);
+});
+
+test("runCodex ignores AppServer progress notifications after final flush", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-late-progress-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "process.on('SIGTERM', () => {});",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_done', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_done', delta: 'Done.' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_done', type: 'agent_message', text: 'Done.' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "    setTimeout(() => {",
+      "      send({ method: 'item/completed', params: { item: { id: 'late_reasoning', type: 'assistant_reasoning', text: 'late progress after finalization' } } });",
+      "    }, 25);",
+      "    setTimeout(() => process.exit(0), 80);",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const progressEvents = [];
+  let progressReporterClosed = false;
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "ignore late progress",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+    },
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "runner_token",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue(event) {
+            if (!progressReporterClosed) {
+              progressEvents.push(event);
+            }
+          },
+          flush: async () => {},
+          close: () => {
+            progressReporterClosed = true;
+          },
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+        close: async () => {},
+      }),
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "Done.");
+  assert.equal(progressReporterClosed, true);
+  assert.deepEqual(progressEvents, []);
 });
 
 test("runCodex preserves AppServer usage-limit failures as the terminal reason", async (t) => {

@@ -1333,7 +1333,7 @@ function printHelp(stdout) {
       "  codeq8 threads inspect <thread-id> [--limit 12] [--json]",
       "  codeq8 threads details <thread-id> --run <run-id> [--limit 20] [--json]",
       "  codeq8 threads assign <thread-id> [--assigned-to me]",
-      "  codeq8 threads create --title title --message text [--assigned-to codeq8|me] [--json]",
+      "  codeq8 threads create --title title --message text [--assigned-to codeq8|me] [--idempotency-key key] [--json]",
       "  codeq8 threads message <thread-id> --text text",
       "  codeq8 threads title <thread-id> --title text",
       "  codeq8 threads pull-request <thread-id> --pull-request-number n|--pull-request-url url",
@@ -1531,8 +1531,12 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       throw new Error("--message is required.");
     }
     const assignedTo = readFlag(rest, "--assigned-to");
+    const idempotencyKey =
+      readFlag(rest, ["--idempotency-key", "--idempotency_key"]) ||
+      "runner-helper:create";
     const body = parentBody(context, {
       title,
+      idempotency_key: idempotencyKey,
       initial_message: {
         role: "user",
         content: message,

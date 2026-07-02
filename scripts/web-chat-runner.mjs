@@ -8120,6 +8120,7 @@ function createAppServerFirestoreProgressReporter({
   let flushing = false;
   let flushWaiters = [];
   let progressEvents = [];
+  let closed = false;
 
   const waitForActiveFlush = () =>
     new Promise((resolve) => {
@@ -8218,6 +8219,9 @@ function createAppServerFirestoreProgressReporter({
 
   return {
     enqueue(event) {
+      if (closed) {
+        return;
+      }
       const normalizedEvent = normalizeObject(event);
       if (!normalizeText(normalizedEvent.kind)) {
         return;
@@ -8244,6 +8248,15 @@ function createAppServerFirestoreProgressReporter({
         }
         await flush();
       }
+    },
+    close() {
+      closed = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      queued = [];
+      resolveFlushWaiters();
     },
   };
 }
@@ -9524,6 +9537,7 @@ async function runCodexAppServer({
       clearTimeout(timeoutHandle);
       await controlListener?.stop?.({ failPending: false });
       await progressReporter.flush();
+      progressReporter.close?.();
       await goalReporter.flush();
       if (firestoreBridge?.close) {
         try {
