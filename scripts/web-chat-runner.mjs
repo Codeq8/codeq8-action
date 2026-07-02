@@ -8593,11 +8593,30 @@ function createAppServerFirestoreControlListener({
       .map((requestId) => normalizeText(requestId))
       .filter(Boolean),
   );
+  const handledRequestStatusById = new Map();
   const processingRequestIds = new Set();
   const processingPromises = new Set();
 
+  const applyLocallyHandledControlStatuses = (requests) => {
+    const normalizedRequests = normalizeAppServerControlRequestsForRunMetadata(requests);
+    if (handledRequestStatusById.size === 0) {
+      return normalizedRequests;
+    }
+    const acknowledged = applyAppServerControlAcknowledgementsToRequests({
+      acknowledgements: [...handledRequestStatusById.entries()].map(
+        ([requestId, acknowledgement]) => ({
+          request_id: requestId,
+          status: acknowledgement.status,
+          error: acknowledgement.error || "",
+        }),
+      ),
+      requests: normalizedRequests,
+    });
+    return normalizeAppServerControlRequestsForRunMetadata(acknowledged.requests);
+  };
+
   const updateLatestControlRequests = (requests) => {
-    latestControlRequests = normalizeAppServerControlRequestsForRunMetadata(requests);
+    latestControlRequests = applyLocallyHandledControlStatuses(requests);
   };
 
   const markAcknowledgedLocally = (acknowledgements) => {
@@ -8613,6 +8632,10 @@ function createAppServerFirestoreControlListener({
           return null;
         }
         handledRequestIds.add(requestId);
+        handledRequestStatusById.set(requestId, {
+          status,
+          error: truncate(extractErrorMessage(acknowledgement?.error), 500),
+        });
         return {
           request_id: requestId,
           status,

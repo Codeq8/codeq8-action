@@ -1674,6 +1674,92 @@ test("final AppServer continuation ignores route-pending requests already handle
   );
 });
 
+test("AppServer Firestore control listener preserves accepted control status across stale snapshots", async () => {
+  class FieldPath {
+    constructor(...segments) {
+      this.segments = segments;
+    }
+  }
+
+  const pendingData = {
+    threads: {
+      wct_app: {
+        latestRunId: "wcr_app",
+        appServerControlRequests: [
+          {
+            request_id: "wcasr_live",
+            sequence: 1,
+            kind: "steer",
+            content: "already delivered live",
+            attachments: [],
+            status: "pending",
+            error: "",
+          },
+        ],
+      },
+    },
+  };
+  let docData = JSON.parse(JSON.stringify(pendingData));
+  let snapshotNext = null;
+  const sentRequests = [];
+  const snapshotFor = (data) => ({
+    exists: () => true,
+    data: () => JSON.parse(JSON.stringify(data)),
+  });
+
+  const listener = createAppServerFirestoreControlListener({
+    FieldPathImpl: FieldPath,
+    channel: {
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      collectionId: "chat_repository_live_status",
+      documentId: "app-server-run:workspace:workspace:repository:repo:thread:wct_app:run:wcr_app",
+    },
+    docRef: {},
+    firestore: {},
+    onSnapshotImpl: (_docRef, next) => {
+      snapshotNext = next;
+      next(snapshotFor(docData));
+      return () => {};
+    },
+    runTransactionImpl: async (_firestore, callback) => {
+      await callback({
+        get: async () => snapshotFor(docData),
+        update: (...args) => {
+          docData = {
+            threads: {
+              wct_app: {
+                latestRunId: "wcr_app",
+                appServerControlRequests: args[2],
+              },
+            },
+          };
+        },
+      });
+      // A delayed server snapshot with the pre-acknowledgement pending value
+      // must not make final continuation treat the handled steer as late.
+      snapshotNext?.(snapshotFor(pendingData));
+    },
+    sendRequest: async (method, params) => {
+      sentRequests.push({ method, params });
+      return { ok: true };
+    },
+    getAppServerThreadId: () => "thr_app",
+    getAppServerTurnId: () => "turn_app",
+  });
+
+  listener.start();
+  await listener.stop({ failPending: false });
+
+  assert.deepEqual(
+    sentRequests.map((request) => request.method),
+    ["turn/steer"],
+  );
+  assert.equal(listener.readControlRequests()[0]?.request_id, "wcasr_live");
+  assert.equal(listener.readControlRequests()[0]?.status, "accepted");
+});
+
 test("runCodex continues an AppServer turn for follow-ups visible at turn completion", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-final-continuation-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
