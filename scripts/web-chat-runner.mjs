@@ -9151,45 +9151,12 @@ function isFinalThreadTitleSource(value) {
   return normalized === "manual" || normalized === "generated";
 }
 
-function hasMeaningfulHiddenThreadTitlePrompt(promptText = "") {
-  const normalized = normalizeText(promptText);
-  if (!normalized) {
-    return false;
-  }
-  const lowSignalPrompt = normalized
-    .toLowerCase()
-    .replace(/[.!?;:,\s]+$/g, "")
-    .trim();
-  if (
-    new Set([
-      "hi",
-      "hello",
-      "hey",
-      "yo",
-      "test",
-      "ok",
-      "okay",
-      "thanks",
-      "thank you",
-    ]).has(lowSignalPrompt)
-  ) {
-    return false;
-  }
-  const signalWords = normalized
-    .replace(/https?:\/\/\S+/gi, " ")
-    .replace(/[^A-Za-z0-9\s/-]/g, " ")
-    .split(/\s+/g)
-    .map((word) => word.replace(/^[-/]+|[-/]+$/g, ""))
-    .filter((word) => word.length > 1);
-  return signalWords.length >= 2;
-}
-
 function shouldRunHiddenThreadTitlePreturn({
   threadTitle = "",
   threadTitleSource = "",
   promptText = "",
 } = {}) {
-  if (!hasMeaningfulHiddenThreadTitlePrompt(promptText)) {
+  if (!normalizeText(promptText)) {
     return false;
   }
   if (isPlaceholderThreadTitle(threadTitle)) {

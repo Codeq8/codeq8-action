@@ -172,6 +172,24 @@ test("hidden title pre-turn treats placeholder titles as needing runner ownershi
       threadTitleSource: "provisional_first_message",
       promptText: "hi",
     }),
+    true,
+  );
+  assert.equal(
+    shouldRunHiddenThreadTitlePreturn({
+      mode: "resume",
+      threadTitle: "Untitled",
+      threadTitleSource: "provisional_first_message",
+      promptText: "Hi",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRunHiddenThreadTitlePreturn({
+      mode: "fresh",
+      threadTitle: "Untitled",
+      threadTitleSource: "provisional_first_message",
+      promptText: "",
+    }),
     false,
   );
   assert.equal(
@@ -3666,17 +3684,33 @@ test("runCodex runs hidden AppServer title pre-turn before the visible task turn
   assert.equal(turnStarts[1]?.params?.input?.[0]?.text, "visible work prompt");
 });
 
-test("runCodex skips hidden AppServer title pre-turn for low-signal greeting prompts", async (t) => {
+test("runCodex runs hidden AppServer title pre-turn for low-signal greeting prompts", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-title-skip-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
   const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
   const originalFetch = globalThis.fetch;
+  const titleCalls = [];
   t.after(async () => {
     globalThis.fetch = originalFetch;
     await fs.rm(workspacePath, { recursive: true, force: true });
   });
 
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async (url, init = {}) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname === "/api/chat/runs/thread-title") {
+      const body = JSON.parse(String(init.body || "{}"));
+      titleCalls.push(body);
+      return Response.json({
+        ok: true,
+        title: body.title,
+        updated: true,
+        thread: {
+          thread_id: body.target_thread_id,
+          title: body.title,
+          title_source: "manual",
+        },
+      });
+    }
     throw new Error(`Unexpected fetch: ${url}`);
   };
 
@@ -3695,6 +3729,7 @@ test("runCodex skips hidden AppServer title pre-turn for low-signal greeting pro
       "};",
       "const rl = readline.createInterface({ input: process.stdin });",
       "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "let turnCount = 0;",
       "rl.on('line', async (line) => {",
       "  const message = JSON.parse(line);",
       "  requests.push({ method: message.method, params: message.params || {} });",
@@ -3703,12 +3738,16 @@ test("runCodex skips hidden AppServer title pre-turn for low-signal greeting pro
       "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
       "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
       "  if (message.method === 'turn/start') {",
-      "    send({ id: message.id, result: { turn: { id: 'turn_main', status: 'inProgress' } } });",
-      "    send({ method: 'turn/started', params: { turn: { id: 'turn_main' } } });",
-      "    send({ method: 'item/started', params: { item: { id: 'msg_main', type: 'agent_message' } } });",
-      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_main', delta: 'Hi.' } });",
-      "    send({ method: 'item/completed', params: { item: { id: 'msg_main', type: 'agent_message', text: 'Hi.' } } });",
-      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_main', status: 'completed' } } });",
+      "    turnCount += 1;",
+      "    const isTitleTurn = turnCount === 1;",
+      "    const turnId = isTitleTurn ? 'turn_title_hi' : 'turn_main';",
+      "    const text = isTitleTurn ? 'Greeting' : 'Hi.';",
+      "    send({ id: message.id, result: { turn: { id: turnId, status: 'inProgress' } } });",
+      "    send({ method: 'turn/started', params: { turn: { id: turnId } } });",
+      "    send({ method: 'item/started', params: { item: { id: `msg_${turnCount}`, type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: `msg_${turnCount}`, delta: text } });",
+      "    send({ method: 'item/completed', params: { item: { id: `msg_${turnCount}`, type: 'agent_message', text } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });",
       "  }",
       "});",
       "",
@@ -3748,10 +3787,15 @@ test("runCodex skips hidden AppServer title pre-turn for low-signal greeting pro
 
   assert.equal(result.ok, true);
   assert.equal(result.output, "Hi.");
+  assert.equal(titleCalls.length, 1);
+  assert.equal(titleCalls[0]?.target_thread_id, "wct_title_skip");
+  assert.equal(titleCalls[0]?.title, "Greeting");
   const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
   const turnStarts = requests.filter((request) => request.method === "turn/start");
-  assert.equal(turnStarts.length, 1);
-  assert.equal(turnStarts[0]?.params?.input?.[0]?.text, "visible work prompt");
+  assert.equal(turnStarts.length, 2);
+  assert.match(turnStarts[0]?.params?.input?.[0]?.text, /Create a concise title/);
+  assert.match(turnStarts[0]?.params?.input?.[0]?.text, /hi/);
+  assert.equal(turnStarts[1]?.params?.input?.[0]?.text, "visible work prompt");
 });
 
 test("runCodex runs hidden AppServer title pre-turn for hosted runner pool startup", async (t) => {
