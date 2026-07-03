@@ -8808,7 +8808,7 @@ function createAppServerFirestoreControlListener({
       if (kind !== "steer" && kind !== "interrupt") {
         return;
       }
-      const appServerTurnId = getAppServerTurnId();
+      let appServerTurnId = getAppServerTurnId();
       if (!appServerTurnId) {
         return;
       }
@@ -8822,6 +8822,10 @@ function createAppServerFirestoreControlListener({
         if (!inputText) {
           throw new Error("Steer content is empty.");
         }
+        appServerTurnId = getAppServerTurnId();
+        if (!appServerTurnId) {
+          return;
+        }
         await sendAppServerTurnControlRequestWithActiveTurnRetry({
           method: "turn/steer",
           params: {
@@ -8833,6 +8837,10 @@ function createAppServerFirestoreControlListener({
           setAppServerTurnId,
         });
       } else {
+        appServerTurnId = getAppServerTurnId();
+        if (!appServerTurnId) {
+          return;
+        }
         await sendAppServerTurnControlRequestWithActiveTurnRetry({
           method: "turn/interrupt",
           params: {

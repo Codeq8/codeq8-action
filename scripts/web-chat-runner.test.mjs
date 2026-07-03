@@ -1976,6 +1976,96 @@ test("AppServer Firestore control listener retries stale active turn id rejectio
   assert.equal(transactionUpdates[0]?.[2]?.[0]?.status, "accepted");
 });
 
+test("AppServer Firestore control listener rereads active turn id after steer attachment materialization", async () => {
+  class FieldPath {
+    constructor(...segments) {
+      this.segments = segments;
+    }
+  }
+
+  let activeTurnId = "turn_before_attachment";
+  const sentRequests = [];
+  const transactionUpdates = [];
+  const docData = {
+    threads: {
+      wct_app: {
+        latestRunId: "wcr_app",
+        appServerControlRequests: [
+          {
+            request_id: "wcasr_attachment",
+            sequence: 1,
+            kind: "steer",
+            content: "Please use this screenshot.",
+            attachments: [
+              {
+                attachment_id: "wca_1",
+                name: "screenshot.png",
+                content_type: "image/png",
+                size_bytes: 12,
+              },
+            ],
+            status: "pending",
+            error: "",
+          },
+        ],
+      },
+    },
+  };
+
+  const listener = createAppServerFirestoreControlListener({
+    FieldPathImpl: FieldPath,
+    channel: {
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      collectionId: "chat_repository_live_status",
+      documentId: "app-server-run:workspace:workspace:repository:repo:thread:wct_app:run:wcr_app",
+    },
+    docRef: {},
+    firestore: {},
+    onSnapshotImpl: (_docRef, next) => {
+      next({
+        exists: () => true,
+        data: () => docData,
+      });
+      return () => {};
+    },
+    runTransactionImpl: async (_firestore, callback) =>
+      await callback({
+        get: async () => ({
+          exists: () => true,
+          data: () => docData,
+        }),
+        update: (...args) => {
+          transactionUpdates.push(args);
+          docData.threads.wct_app.appServerControlRequests = args[2];
+        },
+      }),
+    materializeWebChatAttachmentsImpl: async () => {
+      activeTurnId = "turn_after_attachment";
+      return [];
+    },
+    sendRequest: async (method, params) => {
+      sentRequests.push({ method, params });
+      return { ok: true };
+    },
+    getAppServerThreadId: () => "thr_app",
+    getAppServerTurnId: () => activeTurnId,
+  });
+
+  listener.start();
+  await listener.stop();
+
+  assert.deepEqual(
+    sentRequests.map((request) => request.method),
+    ["turn/steer"],
+  );
+  assert.equal(sentRequests[0]?.params?.expectedTurnId, "turn_after_attachment");
+  assert.equal(transactionUpdates.length, 1);
+  assert.equal(transactionUpdates[0]?.[2]?.[0]?.request_id, "wcasr_attachment");
+  assert.equal(transactionUpdates[0]?.[2]?.[0]?.status, "accepted");
+});
+
 test("AppServer Firestore control listener drains requests after the active turn id arrives", async () => {
   class FieldPath {
     constructor(...segments) {
