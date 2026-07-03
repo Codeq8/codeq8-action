@@ -9190,14 +9190,10 @@ function hasMeaningfulHiddenThreadTitlePrompt(promptText = "") {
 }
 
 function shouldRunHiddenThreadTitlePreturn({
-  mode = "",
   threadTitle = "",
   threadTitleSource = "",
   promptText = "",
 } = {}) {
-  if (normalizeText(mode).toLowerCase() !== "fresh") {
-    return false;
-  }
   if (!hasMeaningfulHiddenThreadTitlePrompt(promptText)) {
     return false;
   }
@@ -9248,53 +9244,6 @@ function normalizeHiddenThreadTitle(value) {
     normalized = normalizeText(normalized.replace(/\s+\S*$/, ""));
   }
   return normalized || "";
-}
-
-function buildFallbackThreadTitle(promptText = "") {
-  const cleaned = normalizeText(promptText)
-    .replace(/https?:\/\/\S+/gi, " ")
-    .replace(/[`*_#>[\](){}"'“”‘’]/g, " ")
-    .replace(/[^A-Za-z0-9\s/-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const stopwords = new Set([
-    "a",
-    "an",
-    "and",
-    "are",
-    "can",
-    "could",
-    "do",
-    "does",
-    "for",
-    "from",
-    "have",
-    "help",
-    "how",
-    "i",
-    "is",
-    "it",
-    "me",
-    "of",
-    "on",
-    "or",
-    "please",
-    "that",
-    "the",
-    "this",
-    "to",
-    "we",
-    "what",
-    "why",
-    "with",
-    "you",
-  ]);
-  const words = cleaned
-    .split(/\s+/g)
-    .map((word) => word.replace(/^[-/]+|[-/]+$/g, ""))
-    .filter((word) => word.length > 1 && !stopwords.has(word.toLowerCase()))
-    .slice(0, 4);
-  return normalizeHiddenThreadTitle(words.join(" "));
 }
 
 async function writeRunnerThreadTitle({
@@ -9708,9 +9657,7 @@ async function runCodexAppServer({
       if (!hiddenTitlePreturnEnabled) {
         return null;
       }
-      const fallbackTitle = buildFallbackThreadTitle(appServerContext?.promptText);
       let title = "";
-      let usedFallback = false;
       let hiddenTitleTurnId = "";
       activeTurnPurpose = "hidden_thread_title";
       resetAgentMessageCapture();
@@ -9748,22 +9695,19 @@ async function runCodexAppServer({
             await reportHiddenTitleDiagnostic({
               event: "runner_hidden_thread_title_interrupt_failed",
               error: interruptError,
-              details: { fallback_used: true },
+              details: { fallback_used: false },
             });
           }
         }
         title = normalizeHiddenThreadTitle(completion?.output);
-        if (!completion?.ok || !title) {
-          usedFallback = true;
-          title = fallbackTitle;
+        if (!completion?.ok) {
+          title = "";
         }
       } catch (error) {
-        usedFallback = true;
-        title = fallbackTitle;
         await reportHiddenTitleDiagnostic({
           event: "runner_hidden_thread_title_preturn_failed",
           error,
-          details: { fallback_used: true },
+          details: { fallback_used: false },
         });
       } finally {
         if (hiddenTitleTurnId) {
@@ -9781,7 +9725,7 @@ async function runCodexAppServer({
           ok: true,
           severity: "trace",
           details: {
-            fallback_used: usedFallback,
+            fallback_used: false,
             title_written: false,
           },
         });
@@ -9799,14 +9743,14 @@ async function runCodexAppServer({
         });
         log(
           "Prepared hidden Codeq8 thread title before main Codex turn",
-          `updated=${result.updated ? "true" : "false"} fallback=${usedFallback ? "true" : "false"}`,
+          `updated=${result.updated ? "true" : "false"} fallback=false`,
         );
         await reportHiddenTitleDiagnostic({
           event: "runner_hidden_thread_title_preturn_finished",
           ok: true,
           severity: "trace",
           details: {
-            fallback_used: usedFallback,
+            fallback_used: false,
             title_written: true,
           },
         });
@@ -9815,7 +9759,7 @@ async function runCodexAppServer({
         await reportHiddenTitleDiagnostic({
           event: "runner_hidden_thread_title_write_failed",
           error,
-          details: { fallback_used: usedFallback },
+          details: { fallback_used: false },
         });
         log(
           "WARN",
@@ -13112,7 +13056,6 @@ export {
   shouldStopBeforeCodexForRunCallbackPayload,
   shouldTreatCodexFailureAsCompleted,
   normalizeHiddenThreadTitle,
-  buildFallbackThreadTitle,
   shouldRunHiddenThreadTitlePreturn,
   stripLeadingCodexTransportNoise,
   isCodexAuthRefreshFailure,
