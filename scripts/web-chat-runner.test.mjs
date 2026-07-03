@@ -5636,6 +5636,7 @@ test("configureWorkspaceGitCredentialHelper clears inherited helpers before addi
     assert.match(helperScript, /resolveRequestedRepository/);
     assert.match(helperScript, /request\.path/);
     assert.match(helperScript, /workspace_repository: requestedRepository/);
+    assert.doesNotMatch(helperScript, /CODEX_GITHUB_WRITE_TOKEN/);
     assert.doesNotMatch(
       helperScript,
       /Refusing to request a GitHub token for non-workspace repository/,
@@ -5645,13 +5646,24 @@ test("configureWorkspaceGitCredentialHelper clears inherited helpers before addi
   }
 });
 
-test("workspace git credential helper reuses the prepared primary workspace token", async (t) => {
+test("workspace git credential helper refreshes the primary workspace token", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-action-credential-helper-"));
-  let requestCount = 0;
+  const requests = [];
   const server = createServer((request, response) => {
-    requestCount += 1;
-    response.writeHead(500, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ ok: false, error: "unexpected request" }));
+    let rawBody = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      rawBody += chunk;
+    });
+    request.on("end", () => {
+      requests.push({
+        url: request.url,
+        authorization: request.headers.authorization,
+        body: JSON.parse(rawBody || "{}"),
+      });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true, token: "ghs_refreshed_primary_token" }));
+    });
   });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -5686,17 +5698,22 @@ test("workspace git credential helper reuses the prepared primary workspace toke
       ].join("\n"),
       env: {
         ...process.env,
-        CODEX_GITHUB_WRITE_TOKEN: "prepared-primary-token",
+        CODE_WEB_CHAT_RUN_TOKEN: "scoped.run.token",
+        CODEX_GITHUB_WRITE_TOKEN: "stale-prepared-primary-token",
       },
     });
 
     assert.equal(result.code, 0);
     assert.equal(
       result.stdout,
-      "username=x-access-token\npassword=prepared-primary-token\n\n",
+      "username=x-access-token\npassword=ghs_refreshed_primary_token\n\n",
     );
     assert.equal(result.stderr, "");
-    assert.equal(requestCount, 0);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]?.authorization, "Bearer scoped.run.token");
+    assert.deepEqual(requests[0]?.body, {
+      workspace_repository: "Codeq8/Codeq8",
+    });
   } finally {
     await fs.rm(workspacePath, { recursive: true, force: true });
   }
