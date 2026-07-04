@@ -23,9 +23,13 @@ capability. Then use the owner path for that category.
    the missing MCP capability rather than inventing a local install path.
 
 2. Workspace-specific MCP for the user's repository.
-   Treat this as repository config owned by the current workspace. Inspect the
-   existing `.codex/config.toml`, repo instructions, and tests before editing.
-   Use environment variable references only; never commit raw keys, tokens,
+   This is the default for requests like "add the Stripe MCP to this repo" or
+   "make this project able to use an MCP server." Treat it as Codex MCP config
+   owned by the current workspace repository, not as a new Codeq8 product
+   capability. Inspect the existing `.codex/config.toml`, repo instructions,
+   and tests before editing. Add or update the repo's MCP server entry there,
+   using the command, args, and env var names that Codex expects. Use
+   environment variable references only; never commit raw keys, tokens,
    cookies, OAuth refresh tokens, or generated auth caches.
 
 3. Private Codeq8 operator MCP.
@@ -59,7 +63,10 @@ capability. Then use the owner path for that category.
    - public action install/sync scripts;
    - runtime manifest capabilities;
    - source-contract tests that guard secrets, tool names, and approval modes.
-3. Choose the owner path from the classification table. Do not use an external
+3. Choose the owner path from the classification table. For normal
+   third-party MCP setup in the current repo, prefer the workspace
+   `.codex/config.toml` path unless the user explicitly asks for a reusable
+   Codeq8-wide plugin/runtime capability. Do not use an external
    vendor quickstart as the architecture until it fits one of those owner
    paths.
 4. Define the auth boundary:

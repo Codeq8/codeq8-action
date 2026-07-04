@@ -121,7 +121,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
       const skillMarker = await readJson(path.join(skillPath, CODEQ8_PLUGIN_MARKER_FILE));
       assert.equal(skillMarker.target_kind, "skill");
       assert.equal(skillMarker.target_name, skillName);
-      assert.equal(skillMarker.plugin_version, "0.5.4");
+      assert.equal(skillMarker.plugin_version, "0.5.5");
       assert.equal(await pathExists(path.join(skillPath, "SKILL.md")), true);
     }
 
@@ -595,6 +595,10 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(mcpSource, /^name: codeq8-mcp$/m);
   assert.match(mcpSource, /Classify\s+ownership before reading vendor setup docs/);
   assert.match(mcpSource, /Workspace-specific MCP for the user's repository/);
+  assert.match(mcpSource, /default for requests like "add the Stripe MCP to this repo"/);
+  assert.match(mcpSource, /Treat it as Codex MCP config\s+owned by the current workspace repository/);
+  assert.match(mcpSource, /Add or update the repo's MCP server entry there/);
+  assert.match(mcpSource, /prefer the workspace\s+`\.codex\/config\.toml` path/);
   assert.match(mcpSource, /Private Codeq8 operator MCP/);
   assert.match(mcpSource, /Product-wide Codeq8 MCP capability/);
   assert.match(mcpSource, /Do not ask for passwords, browser cookies, or 2FA codes/);
