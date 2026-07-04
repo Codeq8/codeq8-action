@@ -117,6 +117,7 @@ test("runtime manifest baseline matches the public startup contract", () => {
     "codex_app_server_progress_history",
     "codeq8_plugin",
     "codeq8_plugin_run_behavior_skills",
+    "codeq8_plugin_mcp_skill",
     "codeq8_plugin_playwright_mcp",
     "codeq8_python_tools",
   ]);

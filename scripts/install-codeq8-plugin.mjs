@@ -15,6 +15,7 @@ export const CODEQ8_PLUGIN_NAME = "codeq8";
 export const CODEQ8_PLUGIN_CAPABILITY = "codeq8_plugin";
 export const CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS_CAPABILITY =
   "codeq8_plugin_run_behavior_skills";
+export const CODEQ8_PLUGIN_MCP_SKILL_CAPABILITY = "codeq8_plugin_mcp_skill";
 export const CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY =
   "codeq8_plugin_playwright_mcp";
 export const CODEQ8_PLUGIN_MARKER_FILE = ".codeq8-managed.json";
@@ -231,6 +232,9 @@ function buildPluginCapabilities({ mcpServerNames = [], skillNames = [] } = {}) 
   const skillNameSet = new Set(normalizeList(skillNames));
   if (CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS.every((skillName) => skillNameSet.has(skillName))) {
     capabilities.push(CODEQ8_PLUGIN_RUN_BEHAVIOR_SKILLS_CAPABILITY);
+  }
+  if (skillNameSet.has("codeq8-mcp")) {
+    capabilities.push(CODEQ8_PLUGIN_MCP_SKILL_CAPABILITY);
   }
   if (normalizeList(mcpServerNames).includes("playwright")) {
     capabilities.push(CODEQ8_PLUGIN_PLAYWRIGHT_MCP_CAPABILITY);
