@@ -40,6 +40,9 @@ Bundled run-behavior skills:
   repo-owned skills as durable operating context.
 - `codeq8-coordinator` guides user-owned coordination through normal managed
   threads and explicit handoff artifacts.
+- `codeq8-mcp` classifies MCP requests into current-tool, workspace-config,
+  private-operator, or product-wide Codeq8 plugin/runtime work before setup
+  commands or vendor docs become the architecture.
 
 Playwright MCP availability is not permission to mutate live state. Follow the
 runner prompt's Codeq8 staging rules, visible workspace proof, and existing

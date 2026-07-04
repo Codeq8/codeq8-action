@@ -119,7 +119,7 @@ test("Codeq8 plugin install syncs marked plugin, skill, and marketplace state", 
       const skillMarker = await readJson(path.join(skillPath, CODEQ8_PLUGIN_MARKER_FILE));
       assert.equal(skillMarker.target_kind, "skill");
       assert.equal(skillMarker.target_name, skillName);
-      assert.equal(skillMarker.plugin_version, "0.5.3");
+      assert.equal(skillMarker.plugin_version, "0.5.4");
       assert.equal(await pathExists(path.join(skillPath, "SKILL.md")), true);
     }
 
@@ -526,7 +526,7 @@ test("Codeq8 plugin install source does not mutate CODEX_HOME or Codex auth stat
   assert.doesNotMatch(installerSource, /auth\.json|config\.toml|sessions/);
 });
 
-test("Codeq8 plugin bundles onboarding and coordinator runtime skills", async () => {
+test("Codeq8 plugin bundles onboarding, coordinator, and MCP runtime skills", async () => {
   const skillsRoot = path.join(process.cwd(), "plugins", "codeq8", "skills");
   const bundledSkillNames = (
     await fs.readdir(skillsRoot, { withFileTypes: true })
@@ -545,11 +545,16 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
     fs.readFile(path.join(pluginRoot, "skills", skillName, "SKILL.md"), "utf8");
   const onboardingSource = await readSkill("codeq8-onboarding");
   const coordinatorSource = await readSkill("codeq8-coordinator");
+  const mcpSource = await readSkill("codeq8-mcp");
   const pluginSource = await readSkill("codeq8-plugin");
   const readmeSource = await fs.readFile(path.join(pluginRoot, "README.md"), "utf8");
 
   assert.match(onboardingSource, /^name: codeq8-onboarding$/m);
   assert.match(onboardingSource, /first-pass router/);
+  assert.match(
+    onboardingSource,
+    /Use `codeq8-mcp` when the user asks to add, use, configure, install/,
+  );
   assert.match(onboardingSource, /runner\s+prompt owns runtime facts and safety policy/);
   assert.match(onboardingSource, /Maintain durable thread goals/);
   assert.match(onboardingSource, /set, update, or\s+clear the thread goal/);
@@ -585,12 +590,24 @@ test("Codeq8 plugin run-behavior skills preserve the migration contract", async 
   assert.match(coordinatorSource, /Archive only exact implementation, verification, or smoke threads/);
   assert.match(coordinatorSource, /Do not introduce a parent\/child\s+conversation hierarchy/);
 
+  assert.match(mcpSource, /^name: codeq8-mcp$/m);
+  assert.match(mcpSource, /Classify\s+ownership before reading vendor setup docs/);
+  assert.match(mcpSource, /Workspace-specific MCP for the user's repository/);
+  assert.match(mcpSource, /Private Codeq8 operator MCP/);
+  assert.match(mcpSource, /Product-wide Codeq8 MCP capability/);
+  assert.match(mcpSource, /Do not ask for passwords, browser cookies, or 2FA codes/);
+  assert.match(
+    mcpSource,
+    /Do not treat `npx`, local browser auth caches, or vendor demo commands as the\s+default Codeq8 architecture/,
+  );
+
   assert.doesNotMatch(pluginSource, /Child Threads runtime coordination skill/);
   assert.doesNotMatch(readmeSource, /codeq8-skill-stewardship|codeq8-learn|Child Threads runtime/i);
   assert.match(readmeSource, /durable goal\s+maintenance/);
   assert.match(readmeSource, /goal-like repo skill\s+management/);
+  assert.match(readmeSource, /codeq8-mcp/);
 
-  for (const source of [onboardingSource, coordinatorSource, pluginSource, readmeSource]) {
+  for (const source of [onboardingSource, coordinatorSource, mcpSource, pluginSource, readmeSource]) {
     assert.doesNotMatch(source, /Abdul|aalzanki/i);
     assert.doesNotMatch(source, /Codeq8\/Codeq8/);
     assert.doesNotMatch(source, /codeq8-learn|learning loop|learning sweep/i);

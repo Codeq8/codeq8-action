@@ -10,6 +10,9 @@ Bundled skills:
   maintenance, and goal-like repo skill management.
 - `codeq8-coordinator`: normal managed-thread coordination for user-owned
   workstreams.
+- `codeq8-mcp`: decision router for MCP requests, including current runtime
+  tools, workspace MCP config, private operator integrations, and product-wide
+  plugin/runtime capabilities.
 - `codeq8-plugin`: plugin runtime boundaries and rollout checkpoints.
 
 The bundled skill set is intentionally allowlisted. Internal product-domain,

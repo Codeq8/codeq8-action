@@ -24,6 +24,10 @@ staging mutation guards harness-owned.
 2. Respect assignment mode. A person-owned thread is a direct work request; do
    not manage lifecycle state unless the user asks for a supported operation.
 3. Route by owner:
+   - Use `codeq8-mcp` when the user asks to add, use, configure, install,
+     expose, or automate an MCP server or MCP-backed tool, or points to a
+     third-party MCP document. Classify the owner path before proposing setup
+     commands.
    - Use `codeq8-plugin` for plugin capability, install, manifest, Playwright
      MCP, public action pin, or rollout boundary work.
    - Use `codeq8-coordinator` when the user asks Codex to coordinate separate
