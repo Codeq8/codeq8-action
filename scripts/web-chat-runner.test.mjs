@@ -4033,6 +4033,199 @@ test("runCodex runs hidden AppServer title pre-turn for provisional resume mode"
   assert.equal(turnStarts[1]?.params?.input?.[0]?.text, "visible resume prompt");
 });
 
+test("runCodex fails hosted main turn startup when no AppServer item appears after title pre-turn", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-main-stall-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  const requestsOutputPath = path.join(workspacePath, "codex-requests.json");
+  const originalFetch = globalThis.fetch;
+  const titleCalls = [];
+  t.after(async () => {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  globalThis.fetch = async (url, init = {}) => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname === "/api/chat/runs/thread-title") {
+      const body = JSON.parse(String(init.body || "{}"));
+      titleCalls.push(body);
+      return Response.json({
+        ok: true,
+        title: body.title,
+        updated: true,
+        thread: {
+          thread_id: body.target_thread_id,
+          title: body.title,
+          title_source: "manual",
+        },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  };
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import fs from 'node:fs/promises';",
+      "import readline from 'node:readline';",
+      `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
+      "const requests = [];",
+      "let persistChain = Promise.resolve();",
+      "const persistRequests = () => {",
+      "  persistChain = persistChain.then(() => fs.writeFile(requestsOutputPath, JSON.stringify(requests), 'utf8'));",
+      "  return persistChain;",
+      "};",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "let turnCount = 0;",
+      "rl.on('line', async (line) => {",
+      "  const message = JSON.parse(line);",
+      "  requests.push({ method: message.method, params: message.params || {} });",
+      "  await persistRequests();",
+      "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    turnCount += 1;",
+      "    const isTitleTurn = turnCount === 1;",
+      "    const turnId = isTitleTurn ? 'turn_title' : 'turn_main_stalled';",
+      "    send({ id: message.id, result: { turn: { id: turnId, status: 'inProgress' } } });",
+      "    send({ method: 'turn/started', params: { turn: { id: turnId } } });",
+      "    if (isTitleTurn) {",
+      "      send({ method: 'item/started', params: { item: { id: 'msg_title', type: 'agent_message' } } });",
+      "      send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_title', delta: 'Initial greeting' } });",
+      "      send({ method: 'item/completed', params: { item: { id: 'msg_title', type: 'agent_message', text: 'Initial greeting' } } });",
+      "      send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });",
+      "    }",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const diagnostics = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "visible hosted prompt",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+      CODEQ8_EXECUTION_BACKEND: "runner_pool",
+    },
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "header.payload.signature",
+      workspaceRepository: "example-org/example-repo",
+      threadId: "wct_main_stall",
+      runId: "wcr_main_stall",
+      threadTitle: "Untitled",
+      threadTitleSource: "provisional_first_message",
+      promptText: "hi",
+      mainTurnStartupTimeoutMs: 30,
+      reportRunnerDiagnostic: async (diagnostic) => {
+        diagnostics.push(diagnostic);
+        return { ok: true, status: 200 };
+      },
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue() {},
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+      }),
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.signal, "main_turn_startup_timeout");
+  assert.match(result.reason, /main turn produced no AppServer item or terminal event/i);
+  assert.equal(titleCalls.length, 1);
+  assert.equal(titleCalls[0]?.title, "Initial greeting");
+  assert.equal(
+    diagnostics.some(
+      (diagnostic) => diagnostic.event === "runner_app_server_main_turn_startup_timeout",
+    ),
+    true,
+  );
+  const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  assert.equal(requests.filter((request) => request.method === "turn/start").length, 2);
+});
+
+test("runCodex keeps hosted main turn alive after first AppServer item activity", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-main-activity-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    const turnId = 'turn_main_slow';",
+      "    send({ id: message.id, result: { turn: { id: turnId, status: 'inProgress' } } });",
+      "    send({ method: 'turn/started', params: { turn: { id: turnId } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_main', type: 'agent_message' } } });",
+      "    setTimeout(() => {",
+      "      send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_main', delta: 'DONE' } });",
+      "      send({ method: 'item/completed', params: { item: { id: 'msg_main', type: 'agent_message', text: 'DONE' } } });",
+      "      send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });",
+      "    }, 75);",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "visible hosted prompt",
+    workspacePath,
+    commandEnv: {
+      ...process.env,
+      CODEQ8_EXECUTION_BACKEND: "runner_pool",
+    },
+    timeoutSeconds: 30,
+    appServerContext: {
+      threadTitle: "Existing title",
+      threadTitleSource: "generated",
+      promptText: "run a slow command",
+      mainTurnStartupTimeoutMs: 30,
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue() {},
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+      }),
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "DONE");
+});
+
 test("runCodex can stop after hidden setup before starting the visible task turn", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-before-main-stop-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
@@ -6746,6 +6939,15 @@ test("toUserVisibleRunnerFailureMessage maps usage-limit errors to account guida
     message,
     "The Codex account on this runner has reached its usage limit. Retry after the limit resets.",
   );
+});
+
+test("toUserVisibleRunnerFailureMessage maps hosted main-turn startup stalls to retry guidance", () => {
+  const message = toUserVisibleRunnerFailureMessage(
+    "Codex app-server main turn produced no AppServer item or terminal event within 120 seconds.",
+    { executionBackend: "runner_pool" },
+  );
+
+  assert.equal(message, "Codex got stuck before producing progress. Retry the run.");
 });
 
 test("toUserVisibleRunnerFailureMessage maps hosted revoked auth to reconnect guidance", () => {

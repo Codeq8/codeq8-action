@@ -62,6 +62,7 @@ const APP_SERVER_PROGRESS_MAX_EVENTS_PER_RUN = 10;
 const APP_SERVER_CONTROL_MAX_REQUESTS_PER_RUN = 20;
 const APP_SERVER_CONTROL_FINAL_CONTINUATION_MAX_TURNS = 3;
 const APP_SERVER_FIRESTORE_CLEANUP_TIMEOUT_MS = 2500;
+const HOSTED_APP_SERVER_MAIN_TURN_STARTUP_TIMEOUT_MS = 120_000;
 // AppServer live chat transport must not be implemented as recurring runner
 // HTTP calls. The runner gets one Firebase session, then uses Firestore
 // listeners/writes for progress and control.
@@ -824,6 +825,12 @@ function toUserVisibleRunnerFailureMessage(value, { executionBackend = "" } = {}
   }
   if (/session persistence failed/i.test(message)) {
     return "I couldn't save the conversation state after the run, so I marked this run failed.";
+  }
+  if (
+    /main turn produced no AppServer item or terminal event/i.test(message) ||
+    /runner_app_server_main_turn_startup_timeout/i.test(message)
+  ) {
+    return "Codex got stuck before producing progress. Retry the run.";
   }
   if (/web chat runner failed/i.test(message)) {
     return "I couldn't complete that run.";
@@ -9297,6 +9304,17 @@ async function runCodexAppServer({
     appServerContext?.hiddenThreadTitlePreturnTimeoutMs,
     HIDDEN_THREAD_TITLE_COMPLETION_TIMEOUT_MS,
   );
+  const executionBackend = normalizeRunExecutionBackend(
+    commandEnv?.CODEQ8_EXECUTION_BACKEND || commandEnv?.CODE_CHAT_EXECUTION_BACKEND,
+  );
+  const mainTurnStartupTimeoutMs =
+    executionBackend === "runner_pool"
+      ? parsePositiveInteger(
+          appServerContext?.mainTurnStartupTimeoutMs ||
+            commandEnv?.CODEQ8_HOSTED_APP_SERVER_MAIN_TURN_STARTUP_TIMEOUT_MS,
+          HOSTED_APP_SERVER_MAIN_TURN_STARTUP_TIMEOUT_MS,
+        )
+      : 0;
   if (!normalizedTask) {
     return {
       ok: false,
@@ -9361,8 +9379,62 @@ async function runCodexAppServer({
     let controlListener = null;
     let latestAppServerFailureMessage = "";
     const appServerStartupTimings = {};
+    let mainTurnStartupTimeoutHandle = null;
+    let mainTurnStartupSequence = 0;
     const markAppServerStartupTiming = (key) => {
       appServerStartupTimings[key] = Math.max(0, Date.now() - startMs);
+    };
+
+    const clearMainTurnStartupTimeout = () => {
+      if (mainTurnStartupTimeoutHandle) {
+        clearTimeout(mainTurnStartupTimeoutHandle);
+        mainTurnStartupTimeoutHandle = null;
+      }
+    };
+
+    const armMainTurnStartupTimeout = ({ reason = "main_turn" } = {}) => {
+      clearMainTurnStartupTimeout();
+      if (!mainTurnStartupTimeoutMs) {
+        return;
+      }
+      mainTurnStartupSequence += 1;
+      const sequence = mainTurnStartupSequence;
+      mainTurnStartupTimeoutHandle = setTimeout(() => {
+        if (settled || sequence !== mainTurnStartupSequence) {
+          return;
+        }
+        const message =
+          `Codex app-server main turn produced no AppServer item or terminal event within ${Math.floor(mainTurnStartupTimeoutMs / 1000)} seconds.`;
+        void (async () => {
+          await maybeReportRunnerDiagnostic(appServerContext?.reportRunnerDiagnostic, {
+            event: "runner_app_server_main_turn_startup_timeout",
+            failureClass: "runner_app_server_main_turn_startup_timeout",
+            severity: "error",
+            ok: false,
+            details: {
+              reason,
+              timeout_ms: mainTurnStartupTimeoutMs,
+              app_server_thread_ready: Boolean(appServerThreadId),
+              app_server_turn_ready: Boolean(activeTurnId),
+              app_server_startup_timings: appServerStartupTimings,
+            },
+          });
+          await finish({
+            ok: false,
+            output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
+            diagnosticOutput: truncate(stderr, MAX_OUTPUT_CHARS),
+            reason: message,
+            exitCode: 1,
+            signal: "main_turn_startup_timeout",
+            timedOut: false,
+          });
+        })();
+      }, mainTurnStartupTimeoutMs);
+      mainTurnStartupTimeoutHandle.unref?.();
+    };
+
+    const markMainTurnStartupActivity = () => {
+      clearMainTurnStartupTimeout();
     };
 
     const child = spawn(codexPath, ["app-server", "--listen", "stdio://"], {
@@ -9477,6 +9549,7 @@ async function runCodexAppServer({
       }
       settled = true;
       clearTimeout(timeoutHandle);
+      clearMainTurnStartupTimeout();
       await controlListener?.stop?.({ failPending: false });
       await progressReporter.flush();
       progressReporter.close?.();
@@ -9885,6 +9958,9 @@ async function runCodexAppServer({
       activeTurnPurpose = "main";
       activeTurnId = "";
       resetAgentMessageCapture();
+      armMainTurnStartupTimeout({
+        reason: appServerContinuationTurnCount > 0 ? "final_continuation" : "main_turn",
+      });
       const turnResult = await sendRequest("turn/start", {
         threadId: appServerThreadId,
         input: [{ type: "text", text: inputText }],
@@ -9977,6 +10053,15 @@ async function runCodexAppServer({
       if (normalizedMethod === "turn/started") {
         activeTurnId = extractAppServerTurnId(params) || activeTurnId;
         controlListener?.flushPending?.();
+      }
+      if (
+        !hiddenTitleTurnActive &&
+        (
+          normalizedMethod.startsWith("item/") ||
+          normalizedMethod === "turn/completed"
+        )
+      ) {
+        markMainTurnStartupActivity();
       }
       if (normalizedMethod === "thread/goal/updated") {
         const notification = normalizeCodexGoalNotification(params);
