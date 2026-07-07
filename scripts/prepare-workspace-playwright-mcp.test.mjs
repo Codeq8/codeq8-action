@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { extractWorkspaceMcpSections } from "./sync-workspace-mcp-config.mjs";
+import { CHROME_FOR_TESTING_BINARY_NAME } from "./prepare-codeq8-playwright-mcp.mjs";
 import {
   collectWorkspacePlaywrightMcpInvocations,
   prepareWorkspacePlaywrightMcpBrowsers,
@@ -76,11 +77,13 @@ async function withWorkspaceFixture(fn) {
   try {
     const workspacePath = path.join(tempRoot, "workspace");
     const browserCache = path.join(tempRoot, "ms-playwright");
+    const browserBinPath = path.join(tempRoot, "browser-bin");
     await fs.mkdir(workspacePath, { recursive: true });
     await fn({
       tempRoot,
       workspacePath,
       browserCache,
+      browserBinPath,
       dryRunOutput: DRY_RUN_OUTPUT.replaceAll("/tmp/codeq8-ms-playwright", browserCache),
     });
   } finally {
@@ -111,7 +114,7 @@ test("collectWorkspacePlaywrightMcpInvocations detects pnpm dlx @playwright/mcp@
 });
 
 test("prepareWorkspacePlaywrightMcpBrowsers installs the browser revision required by workspace @playwright/mcp", async () => {
-  await withWorkspaceFixture(async ({ workspacePath, browserCache, dryRunOutput }) => {
+  await withWorkspaceFixture(async ({ workspacePath, browserCache, browserBinPath, dryRunOutput }) => {
     await writeWorkspaceConfig(workspacePath, [
       "[mcp_servers.playwright]",
       'command = "pnpm"',
@@ -123,6 +126,7 @@ test("prepareWorkspacePlaywrightMcpBrowsers installs the browser revision requir
       workspacePath,
       env: {
         ...process.env,
+        CODEQ8_CHROME_FOR_TESTING_BIN_PATH: browserBinPath,
         PLAYWRIGHT_BROWSERS_PATH: browserCache,
       },
       runCommandImpl: async (command, args, options) => {
@@ -151,11 +155,16 @@ test("prepareWorkspacePlaywrightMcpBrowsers installs the browser revision requir
     );
     assert.equal(calls.every((call) => call.cwd === workspacePath), true);
     assert.equal(calls.every((call) => call.browserCache === browserCache), true);
+    assert.equal(result.preparedServers[0].chromeForTesting.ok, true);
+    assert.equal(
+      result.preparedServers[0].chromeForTesting.wrapperPath,
+      path.join(browserBinPath, CHROME_FOR_TESTING_BINARY_NAME),
+    );
   });
 });
 
 test("prepareWorkspacePlaywrightMcpBrowsers does not trust top-level browser directories without payload sentinels", async () => {
-  await withWorkspaceFixture(async ({ workspacePath, browserCache, dryRunOutput }) => {
+  await withWorkspaceFixture(async ({ workspacePath, browserCache, browserBinPath, dryRunOutput }) => {
     await writeWorkspaceConfig(workspacePath, [
       "[mcp_servers.playwright]",
       'command = "pnpm"',
@@ -170,6 +179,7 @@ test("prepareWorkspacePlaywrightMcpBrowsers does not trust top-level browser dir
       workspacePath,
       env: {
         ...process.env,
+        CODEQ8_CHROME_FOR_TESTING_BIN_PATH: browserBinPath,
         PLAYWRIGHT_BROWSERS_PATH: browserCache,
       },
       runCommandImpl: async (command, args) => {
@@ -198,7 +208,7 @@ test("prepareWorkspacePlaywrightMcpBrowsers does not trust top-level browser dir
 });
 
 test("prepareWorkspacePlaywrightMcpBrowsers skips install when workspace payload is complete", async () => {
-  await withWorkspaceFixture(async ({ workspacePath, browserCache, dryRunOutput }) => {
+  await withWorkspaceFixture(async ({ workspacePath, browserCache, browserBinPath, dryRunOutput }) => {
     await writeWorkspaceConfig(workspacePath, [
       "[mcp_servers.playwright]",
       'command = "pnpm"',
@@ -211,6 +221,7 @@ test("prepareWorkspacePlaywrightMcpBrowsers skips install when workspace payload
       workspacePath,
       env: {
         ...process.env,
+        CODEQ8_CHROME_FOR_TESTING_BIN_PATH: browserBinPath,
         PLAYWRIGHT_BROWSERS_PATH: browserCache,
       },
       runCommandImpl: async (command, args) => {
@@ -225,6 +236,7 @@ test("prepareWorkspacePlaywrightMcpBrowsers skips install when workspace payload
     });
 
     assert.equal(result.preparedServers[0].status, "already-prepared");
+    assert.equal(result.preparedServers[0].chromeForTesting.ok, true);
     assert.deepEqual(calls.map((call) => call.args), [
       ["dlx", "@playwright/mcp@latest", "install-browser", "chromium", "--dry-run"],
     ]);

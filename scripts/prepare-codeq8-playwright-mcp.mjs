@@ -16,6 +16,9 @@ export const DEFAULT_MARKER_FILE = "~/.cache/codeq8/playwright-mcp-browser.json"
 export const DEFAULT_BROWSER_CACHE_MARKER_FILE =
   "~/.cache/codeq8/playwright-mcp-browser-default.json";
 export const DEFAULT_BROWSER_CACHE_LABEL = "playwright-default";
+export const CHROME_FOR_TESTING_BINARY_NAME = "chrome-for-testing";
+export const DEFAULT_CHROME_FOR_TESTING_BIN_PATH =
+  "~/.cache/codeq8/chrome-for-testing-bin";
 
 function normalizeText(value) {
   return String(value ?? "").trim();
@@ -118,6 +121,12 @@ async function readJsonFile(filePath) {
 async function writeJsonFile(filePath, payload) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+async function writeExecutableFile(filePath, contents) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, contents, "utf8");
+  await fs.chmod(filePath, 0o755);
 }
 
 async function runCommand({ command, args, cwd, env }) {
@@ -234,6 +243,100 @@ async function allPathsExist(paths = []) {
   return true;
 }
 
+async function findFileNamed(rootPath, names, maxDepth = 8) {
+  const normalizedRootPath = normalizeText(rootPath);
+  if (!normalizedRootPath || maxDepth < 0) {
+    return "";
+  }
+  let children = [];
+  try {
+    children = await fs.readdir(normalizedRootPath, { withFileTypes: true });
+  } catch {
+    return "";
+  }
+  const nameSet = new Set(
+    (Array.isArray(names) ? names : []).map((entry) => normalizeText(entry)).filter(Boolean),
+  );
+  for (const child of children) {
+    const childPath = path.join(normalizedRootPath, child.name);
+    if (child.isFile() && nameSet.has(child.name)) {
+      return childPath;
+    }
+    if (child.isDirectory()) {
+      const nested = await findFileNamed(childPath, names, maxDepth - 1);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+  return "";
+}
+
+export async function findChromeForTestingExecutable(installLocations = []) {
+  for (const installLocation of Array.isArray(installLocations) ? installLocations : []) {
+    const normalizedLocation = normalizeText(installLocation);
+    if (!path.basename(normalizedLocation).startsWith("chromium-")) {
+      continue;
+    }
+    const executablePath = await findFileNamed(normalizedLocation, [
+      "Google Chrome for Testing",
+      "chrome",
+      "chrome.exe",
+    ]);
+    if (executablePath) {
+      return executablePath;
+    }
+  }
+  return "";
+}
+
+function buildChromeForTestingWrapper(executablePath) {
+  const quotedExecutable = JSON.stringify(executablePath);
+  return [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    `exec ${quotedExecutable} "$@"`,
+    "",
+  ].join("\n");
+}
+
+export async function exposeChromeForTestingExecutable({
+  installLocations = [],
+  env = process.env,
+  required = true,
+} = {}) {
+  const executablePath = await findChromeForTestingExecutable(installLocations);
+  if (!executablePath) {
+    if (!required) {
+      return {
+        ok: false,
+        status: "skipped",
+        executablePath: "",
+        wrapperPath: "",
+      };
+    }
+    throw new Error(
+      "Chrome for Testing browser payload is installed, but no Chrome executable was found to expose on PATH.",
+    );
+  }
+  const homeDirectory = normalizeText(env?.HOME) || normalizeText(process.env.HOME) || os.homedir();
+  const binPath = path.resolve(
+    expandHomePath(
+      normalizeText(env?.CODEQ8_CHROME_FOR_TESTING_BIN_PATH) ||
+        DEFAULT_CHROME_FOR_TESTING_BIN_PATH,
+      homeDirectory,
+    ),
+  );
+  const wrapperPath = path.join(binPath, CHROME_FOR_TESTING_BINARY_NAME);
+  await writeExecutableFile(wrapperPath, buildChromeForTestingWrapper(executablePath));
+  return {
+    ok: true,
+    status: "exposed",
+    executablePath,
+    wrapperPath,
+  };
+}
+
 function markerMatches({
   marker,
   browser,
@@ -314,8 +417,13 @@ export async function prepareCodeq8PlaywrightMcp({
     }) &&
     (await allPathsExist(installLocations))
   ) {
+    const chromeForTesting = await exposeChromeForTestingExecutable({
+      installLocations,
+      env,
+      required: normalizedBrowser === "chromium",
+    });
     logger?.log?.(
-      `[codeq8-playwright-mcp] status=already-prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser} cache=${browserCache}`,
+      `[codeq8-playwright-mcp] status=already-prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser} cache=${browserCache} chrome_for_testing=${chromeForTesting.wrapperPath || "unavailable"}`,
     );
     return {
       ok: true,
@@ -327,6 +435,7 @@ export async function prepareCodeq8PlaywrightMcp({
       browserCache,
       markerFilePath,
       installLocations,
+      chromeForTesting,
     };
   }
 
@@ -358,6 +467,11 @@ export async function prepareCodeq8PlaywrightMcp({
       "Playwright MCP browser install completed, but the expected browser payload paths are missing.",
     );
   }
+  const chromeForTesting = await exposeChromeForTestingExecutable({
+    installLocations: postInstallLocations,
+    env,
+    required: normalizedBrowser === "chromium",
+  });
 
   await writeJsonFile(markerFilePath, {
     managed_by: "codeq8-playwright-mcp-prep",
@@ -367,11 +481,13 @@ export async function prepareCodeq8PlaywrightMcp({
     browser: normalizedBrowser,
     playwright_browsers_path: browserCache,
     install_locations: postInstallLocations,
+    chrome_for_testing_executable: chromeForTesting.executablePath,
+    chrome_for_testing_wrapper: chromeForTesting.wrapperPath,
     prepared_at: new Date().toISOString(),
   });
 
   logger?.log?.(
-    `[codeq8-playwright-mcp] status=prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser} cache=${browserCache}`,
+    `[codeq8-playwright-mcp] status=prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser} cache=${browserCache} chrome_for_testing=${chromeForTesting.wrapperPath || "unavailable"}`,
   );
   return {
     ok: true,
@@ -383,6 +499,7 @@ export async function prepareCodeq8PlaywrightMcp({
     browserCache,
     markerFilePath,
     installLocations: postInstallLocations,
+    chromeForTesting,
   };
 }
 

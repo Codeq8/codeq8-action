@@ -9,10 +9,14 @@ import {
   CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
   CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME,
   CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION,
+  CHROME_FOR_TESTING_BINARY_NAME,
+  DEFAULT_CHROME_FOR_TESTING_BIN_PATH,
   DEFAULT_BROWSER_CACHE_LABEL,
   DEFAULT_BROWSER_CACHE_MARKER_FILE,
   buildPlaywrightMcpBrowserDryRunCommand,
   buildPlaywrightMcpBrowserInstallCommand,
+  exposeChromeForTestingExecutable,
+  findChromeForTestingExecutable,
   parsePlaywrightInstallLocations,
   prepareCodeq8PlaywrightMcp,
 } from "./prepare-codeq8-playwright-mcp.mjs";
@@ -32,9 +36,12 @@ async function withTempPlaywrightPayload(fn) {
   try {
     const browserPath = path.join(tempRoot, "chromium-1226");
     const ffmpegPath = path.join(tempRoot, "ffmpeg-1011");
+    const chromeExecutablePath = path.join(browserPath, "chrome-linux", "chrome");
     const fakeMcpPath = path.join(tempRoot, "playwright-mcp");
-    await fs.mkdir(browserPath, { recursive: true });
+    await fs.mkdir(path.dirname(chromeExecutablePath), { recursive: true });
     await fs.mkdir(ffmpegPath, { recursive: true });
+    await fs.writeFile(chromeExecutablePath, "#!/bin/sh\nexit 0\n", "utf8");
+    await fs.chmod(chromeExecutablePath, 0o755);
     await fs.writeFile(fakeMcpPath, "#!/bin/sh\nexit 0\n", "utf8");
     await fs.chmod(fakeMcpPath, 0o755);
     await fn({
@@ -42,6 +49,7 @@ async function withTempPlaywrightPayload(fn) {
       markerFile: path.join(tempRoot, "marker.json"),
       browserPath,
       ffmpegPath,
+      chromeExecutablePath,
       fakeMcpPath,
       dryRunOutput: DRY_RUN_OUTPUT.replaceAll("/tmp/codeq8-ms-playwright", tempRoot),
     });
@@ -58,6 +66,34 @@ test("buildPlaywrightMcpBrowserInstallCommand uses the pinned global MCP binary"
 
   assert.equal(command.command, "/Users/example/.npm-global/bin/playwright-mcp");
   assert.deepEqual(command.args, ["install-browser", "chromium", "--no-progress"]);
+});
+
+test("findChromeForTestingExecutable locates the installed Chromium executable", async () => {
+  await withTempPlaywrightPayload(async ({ browserPath, chromeExecutablePath }) => {
+    assert.equal(
+      await findChromeForTestingExecutable([browserPath]),
+      chromeExecutablePath,
+    );
+  });
+});
+
+test("exposeChromeForTestingExecutable writes stable chrome-for-testing wrapper", async () => {
+  await withTempPlaywrightPayload(async ({ tempRoot, browserPath, chromeExecutablePath }) => {
+    const browserBinPath = path.join(tempRoot, "browser-bin");
+    const result = await exposeChromeForTestingExecutable({
+      installLocations: [browserPath],
+      env: {
+        HOME: tempRoot,
+        CODEQ8_CHROME_FOR_TESTING_BIN_PATH: browserBinPath,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.executablePath, chromeExecutablePath);
+    assert.equal(result.wrapperPath, path.join(browserBinPath, CHROME_FOR_TESTING_BINARY_NAME));
+    const wrapper = await fs.readFile(result.wrapperPath, "utf8");
+    assert.match(wrapper, /exec ".+chrome" "\$@"/);
+  });
 });
 
 test("buildPlaywrightMcpBrowserDryRunCommand inspects browser payload paths without installing", () => {
@@ -127,6 +163,15 @@ test("prepareCodeq8PlaywrightMcp skips install when marker and payload paths mat
 
     assert.equal(result.ok, true);
     assert.equal(result.status, "already-prepared");
+    assert.equal(result.chromeForTesting.ok, true);
+    assert.equal(
+      result.chromeForTesting.wrapperPath,
+      path.join(
+        path.dirname(markerFile),
+        DEFAULT_CHROME_FOR_TESTING_BIN_PATH.replace("~/", ""),
+        CHROME_FOR_TESTING_BINARY_NAME,
+      ),
+    );
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0].args, ["install-browser", "chromium", "--dry-run"]);
     assert.match(logs.join("\n"), /status=already-prepared/);
@@ -134,7 +179,14 @@ test("prepareCodeq8PlaywrightMcp skips install when marker and payload paths mat
 });
 
 test("prepareCodeq8PlaywrightMcp installs and writes marker when marker is missing", async () => {
-  await withTempPlaywrightPayload(async ({ markerFile, dryRunOutput, browserPath, ffmpegPath, fakeMcpPath }) => {
+  await withTempPlaywrightPayload(async ({
+    markerFile,
+    dryRunOutput,
+    browserPath,
+    ffmpegPath,
+    chromeExecutablePath,
+    fakeMcpPath,
+  }) => {
     const calls = [];
     const logs = [];
     const result = await prepareCodeq8PlaywrightMcp({
@@ -157,6 +209,7 @@ test("prepareCodeq8PlaywrightMcp installs and writes marker when marker is missi
     assert.equal(result.ok, true);
     assert.equal(result.status, "prepared");
     assert.equal(result.capability, CODEQ8_PLAYWRIGHT_MCP_CAPABILITY);
+    assert.equal(result.chromeForTesting.ok, true);
     assert.deepEqual(
       calls.map((call) => call.args),
       [
@@ -170,6 +223,8 @@ test("prepareCodeq8PlaywrightMcp installs and writes marker when marker is missi
     assert.equal(marker.package_version, CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION);
     assert.equal(marker.playwright_browsers_path, "/tmp/codeq8-browsers");
     assert.deepEqual(marker.install_locations, [browserPath, ffmpegPath]);
+    assert.equal(marker.chrome_for_testing_executable, chromeExecutablePath);
+    assert.equal(marker.chrome_for_testing_wrapper, result.chromeForTesting.wrapperPath);
     assert.match(logs.join("\n"), /status=prepared/);
   });
 });
@@ -254,6 +309,9 @@ test("public action prepares global tools before Playwright MCP browser payload"
   assert.equal(workspaceMcpSyncIndex < workspacePlaywrightPrepIndex, true);
   assert.match(actionSource, /machine_path="\$\{PATH\}"/);
   assert.match(actionSource, /CODEQ8_MACHINE_PATH=\$\{machine_path\}/);
+  assert.match(actionSource, /chrome_for_testing_bin_path="\$\{HOME\}\/\.cache\/codeq8\/chrome-for-testing-bin"/);
+  assert.match(actionSource, /CODEQ8_CHROME_FOR_TESTING_BIN_PATH=\$\{chrome_for_testing_bin_path\}/);
+  assert.match(actionSource, /echo "\$\{chrome_for_testing_bin_path\}" >> "\$GITHUB_PATH"/);
   assert.match(actionSource, /NPM_CONFIG_PREFIX=\$\{npm_global_prefix\}/);
   assert.match(actionSource, /PLAYWRIGHT_BROWSERS_PATH=\$\{playwright_browsers_path\}/);
   assert.match(

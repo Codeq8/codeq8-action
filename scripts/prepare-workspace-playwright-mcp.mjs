@@ -14,6 +14,7 @@ import {
   CODEQ8_PLAYWRIGHT_MCP_BROWSER,
   CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
   CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME,
+  exposeChromeForTestingExecutable,
   parsePlaywrightInstallLocations,
 } from "./prepare-codeq8-playwright-mcp.mjs";
 
@@ -410,14 +411,20 @@ export async function prepareWorkspacePlaywrightMcpBrowsers({
     }
     const installLocations = parsePlaywrightInstallLocations(dryRun.stdout);
     if (await allInstallLocationsComplete(installLocations)) {
+      const chromeForTesting = await exposeChromeForTestingExecutable({
+        installLocations,
+        env,
+        required: invocation.browser === CODEQ8_PLAYWRIGHT_MCP_BROWSER,
+      });
       logger?.log?.(
-        `[codeq8-workspace-playwright-mcp] status=already-prepared capability=${WORKSPACE_PLAYWRIGHT_MCP_CAPABILITY} server=${invocation.serverId} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME} browser=${invocation.browser}`,
+        `[codeq8-workspace-playwright-mcp] status=already-prepared capability=${WORKSPACE_PLAYWRIGHT_MCP_CAPABILITY} server=${invocation.serverId} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME} browser=${invocation.browser} chrome_for_testing=${chromeForTesting.wrapperPath || "unavailable"}`,
       );
       preparedServers.push({
         serverId: invocation.serverId,
         status: "already-prepared",
         browser: invocation.browser,
         installLocations,
+        chromeForTesting,
       });
       continue;
     }
@@ -443,14 +450,20 @@ export async function prepareWorkspacePlaywrightMcpBrowsers({
         `Workspace Playwright MCP browser install completed for ${invocation.serverId}, but expected browser payload paths are incomplete.`,
       );
     }
+    const chromeForTesting = await exposeChromeForTestingExecutable({
+      installLocations: postInstallLocations,
+      env,
+      required: invocation.browser === CODEQ8_PLAYWRIGHT_MCP_BROWSER,
+    });
     logger?.log?.(
-      `[codeq8-workspace-playwright-mcp] status=prepared capability=${WORKSPACE_PLAYWRIGHT_MCP_CAPABILITY} server=${invocation.serverId} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME} browser=${invocation.browser}`,
+      `[codeq8-workspace-playwright-mcp] status=prepared capability=${WORKSPACE_PLAYWRIGHT_MCP_CAPABILITY} server=${invocation.serverId} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME} browser=${invocation.browser} chrome_for_testing=${chromeForTesting.wrapperPath || "unavailable"}`,
     );
     preparedServers.push({
       serverId: invocation.serverId,
       status: "prepared",
       browser: invocation.browser,
       installLocations: postInstallLocations,
+      chromeForTesting,
     });
   }
 
