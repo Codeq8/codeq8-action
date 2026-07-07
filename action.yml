@@ -91,6 +91,8 @@ runs:
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/sync-workspace-mcp-config.mjs" \
           --repo-root "$codeq8_action_repo_root" \
           --workspace-path "${GITHUB_WORKSPACE:-}"
+        "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/prepare-workspace-playwright-mcp.mjs" \
+          --workspace-path "${GITHUB_WORKSPACE:-}"
 
         if command -v gh >/dev/null 2>&1; then
           real_gh_path="$(command -v gh)"

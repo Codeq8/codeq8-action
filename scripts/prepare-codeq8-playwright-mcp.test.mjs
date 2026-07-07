@@ -237,14 +237,21 @@ test("public action prepares global tools before Playwright MCP browser payload"
   const globalToolsIndex = actionSource.indexOf("scripts/runner-global-cli-tools.mjs");
   const playwrightPrepIndex = actionSource.indexOf("scripts/prepare-codeq8-playwright-mcp.mjs");
   const defaultBrowserCacheIndex = actionSource.indexOf("--default-browser-cache");
+  const workspaceMcpSyncIndex = actionSource.indexOf("scripts/sync-workspace-mcp-config.mjs");
+  const workspacePlaywrightPrepIndex = actionSource.indexOf(
+    "scripts/prepare-workspace-playwright-mcp.mjs",
+  );
 
   assert.notEqual(pluginInstallIndex, -1);
   assert.notEqual(globalToolsIndex, -1);
   assert.notEqual(playwrightPrepIndex, -1);
   assert.notEqual(defaultBrowserCacheIndex, -1);
+  assert.notEqual(workspaceMcpSyncIndex, -1);
+  assert.notEqual(workspacePlaywrightPrepIndex, -1);
   assert.equal(pluginInstallIndex < globalToolsIndex, true);
   assert.equal(globalToolsIndex < playwrightPrepIndex, true);
   assert.equal(playwrightPrepIndex < defaultBrowserCacheIndex, true);
+  assert.equal(workspaceMcpSyncIndex < workspacePlaywrightPrepIndex, true);
   assert.match(actionSource, /machine_path="\$\{PATH\}"/);
   assert.match(actionSource, /CODEQ8_MACHINE_PATH=\$\{machine_path\}/);
   assert.match(actionSource, /NPM_CONFIG_PREFIX=\$\{npm_global_prefix\}/);
