@@ -13,6 +13,9 @@ export const CODEQ8_PLAYWRIGHT_MCP_BROWSER = "chromium";
 export const CODEQ8_PLAYWRIGHT_MCP_BINARY = "playwright-mcp";
 export const CODEQ8_PLAYWRIGHT_MCP_CAPABILITY = "codeq8_plugin_playwright_mcp";
 export const DEFAULT_MARKER_FILE = "~/.cache/codeq8/playwright-mcp-browser.json";
+export const DEFAULT_BROWSER_CACHE_MARKER_FILE =
+  "~/.cache/codeq8/playwright-mcp-browser-default.json";
+export const DEFAULT_BROWSER_CACHE_LABEL = "playwright-default";
 
 function normalizeText(value) {
   return String(value ?? "").trim();
@@ -50,9 +53,14 @@ function parseArgs(argv = process.argv.slice(2)) {
     markerFile: "",
     playwrightMcpPath: "",
     browser: CODEQ8_PLAYWRIGHT_MCP_BROWSER,
+    defaultBrowserCache: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const current = normalizeText(argv[index]);
+    if (current === "--default-browser-cache") {
+      result.defaultBrowserCache = true;
+      continue;
+    }
     if (!current.startsWith("--")) {
       continue;
     }
@@ -230,15 +238,19 @@ function markerMatches({
   marker,
   browser,
   installLocations,
-  playwrightBrowsersPath,
+  browserCache,
 }) {
   return (
     normalizeText(marker?.package_name) === CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME &&
     normalizeText(marker?.package_version) === CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION &&
     normalizeText(marker?.browser) === normalizeText(browser) &&
-    normalizeText(marker?.playwright_browsers_path) === normalizeText(playwrightBrowsersPath) &&
+    normalizeText(marker?.playwright_browsers_path) === normalizeText(browserCache) &&
     JSON.stringify(marker?.install_locations || []) === JSON.stringify(installLocations)
   );
+}
+
+function resolveBrowserCacheMarkerValue(env = process.env) {
+  return normalizeText(env?.PLAYWRIGHT_BROWSERS_PATH) || DEFAULT_BROWSER_CACHE_LABEL;
 }
 
 function summarizeFirstLine(value) {
@@ -250,6 +262,7 @@ export async function prepareCodeq8PlaywrightMcp({
   markerFile = DEFAULT_MARKER_FILE,
   playwrightMcpPath = "",
   browser = CODEQ8_PLAYWRIGHT_MCP_BROWSER,
+  defaultBrowserCache = false,
   env = process.env,
   runCommandImpl = runCommand,
   logger = null,
@@ -270,6 +283,10 @@ export async function prepareCodeq8PlaywrightMcp({
     ...env,
     npm_config_update_notifier: "false",
   };
+  if (defaultBrowserCache) {
+    delete commandEnv.PLAYWRIGHT_BROWSERS_PATH;
+  }
+  const browserCache = resolveBrowserCacheMarkerValue(commandEnv);
 
   const dryRunCommand = buildPlaywrightMcpBrowserDryRunCommand({
     playwrightMcpPath: resolvedPlaywrightMcpPath,
@@ -288,18 +305,17 @@ export async function prepareCodeq8PlaywrightMcp({
 
   const installLocations = parsePlaywrightInstallLocations(dryRun.stdout);
   const marker = await readJsonFile(markerFilePath);
-  const playwrightBrowsersPath = normalizeText(commandEnv.PLAYWRIGHT_BROWSERS_PATH);
   if (
     markerMatches({
       marker,
       browser: normalizedBrowser,
       installLocations,
-      playwrightBrowsersPath,
+      browserCache,
     }) &&
     (await allPathsExist(installLocations))
   ) {
     logger?.log?.(
-      `[codeq8-playwright-mcp] status=already-prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser}`,
+      `[codeq8-playwright-mcp] status=already-prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser} cache=${browserCache}`,
     );
     return {
       ok: true,
@@ -308,6 +324,7 @@ export async function prepareCodeq8PlaywrightMcp({
       packageName: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME,
       packageVersion: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION,
       browser: normalizedBrowser,
+      browserCache,
       markerFilePath,
       installLocations,
     };
@@ -348,13 +365,13 @@ export async function prepareCodeq8PlaywrightMcp({
     package_name: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME,
     package_version: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION,
     browser: normalizedBrowser,
-    playwright_browsers_path: playwrightBrowsersPath,
+    playwright_browsers_path: browserCache,
     install_locations: postInstallLocations,
     prepared_at: new Date().toISOString(),
   });
 
   logger?.log?.(
-    `[codeq8-playwright-mcp] status=prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser}`,
+    `[codeq8-playwright-mcp] status=prepared capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} package=${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME}@${CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION} browser=${normalizedBrowser} cache=${browserCache}`,
   );
   return {
     ok: true,
@@ -363,6 +380,7 @@ export async function prepareCodeq8PlaywrightMcp({
     packageName: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME,
     packageVersion: CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION,
     browser: normalizedBrowser,
+    browserCache,
     markerFilePath,
     installLocations: postInstallLocations,
   };
@@ -376,6 +394,7 @@ async function main() {
     markerFile: args.markerFile,
     playwrightMcpPath: args.playwrightMcpPath,
     browser: args.browser,
+    defaultBrowserCache: args.defaultBrowserCache,
     logger: console,
   });
 }

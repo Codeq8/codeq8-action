@@ -9,6 +9,8 @@ import {
   CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
   CODEQ8_PLAYWRIGHT_MCP_PACKAGE_NAME,
   CODEQ8_PLAYWRIGHT_MCP_PACKAGE_VERSION,
+  DEFAULT_BROWSER_CACHE_LABEL,
+  DEFAULT_BROWSER_CACHE_MARKER_FILE,
   buildPlaywrightMcpBrowserDryRunCommand,
   buildPlaywrightMcpBrowserInstallCommand,
   parsePlaywrightInstallLocations,
@@ -172,6 +174,36 @@ test("prepareCodeq8PlaywrightMcp installs and writes marker when marker is missi
   });
 });
 
+test("prepareCodeq8PlaywrightMcp can prepare the platform default browser cache", async () => {
+  await withTempPlaywrightPayload(async ({ markerFile, dryRunOutput, browserPath, ffmpegPath, fakeMcpPath }) => {
+    const calls = [];
+    const result = await prepareCodeq8PlaywrightMcp({
+      repoRoot: process.cwd(),
+      markerFile,
+      playwrightMcpPath: fakeMcpPath,
+      defaultBrowserCache: true,
+      env: {
+        HOME: path.dirname(markerFile),
+        PLAYWRIGHT_BROWSERS_PATH: "/tmp/codeq8-browsers",
+      },
+      runCommandImpl: async (call) => {
+        calls.push(call);
+        return { ok: true, code: 0, stdout: dryRunOutput, stderr: "" };
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.browserCache, DEFAULT_BROWSER_CACHE_LABEL);
+    assert.deepEqual(
+      calls.map((call) => call.env.PLAYWRIGHT_BROWSERS_PATH),
+      [undefined, undefined, undefined],
+    );
+    const marker = JSON.parse(await fs.readFile(markerFile, "utf8"));
+    assert.equal(marker.playwright_browsers_path, DEFAULT_BROWSER_CACHE_LABEL);
+    assert.deepEqual(marker.install_locations, [browserPath, ffmpegPath]);
+  });
+});
+
 test("prepareCodeq8PlaywrightMcp throws when required browser install fails", async () => {
   await withTempPlaywrightPayload(async ({ markerFile, dryRunOutput, fakeMcpPath }) => {
     await assert.rejects(
@@ -204,14 +236,21 @@ test("public action prepares global tools before Playwright MCP browser payload"
   const pluginInstallIndex = actionSource.indexOf("scripts/install-codeq8-plugin.mjs");
   const globalToolsIndex = actionSource.indexOf("scripts/runner-global-cli-tools.mjs");
   const playwrightPrepIndex = actionSource.indexOf("scripts/prepare-codeq8-playwright-mcp.mjs");
+  const defaultBrowserCacheIndex = actionSource.indexOf("--default-browser-cache");
 
   assert.notEqual(pluginInstallIndex, -1);
   assert.notEqual(globalToolsIndex, -1);
   assert.notEqual(playwrightPrepIndex, -1);
+  assert.notEqual(defaultBrowserCacheIndex, -1);
   assert.equal(pluginInstallIndex < globalToolsIndex, true);
   assert.equal(globalToolsIndex < playwrightPrepIndex, true);
+  assert.equal(playwrightPrepIndex < defaultBrowserCacheIndex, true);
   assert.match(actionSource, /machine_path="\$\{PATH\}"/);
   assert.match(actionSource, /CODEQ8_MACHINE_PATH=\$\{machine_path\}/);
   assert.match(actionSource, /NPM_CONFIG_PREFIX=\$\{npm_global_prefix\}/);
   assert.match(actionSource, /PLAYWRIGHT_BROWSERS_PATH=\$\{playwright_browsers_path\}/);
+  assert.match(
+    actionSource,
+    new RegExp(DEFAULT_BROWSER_CACHE_MARKER_FILE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
 });

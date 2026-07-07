@@ -82,6 +82,10 @@ runs:
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/runner-global-cli-tools.mjs"
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/prepare-codeq8-playwright-mcp.mjs" \
           --repo-root "$codeq8_action_repo_root"
+        "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/prepare-codeq8-playwright-mcp.mjs" \
+          --repo-root "$codeq8_action_repo_root" \
+          --marker-file "~/.cache/codeq8/playwright-mcp-browser-default.json" \
+          --default-browser-cache
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/sync-codeq8-playwright-mcp-config.mjs" \
           --repo-root "$codeq8_action_repo_root"
         "$CODEQ8_RESOLVED_NODE_BIN" "$codeq8_action_repo_root/scripts/sync-workspace-mcp-config.mjs" \
