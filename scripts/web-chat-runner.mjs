@@ -9363,6 +9363,7 @@ async function runCodexAppServer({
     const appServerNotificationCounts = new Map();
     const appServerRequestCounts = new Map();
     const actionsReasoningTranscript = createAppServerActionsReasoningTranscript();
+    const pendingReasoningProgressEvents = new Map();
     const pendingRequests = new Map();
     const progressReporter =
       firestoreBridge?.progressReporter || createNoopAppServerProgressReporter();
@@ -9454,6 +9455,59 @@ async function runCodexAppServer({
     };
 
     const getAssistantOutput = () => lastAgentMessageOutput || currentAgentMessageOutput;
+    const getReasoningProgressNotificationKey = (params, event) => {
+      const itemId = extractAppServerItemId(params);
+      if (itemId) {
+        return `item:${itemId}`;
+      }
+      const normalizedEvent = normalizeObject(event);
+      return [
+        "shape",
+        normalizeText(normalizedEvent.item_type),
+        normalizeText(normalizedEvent.label),
+      ].join(":");
+    };
+    const enqueueReasoningProgressEvent = (event, { markCompleted = false } = {}) => {
+      const normalizedEvent = normalizeObject(event);
+      if (!normalizeText(normalizedEvent.kind)) {
+        return;
+      }
+      progressReporter.enqueue(
+        markCompleted && normalizeText(normalizedEvent.status) === "in_progress"
+          ? { ...normalizedEvent, status: "completed" }
+          : normalizedEvent,
+      );
+    };
+    const recordReasoningProgressNotification = (method, params) => {
+      const normalizedMethod = normalizeAppServerMethod(method);
+      if (
+        normalizedMethod !== "item/started" &&
+        normalizedMethod !== "item/completed"
+      ) {
+        return;
+      }
+      const progressEvent = summarizeAppServerProgressNotification({
+        method: normalizedMethod,
+        params,
+      });
+      if (!progressEvent) {
+        return;
+      }
+      const progressKey = getReasoningProgressNotificationKey(params, progressEvent);
+      if (normalizedMethod === "item/started") {
+        pendingReasoningProgressEvents.set(progressKey, progressEvent);
+        return;
+      }
+      pendingReasoningProgressEvents.delete(progressKey);
+      enqueueReasoningProgressEvent(progressEvent);
+    };
+    const flushPendingReasoningProgressEvents = ({ markCompleted = false } = {}) => {
+      const pendingEvents = Array.from(pendingReasoningProgressEvents.values());
+      pendingReasoningProgressEvents.clear();
+      for (const event of pendingEvents) {
+        enqueueReasoningProgressEvent(event, { markCompleted });
+      }
+    };
     const enqueueCurrentAgentMessageProgress = () => {
       if (activeTurnPurpose === "hidden_thread_title") {
         return;
@@ -9551,6 +9605,7 @@ async function runCodexAppServer({
       clearTimeout(timeoutHandle);
       clearMainTurnStartupTimeout();
       await controlListener?.stop?.({ failPending: false });
+      flushPendingReasoningProgressEvents({ markCompleted: result?.ok === true });
       await progressReporter.flush();
       progressReporter.close?.();
       await goalReporter.flush();
@@ -10089,16 +10144,13 @@ async function runCodexAppServer({
       }
       if (
         !hiddenTitleTurnActive &&
-        normalizedMethod === "item/completed" &&
+        (
+          normalizedMethod === "item/started" ||
+          normalizedMethod === "item/completed"
+        ) &&
         isAppServerReasoningItem(params)
       ) {
-        const progressEvent = summarizeAppServerProgressNotification({
-          method: normalizedMethod,
-          params,
-        });
-        if (progressEvent) {
-          progressReporter.enqueue(progressEvent);
-        }
+        recordReasoningProgressNotification(normalizedMethod, params);
       }
       if (normalizedMethod === "item/agentMessage/delta") {
         appendAgentMessageDelta(params);
@@ -10124,6 +10176,7 @@ async function runCodexAppServer({
           });
           return;
         }
+        flushPendingReasoningProgressEvents({ markCompleted: ok });
         activeTurnId = "";
         controlListener?.pauseProcessing?.();
         void finishAfterTurnCompleted({

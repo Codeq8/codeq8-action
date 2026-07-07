@@ -1440,6 +1440,83 @@ test("runCodex forwards AppServer reasoning items to durable progress", async (t
   );
 });
 
+test("runCodex flushes started-only AppServer reasoning to durable progress", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-started-reasoning-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'reason_started_only', type: 'assistant_reasoning', text: 'Started-only reasoning proof' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_done', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_done', delta: 'done' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_done', type: 'agent_message', text: 'done' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const progressEvents = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "persist started-only reasoning progress",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "runner_token",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue(event) {
+            progressEvents.push(event);
+          },
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+        close: async () => {},
+      }),
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "done");
+  const reasoningEvents = progressEvents.filter(
+    (event) => event.item_type === "assistant_reasoning",
+  );
+  assert.equal(reasoningEvents.length, 1);
+  assert.equal(reasoningEvents[0].label, "Started-only reasoning proof");
+  assert.equal(reasoningEvents[0].status, "completed");
+  assert.match(String(reasoningEvents[0].event_id || ""), /^app_server:reasoning:[a-f0-9]+$/);
+  assert.equal(
+    progressEvents.filter((event) => event.item_type === "agent_message").length,
+    0,
+  );
+});
+
 test("runCodex forwards AppServer agent-message progress fragments without final answer", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-agent-progress-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
