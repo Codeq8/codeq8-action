@@ -9440,7 +9440,7 @@ async function runCodexAppServer({
 
     const child = spawn(codexPath, ["app-server", "--listen", "stdio://"], {
       cwd: workspacePath,
-      env: applyCodexNodeOptions({ ...commandEnv }),
+      env: applyCodexProcessEnv({ ...commandEnv }),
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
@@ -10456,6 +10456,22 @@ export function applyCodexNodeOptions(commandEnv = {}) {
     commandEnv.NODE_OPTIONS = codexNodeOptions;
   }
   return commandEnv;
+}
+
+export function applyCodexShellEnv(commandEnv = {}) {
+  const explicitShell = normalizeText(commandEnv.CODEQ8_CODEX_SHELL);
+  if (explicitShell) {
+    commandEnv.SHELL = explicitShell;
+    return commandEnv;
+  }
+  if (process.platform !== "win32") {
+    commandEnv.SHELL = "/bin/bash";
+  }
+  return commandEnv;
+}
+
+export function applyCodexProcessEnv(commandEnv = {}) {
+  return applyCodexShellEnv(applyCodexNodeOptions(commandEnv));
 }
 
 async function workingTreeHasChanges({ workspacePath, commandEnv }) {
