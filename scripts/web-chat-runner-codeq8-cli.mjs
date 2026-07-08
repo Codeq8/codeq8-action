@@ -397,6 +397,7 @@ function summarizeThreadForOutput(thread, payload = {}) {
     repository: readThreadRepository(normalized, payload),
     title: truncateText(firstText(normalized.title), 160),
     title_source: firstText(normalized.title_source, normalized.titleSource),
+    subtitle: truncateText(firstText(normalized.subtitle, normalized.threadSubtitle), 160),
     status: firstText(normalized.status, payload.status),
     aggregate_status: firstText(normalized.aggregate_status, normalized.aggregateStatus),
     source_type: firstText(normalized.source_type, normalized.sourceType),
@@ -568,6 +569,20 @@ function buildThreadTitleOutput(payload, fallbackThreadId, fallbackTitle) {
     ...parentSummaryFields(payload),
     title: firstText(payload.title, thread.title, fallbackTitle),
     title_source: firstText(payload.title_source, payload.titleSource, thread.title_source, thread.titleSource),
+    thread: summarizeThreadForOutput(thread, payload),
+    error: firstText(payload.error),
+  });
+}
+
+function buildThreadSubtitleOutput(payload, fallbackThreadId, fallbackSubtitle) {
+  const thread = payloadObject(payload.thread);
+  return compactObject({
+    ok: Boolean(payload.ok),
+    subtitled: payload.subtitled !== false,
+    updated: payload.updated !== false,
+    target_thread_id: readThreadOutputId(payload, fallbackThreadId),
+    ...parentSummaryFields(payload),
+    subtitle: firstText(payload.subtitle, thread.subtitle, fallbackSubtitle),
     thread: summarizeThreadForOutput(thread, payload),
     error: firstText(payload.error),
   });
@@ -1336,6 +1351,8 @@ function printHelp(stdout) {
       "  codeq8 threads create --title title --message text [--assigned-to codeq8|me] [--idempotency-key key] [--json]",
       "  codeq8 threads message <thread-id> --text text",
       "  codeq8 threads title <thread-id> --title text",
+      "  codeq8 threads subtitle <thread-id> --subtitle text",
+      "  codeq8 threads subtitle <thread-id> --clear",
       "  codeq8 threads pull-request <thread-id> --pull-request-number n|--pull-request-url url",
       "  codeq8 threads archive <thread-id>  (alias: close)",
       "  codeq8 threads reopen <thread-id>",
@@ -1640,6 +1657,42 @@ async function handleThreadsCommand({ args, context, fetchImpl, stdout }) {
       }),
     });
     writeJson(stdout, buildThreadTitleOutput(payload, targetThreadId, title));
+    return 0;
+  }
+
+  if (command === "subtitle" || command === "set-subtitle") {
+    const positional = removeFlags(
+      rest,
+      ["--subtitle", "--text"],
+      ["--clear", "--json"],
+    );
+    const targetThreadId = normalizeText(positional[0]);
+    const clear = hasFlag(rest, "--clear");
+    const subtitle = readFlag(rest, ["--subtitle", "--text"]);
+    if (!targetThreadId) {
+      throw new Error("thread id is required.");
+    }
+    if (clear && subtitle) {
+      throw new Error("--subtitle must be omitted when --clear is used.");
+    }
+    if (!clear && !subtitle) {
+      throw new Error("--subtitle is required unless --clear is used.");
+    }
+    const payload = await requestJson({
+      context,
+      fetchImpl,
+      routeBase: "public",
+      path: "/api/chat/runs/thread-subtitle",
+      method: "POST",
+      body: parentBody(context, {
+        target_thread_id: targetThreadId,
+        ...(clear ? { clear: true } : { subtitle }),
+      }),
+    });
+    writeJson(
+      stdout,
+      buildThreadSubtitleOutput(payload, targetThreadId, clear ? "" : subtitle),
+    );
     return 0;
   }
 

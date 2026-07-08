@@ -128,6 +128,7 @@ test("runtime manifest baseline matches the public startup contract", () => {
   assert.deepEqual(OPTIONAL_WEB_CHAT_RUNNER_RUNTIME_PATHS, [
     "/api/chat/runs/goal",
     "/api/chat/runs/thread-title",
+    "/api/chat/runs/thread-subtitle",
     "/api/chat/runs/thread-pull-request",
     "/api/chat/runs/app-server/control",
     "/web-chat/hosted-codex-auth/invalidate",

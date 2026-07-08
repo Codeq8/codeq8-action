@@ -1003,6 +1003,8 @@ test("runner codeq8 helper exposes inspect and message without a threads steer c
   assert.doesNotMatch(text, /child rows|child-of|Child thread/i);
   assert.match(text, /codeq8 threads message <thread-id> --text text/);
   assert.match(text, /codeq8 threads title <thread-id> --title text/);
+  assert.match(text, /codeq8 threads subtitle <thread-id> --subtitle text/);
+  assert.match(text, /codeq8 threads subtitle <thread-id> --clear/);
   assert.match(
     text,
     /codeq8 threads pull-request <thread-id> --pull-request-number n\|--pull-request-url url/,
@@ -1179,6 +1181,97 @@ test("runner codeq8 helper sets thread titles through backend contract", async (
   assert.equal(payload.title_source, "manual");
   assert.equal(payload.thread.title, "Runner title");
   assertNoRawCredentialPayload(output.readText());
+});
+
+test("runner codeq8 helper sets thread subtitles through backend contract", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "subtitle", "wct_target", "--subtitle", "0.006% covered"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        subtitled: true,
+        updated: true,
+        target_thread_id: "wct_target",
+        subtitle: "0.006% covered",
+        thread: {
+          thread_id: "wct_target",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Release testing",
+          subtitle: "0.006% covered",
+          thread_stream_token: "secret_subtitle_stream",
+          thread_record_handoff: "secret_subtitle_handoff",
+        },
+      });
+    },
+  });
+
+  assert.equal(new URL(calls[0]?.url).pathname, "/api/chat/runs/thread-subtitle");
+  assert.equal(calls[0]?.init?.method, "POST");
+  assert.equal(calls[0]?.init?.headers?.Authorization, "Bearer header.payload.signature");
+  assert.equal(calls[0]?.init?.headers?.Cookie, "code_github_session=session_cookie");
+  const body = JSON.parse(String(calls[0]?.init?.body || "{}"));
+  assert.equal(body.workspace_repository, "Codeq8/Codeq8");
+  assert.equal(body.thread_id, "wct_parent");
+  assert.equal(body.run_id, "wcr_parent");
+  assert.equal(body.target_thread_id, "wct_target");
+  assert.equal(body.subtitle, "0.006% covered");
+  assert.equal(Object.hasOwn(body, "clear"), false);
+  const payload = output.readJson();
+  assert.equal(payload.ok, true);
+  assert.equal(payload.updated, true);
+  assert.equal(payload.target_thread_id, "wct_target");
+  assert.equal(payload.subtitle, "0.006% covered");
+  assert.equal(payload.thread.subtitle, "0.006% covered");
+  assertNoRawCredentialPayload(output.readText());
+});
+
+test("runner codeq8 helper clears thread subtitles only through explicit clear", async () => {
+  const output = createOutputCapture();
+  const calls = [];
+  await handleRunnerCodeq8Cli({
+    argv: ["threads", "subtitle", "wct_target", "--clear"],
+    env: testEnv(),
+    stdout: output.stream,
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), init });
+      return Response.json({
+        ok: true,
+        subtitled: true,
+        updated: true,
+        target_thread_id: "wct_target",
+        subtitle: "",
+        thread: {
+          thread_id: "wct_target",
+          workspace_repository: "Codeq8/Codeq8",
+          title: "Release testing",
+          subtitle: "",
+        },
+      });
+    },
+  });
+
+  assert.equal(new URL(calls[0]?.url).pathname, "/api/chat/runs/thread-subtitle");
+  const body = JSON.parse(String(calls[0]?.init?.body || "{}"));
+  assert.equal(body.target_thread_id, "wct_target");
+  assert.equal(body.clear, true);
+  assert.equal(Object.hasOwn(body, "subtitle"), false);
+  assert.equal(output.readJson().updated, true);
+
+  await assert.rejects(
+    handleRunnerCodeq8Cli({
+      argv: ["threads", "subtitle", "wct_target"],
+      env: testEnv(),
+      fetchImpl: async () => {
+        throw new Error("missing subtitle should not call backend");
+      },
+    }),
+    /--subtitle is required unless --clear is used/,
+  );
 });
 
 test("runner codeq8 helper associates threads with pull requests through backend contract", async () => {
