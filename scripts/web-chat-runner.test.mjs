@@ -16,7 +16,6 @@ import {
 import {
   assertWebChatRunnerRuntimeCompatibility,
   applyCodexNodeOptions,
-  applyCodexShellEnv,
   applyCodexSessionContinuityGuidance,
   appendWebChatRunMarkerToPrompt,
   buildFirebaseStorageDownloadUrl,
@@ -708,60 +707,6 @@ test("applyCodexNodeOptions maps dedicated Codex preloads onto the Codex child e
     commandEnv.NODE_OPTIONS,
     "--import=/workspace/scripts/register-node-typescript-loader.mjs --import=/workspace/scripts/allow-dirty-branch-worktree-preload.mts",
   );
-});
-
-test("applyCodexShellEnv uses bash for the Codex child env by default", () => {
-  const commandEnv = {
-    SHELL: "/bin/zsh",
-  };
-
-  assert.equal(applyCodexShellEnv(commandEnv), commandEnv);
-  if (process.platform !== "win32") {
-    assert.equal(commandEnv.SHELL, "/bin/bash");
-  }
-});
-
-test("applyCodexShellEnv honors an explicit Codeq8 shell override", () => {
-  const commandEnv = {
-    CODEQ8_CODEX_SHELL: "/custom/bash",
-    SHELL: "/bin/zsh",
-  };
-
-  assert.equal(applyCodexShellEnv(commandEnv), commandEnv);
-  assert.equal(commandEnv.SHELL, "/custom/bash");
-});
-
-test("runCodex passes the normalized shell to the Codex process env", async (t) => {
-  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-shell-env-"));
-  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
-  const shellOutputPath = path.join(workspacePath, "shell.txt");
-  t.after(async () => {
-    await fs.rm(workspacePath, { recursive: true, force: true });
-  });
-
-  await writeFakeCodexAppServer(fakeCodexPath, {
-    shellOutputPath,
-    agentMessage: "shell ok",
-  });
-
-  const commandEnv = {
-    ...process.env,
-    SHELL: "/bin/zsh",
-  };
-  const result = await runCodex({
-    codexPath: fakeCodexPath,
-    model: "gpt-5.5",
-    task: "print shell env",
-    workspacePath,
-    commandEnv,
-    timeoutSeconds: 30,
-  });
-
-  assert.equal(result.ok, true);
-  if (process.platform !== "win32") {
-    assert.equal(await fs.readFile(shellOutputPath, "utf8"), "/bin/bash");
-  }
-  assert.equal(commandEnv.SHELL, "/bin/zsh");
 });
 
 test("buildFinalWorkspaceStateCallbackPayload serializes final branch state", () => {
@@ -4580,7 +4525,6 @@ async function writeFakeCodexAppServer(
   {
     argsOutputPath = "",
     envOutputPath = "",
-    shellOutputPath = "",
     requestsOutputPath = "",
     agentMessage = "done",
     commandLabel = "npm test",
@@ -4597,7 +4541,6 @@ async function writeFakeCodexAppServer(
       "import readline from 'node:readline';",
       `const argsOutputPath = ${JSON.stringify(argsOutputPath)};`,
       `const envOutputPath = ${JSON.stringify(envOutputPath)};`,
-      `const shellOutputPath = ${JSON.stringify(shellOutputPath)};`,
       `const requestsOutputPath = ${JSON.stringify(requestsOutputPath)};`,
       `const agentMessage = ${JSON.stringify(agentMessage)};`,
       `const commandLabel = ${JSON.stringify(commandLabel)};`,
@@ -4607,7 +4550,6 @@ async function writeFakeCodexAppServer(
       "const agentMessages = Array.isArray(agentMessage) ? agentMessage : [agentMessage];",
       "if (argsOutputPath) await fs.writeFile(argsOutputPath, JSON.stringify(process.argv.slice(2)), 'utf8');",
       "if (envOutputPath) await fs.writeFile(envOutputPath, process.env.NODE_OPTIONS || '', 'utf8');",
-      "if (shellOutputPath) await fs.writeFile(shellOutputPath, process.env.SHELL || '', 'utf8');",
       "const requests = [];",
       "let persistChain = Promise.resolve();",
       "const persistRequests = async () => {",

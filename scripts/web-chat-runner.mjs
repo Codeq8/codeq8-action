@@ -10458,20 +10458,8 @@ export function applyCodexNodeOptions(commandEnv = {}) {
   return commandEnv;
 }
 
-export function applyCodexShellEnv(commandEnv = {}) {
-  const explicitShell = normalizeText(commandEnv.CODEQ8_CODEX_SHELL);
-  if (explicitShell) {
-    commandEnv.SHELL = explicitShell;
-    return commandEnv;
-  }
-  if (process.platform !== "win32") {
-    commandEnv.SHELL = "/bin/bash";
-  }
-  return commandEnv;
-}
-
 export function applyCodexProcessEnv(commandEnv = {}) {
-  return applyCodexShellEnv(applyCodexNodeOptions(commandEnv));
+  return applyCodexNodeOptions(commandEnv);
 }
 
 async function workingTreeHasChanges({ workspacePath, commandEnv }) {
