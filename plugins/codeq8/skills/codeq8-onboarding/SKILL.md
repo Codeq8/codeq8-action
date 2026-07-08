@@ -30,8 +30,11 @@ staging mutation guards harness-owned.
      commands.
    - Use `codeq8-plugin` for plugin capability, install, manifest, Playwright
      MCP, public action pin, or rollout boundary work.
-   - Use `codeq8-coordinator` when the user asks Codex to coordinate separate
-     Codeq8 workstreams or other normal managed threads.
+   - Use explicit strategy or workspace guidance for multi-thread coordination
+     only when the user asks for visible coordination or the runner prompt gives
+     a bounded workstream instruction. Do not create separate managed threads
+     as hidden delegation; keep the current thread informed with the plan,
+     thread ids, decisive results, blockers, and cleanup status.
    - Use workspace repo skills and `AGENTS.md` for repository-specific
      implementation, validation, production, staging, and release rules.
 4. Maintain durable thread goals. When the conversation establishes, changes,

@@ -38,11 +38,13 @@ Bundled run-behavior skills:
 - `codeq8-onboarding` routes Codeq8 runs from the runner-provided facts into
   the right plugin or workspace skill, maintains durable goals, and manages
   repo-owned skills as durable operating context.
-- `codeq8-coordinator` guides user-owned coordination through normal managed
-  threads and explicit handoff artifacts.
 - `codeq8-mcp` classifies MCP requests into current-tool, workspace-config,
   private-operator, or product-wide Codeq8 plugin/runtime work before setup
   commands or vendor docs become the architecture.
+
+The standalone coordinator skill is retired. Coordination that truly needs
+separate managed threads must stay explicit, visible in the current thread, and
+owned by strategy or workspace guidance rather than by hidden delegation.
 
 Playwright MCP availability is not permission to mutate live state. Follow the
 runner prompt's Codeq8 staging rules, visible workspace proof, and existing

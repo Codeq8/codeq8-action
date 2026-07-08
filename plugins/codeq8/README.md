@@ -8,12 +8,16 @@ Bundled skills:
 
 - `codeq8-onboarding`: first-pass Codeq8 run orientation, durable goal
   maintenance, and goal-like repo skill management.
-- `codeq8-coordinator`: normal managed-thread coordination for user-owned
-  workstreams.
 - `codeq8-mcp`: decision router for MCP requests, including current runtime
   tools, repo-owned Codex MCP config such as `.codex/config.toml`, private
   operator integrations, and product-wide plugin/runtime capabilities.
 - `codeq8-plugin`: plugin runtime boundaries and rollout checkpoints.
+
+The retired `codeq8-coordinator` skill is no longer bundled. Separate managed
+threads should be created only when the user explicitly asks for visible
+coordination or the runner prompt provides an explicit bounded workstream
+instruction; the current thread must receive the plan, thread ids, results,
+blockers, and cleanup status.
 
 The bundled skill set is intentionally allowlisted. Internal product-domain,
 operator, incident, pricing, admin, and strategy skills remain repo-local until
