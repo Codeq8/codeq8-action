@@ -7106,6 +7106,10 @@ function normalizeAppServerMethod(value) {
   return normalizeText(value);
 }
 
+function isAppServerDeltaMethod(method) {
+  return /\/delta$/i.test(normalizeAppServerMethod(method));
+}
+
 function extractAppServerTextPreservingWhitespace(value, keys = []) {
   if (typeof value === "string") {
     return value;
@@ -7326,6 +7330,28 @@ function extractAppServerItemText(params) {
   const object = normalizeObject(params);
   const item = normalizeObject(object.item);
   return extractAppServerTextPreservingWhitespace(item, ["text", "content", "message"]);
+}
+
+function extractAppServerReasoningText(params) {
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  const reasoningTextKeys = [
+    "text",
+    "content",
+    "message",
+    "summary",
+    "reasoning",
+    "delta",
+    "value",
+    "output_text",
+    "outputText",
+    "summary_text",
+    "summaryText",
+  ];
+  return (
+    extractAppServerTextPreservingWhitespace(item, reasoningTextKeys) ||
+    extractAppServerTextPreservingWhitespace(object, reasoningTextKeys)
+  );
 }
 
 function sanitizeActionsTranscriptText(value) {
@@ -7643,13 +7669,17 @@ function summarizeAppServerProgressNotification({
     isAgentItem && normalizedMethod === "item/completed";
   const isReasoningProgress =
     isReasoningItem &&
-    (normalizedMethod === "item/started" || normalizedMethod === "item/completed");
+    (
+      normalizedMethod === "item/started" ||
+      normalizedMethod === "item/completed" ||
+      isAppServerDeltaMethod(normalizedMethod)
+    );
   if (!isAgentDelta && !isAgentCompletion && !isReasoningProgress) {
     return null;
   }
   const itemLabel = normalizeText(
     isReasoningProgress
-      ? extractAppServerItemText(params)
+      ? extractAppServerReasoningText(params)
       : label || extractAppServerCompletedAgentText(params),
   );
   return itemLabel
@@ -9482,7 +9512,8 @@ async function runCodexAppServer({
       const normalizedMethod = normalizeAppServerMethod(method);
       if (
         normalizedMethod !== "item/started" &&
-        normalizedMethod !== "item/completed"
+        normalizedMethod !== "item/completed" &&
+        !isAppServerDeltaMethod(normalizedMethod)
       ) {
         return;
       }
@@ -9496,6 +9527,11 @@ async function runCodexAppServer({
       const progressKey = getReasoningProgressNotificationKey(params, progressEvent);
       if (normalizedMethod === "item/started") {
         pendingReasoningProgressEvents.set(progressKey, progressEvent);
+        return;
+      }
+      if (isAppServerDeltaMethod(normalizedMethod)) {
+        pendingReasoningProgressEvents.set(progressKey, progressEvent);
+        enqueueReasoningProgressEvent(progressEvent);
         return;
       }
       pendingReasoningProgressEvents.delete(progressKey);
@@ -10146,7 +10182,8 @@ async function runCodexAppServer({
         !hiddenTitleTurnActive &&
         (
           normalizedMethod === "item/started" ||
-          normalizedMethod === "item/completed"
+          normalizedMethod === "item/completed" ||
+          isAppServerDeltaMethod(normalizedMethod)
         ) &&
         isAppServerReasoningItem(params)
       ) {

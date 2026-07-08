@@ -1517,6 +1517,89 @@ test("runCodex flushes started-only AppServer reasoning to durable progress", as
   );
 });
 
+test("runCodex forwards delta-shaped AppServer reasoning to durable progress", async (t) => {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-delta-reasoning-"));
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_app' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_app', status: 'inProgress' } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'reason_delta', type: 'assistant_reasoning' } } });",
+      "    send({ method: 'item/reasoning/delta', params: { item: { id: 'reason_delta', type: 'assistant_reasoning' }, delta: { text: 'Inspecting active run state' } } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'reason_delta', type: 'assistant_reasoning', summary: [{ text: 'Found missing progress projection' }] } } });",
+      "    send({ method: 'item/started', params: { item: { id: 'msg_done', type: 'agent_message' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { item_id: 'msg_done', delta: 'done' } });",
+      "    send({ method: 'item/completed', params: { item: { id: 'msg_done', type: 'agent_message', text: 'done' } } });",
+      "    send({ method: 'turn/completed', params: { turn: { id: 'turn_app', status: 'completed' } } });",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const progressEvents = [];
+  const result = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.5",
+    task: "persist delta-shaped reasoning progress",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+    appServerContext: {
+      publicBaseUrl: "https://codeq8.example",
+      webChatRunToken: "runner_token",
+      workspaceRepository: "Codeq8/Codeq8",
+      threadId: "wct_app",
+      runId: "wcr_app",
+      createAppServerFirestoreBridgeImpl: async () => ({
+        progressReporter: {
+          enqueue(event) {
+            progressEvents.push(event);
+          },
+          flush: async () => {},
+        },
+        createControlListener: () => ({
+          start: () => {},
+          stop: async () => {},
+        }),
+        close: async () => {},
+      }),
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "done");
+  const reasoningEvents = progressEvents.filter(
+    (event) => event.item_type === "assistant_reasoning",
+  );
+  assert.deepEqual(
+    reasoningEvents.map((event) => [event.label, event.status]),
+    [
+      ["Inspecting active run state", "in_progress"],
+      ["Found missing progress projection", "completed"],
+    ],
+  );
+  assert(
+    reasoningEvents.every((event) =>
+      /^app_server:reasoning:[a-f0-9]+$/.test(String(event.event_id || "")),
+    ),
+  );
+});
+
 test("runCodex forwards AppServer agent-message progress fragments without final answer", async (t) => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), "codeq8-codex-app-server-agent-progress-"));
   const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
