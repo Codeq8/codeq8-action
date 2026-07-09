@@ -7371,6 +7371,44 @@ function formatAppServerCollaborationProgressLabel(params) {
   return "Working with a subagent.";
 }
 
+function buildAppServerCollaborationProgressKey(params) {
+  const itemId = extractAppServerItemId(params);
+  if (itemId) {
+    return `item:${itemId}`;
+  }
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  const receiverThreadIds = (
+    Array.isArray(item.receiverThreadIds)
+      ? item.receiverThreadIds
+      : Array.isArray(item.receiver_thread_ids)
+        ? item.receiver_thread_ids
+        : Array.isArray(object.receiverThreadIds)
+          ? object.receiverThreadIds
+          : Array.isArray(object.receiver_thread_ids)
+            ? object.receiver_thread_ids
+            : []
+  )
+    .map((value) => normalizeCodexSessionId(value))
+    .filter(Boolean)
+    .sort();
+  const shape = JSON.stringify({
+    receiverThreadIds,
+    senderThreadId: normalizeCodexSessionId(
+      item.senderThreadId ||
+        item.sender_thread_id ||
+        object.senderThreadId ||
+        object.sender_thread_id ||
+        "",
+    ),
+    tool: normalizeAppServerActionsTranscriptItemType(
+      item.tool || object.tool || "",
+    ),
+    turnId: extractAppServerTurnId(params),
+  });
+  return `shape:${hashDiagnosticValue(shape)}`;
+}
+
 function extractAppServerAgentMessagePhase(params) {
   const object = normalizeObject(params);
   const item = normalizeObject(object.item);
@@ -9761,11 +9799,13 @@ async function runCodexAppServer({
     };
 
     const recordCollaborationProgressNotification = (method, params) => {
+      const itemId = extractAppServerItemId(params);
+      const progressKey = buildAppServerCollaborationProgressKey(params);
       const progressEvent = summarizeAppServerProgressNotification({
         method,
         params,
+        itemId: itemId || progressKey,
       });
-      const progressKey = normalizeText(progressEvent?.event_id);
       if (
         !progressEvent ||
         !progressKey ||
@@ -13382,11 +13422,13 @@ export {
   buildGitHubActionsControlPlaneUrl,
   buildWebChatRunMarker,
   buildWebChatRunnerDiagnosticRequest,
+  buildAppServerCollaborationProgressKey,
   buildResumePrompt,
   buildFinalWorkspaceStateCallbackPayload,
   buildUploadedCodexSessionStoredValue,
   createAppServerActionsReasoningTranscript,
   createAppServerFirestoreControlListener,
+  createAppServerFirestoreProgressReporter,
   captureCodexSessionBundle,
   checkoutPreparedWorkspaceBranch,
   checkoutOriginBranch,

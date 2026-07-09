@@ -28,8 +28,10 @@ import {
   buildWebChatRunMarker,
   buildWebChatRunnerDiagnosticRequest,
   buildUploadedCodexSessionStoredValue,
+  buildAppServerCollaborationProgressKey,
   createAppServerActionsReasoningTranscript,
   createAppServerFirestoreControlListener,
+  createAppServerFirestoreProgressReporter,
   captureCodexSessionBundle,
   configureWorkspaceGitCredentialHelper,
   configureWorkspacePushPolicy,
@@ -1654,6 +1656,8 @@ test("runCodex isolates current-schema root AppServer output from child agents",
       "    send({ method: 'item/reasoning/summaryTextDelta', params: { threadId: 'thr_root', turnId: 'turn_root', itemId: 'reason_shared', delta: 'Inspecting ' } });",
       "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'collab_spawn', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Inspect the progress producer.', model: null, reasoningEffort: 'high', agentsStates: { thr_child: { status: 'running', message: null } } } } });",
       "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'collab_spawn', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Inspect the progress producer.', model: null, reasoningEffort: 'high', agentsStates: { thr_child: { status: 'running', message: null } } } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { type: 'collabAgentToolCall', tool: 'sendInput', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Do not expose this follow-up.' } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { type: 'collabAgentToolCall', tool: 'sendInput', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Do not expose this follow-up.' } } });",
       "    send({ method: 'turn/started', params: { threadId: 'thr_child', turn: { id: 'turn_child', status: 'inProgress', items: [] } } });",
       "    send({ method: 'item/started', params: { threadId: 'thr_child', turnId: 'turn_child', item: { id: 'msg_shared', type: 'agentMessage', text: '', phase: 'commentary' } } });",
       "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thr_child', turnId: 'turn_child', itemId: 'msg_shared', delta: 'child fragment' } });",
@@ -1680,7 +1684,13 @@ test("runCodex isolates current-schema root AppServer output from child agents",
     { mode: 0o755 },
   );
 
-  const progressEvents = [];
+  const updateCalls = [];
+  const historyCalls = [];
+  class TestFieldPath {
+    constructor(...segments) {
+      this.segments = segments;
+    }
+  }
   const output = await captureRunnerOutput(() =>
     runCodex({
       codexPath: fakeCodexPath,
@@ -1696,12 +1706,31 @@ test("runCodex isolates current-schema root AppServer output from child agents",
         threadId: "wct_app",
         runId: "wcr_app",
         createAppServerFirestoreBridgeImpl: async () => ({
-          progressReporter: {
-            enqueue(event) {
-              progressEvents.push(event);
+          progressReporter: createAppServerFirestoreProgressReporter({
+            FieldPathImpl: TestFieldPath,
+            channel: {
+              collectionId: "chat_app_server_live_status",
+              documentId: "wcr_app",
+              runId: "wcr_app",
+              threadId: "wct_app",
+              workspaceRepository: "Codeq8/Codeq8",
             },
-            flush: async () => {},
-          },
+            docRef: { id: "wcr_app" },
+            fetchImpl: async (url, init = {}) => {
+              historyCalls.push({
+                body: JSON.parse(String(init.body || "{}")),
+                url: String(url),
+              });
+              return Response.json({ ok: true });
+            },
+            progressHistoryEnabled: true,
+            publicBaseUrl: "https://codeq8.example",
+            updateDocImpl: async (...args) => {
+              updateCalls.push(args);
+            },
+            webChatRunToken: "runner_token",
+            workspaceRepository: "Codeq8/Codeq8",
+          }),
           createControlListener: () => ({
             start: () => {},
             stop: async () => {},
@@ -1714,19 +1743,49 @@ test("runCodex isolates current-schema root AppServer output from child agents",
 
   assert.equal(output.result.ok, true);
   assert.equal(output.result.output, "Root final answer.");
+  assert.equal(updateCalls.length, 1);
+  assert.equal(historyCalls.length, 1);
+  const progressEvents = updateCalls[0]?.[2] || [];
+  assert.deepEqual(historyCalls[0]?.body?.events, progressEvents);
   assert.deepEqual(
     progressEvents.map((event) => [event.item_type, event.label, event.status]),
     [
       ["collab_agent_tool_call", "Starting a subagent.", "in_progress"],
+      ["collab_agent_tool_call", "Sending context to a subagent.", "in_progress"],
       ["reasoning", "Inspected the root route.", "completed"],
       ["agent_message_progress", "Root commentary is complete.", "completed"],
     ],
   );
-  assert.equal(new Set(progressEvents.map((event) => event.event_id)).size, 3);
+  assert.equal(new Set(progressEvents.map((event) => event.event_id)).size, 4);
   assert.doesNotMatch(output.logs, /Child commentary|Child final|Child failed/);
   assert.doesNotMatch(
     JSON.stringify(progressEvents),
-    /child fragment|Child commentary|Child final|Root commentary $/,
+    /child fragment|Child commentary|Child final|Do not expose|Root commentary $/,
+  );
+});
+
+test("id-less AppServer collaboration replay uses a stable prompt-free key", () => {
+  const params = {
+    threadId: "thr_root",
+    turnId: "turn_root",
+    item: {
+      type: "collabAgentToolCall",
+      tool: "sendInput",
+      senderThreadId: "thr_root",
+      receiverThreadIds: ["thr_child"],
+      prompt: "secret follow-up",
+    },
+  };
+  const key = buildAppServerCollaborationProgressKey(params);
+  assert.equal(buildAppServerCollaborationProgressKey(params), key);
+  assert.match(key, /^shape:[a-f0-9]{16}$/);
+  assert.doesNotMatch(key, /secret|thr_root|thr_child/);
+  assert.notEqual(
+    buildAppServerCollaborationProgressKey({
+      ...params,
+      item: { ...params.item, receiverThreadIds: ["thr_other"] },
+    }),
+    key,
   );
 });
 
