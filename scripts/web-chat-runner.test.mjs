@@ -1654,10 +1654,10 @@ test("runCodex isolates current-schema root AppServer output from child agents",
       "    send({ method: 'turn/started', params: { threadId: 'thr_root', turn: { id: 'turn_root', status: 'inProgress', items: [] } } });",
       "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'reason_shared', type: 'reasoning', summary: [], content: [] } } });",
       "    send({ method: 'item/reasoning/summaryTextDelta', params: { threadId: 'thr_root', turnId: 'turn_root', itemId: 'reason_shared', delta: 'Inspecting ' } });",
-      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'collab_spawn', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Inspect the progress producer.', model: null, reasoningEffort: 'high', agentsStates: { thr_child: { status: 'running', message: null } } } } });",
-      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'collab_spawn', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Inspect the progress producer.', model: null, reasoningEffort: 'high', agentsStates: { thr_child: { status: 'running', message: null } } } } });",
-      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { type: 'collabAgentToolCall', tool: 'sendInput', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Do not expose this follow-up.' } } });",
-      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { type: 'collabAgentToolCall', tool: 'sendInput', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Do not expose this follow-up.' } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'collab_spawn', type: 'collabToolCall', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_root', newThreadId: 'thr_child', prompt: 'Inspect the progress producer.', model: null, reasoningEffort: 'high', agentStatus: 'running' } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'collab_spawn', type: 'collabToolCall', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_root', newThreadId: 'thr_child', prompt: 'Inspect the progress producer.', model: null, reasoningEffort: 'high', agentStatus: 'running' } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { type: 'collabAgentToolCall', tool: 'sendInput', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadId: 'thr_child', prompt: 'Do not expose this follow-up.' } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { type: 'collabAgentToolCall', tool: 'sendInput', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadId: 'thr_child', prompt: 'Do not expose this follow-up.' } } });",
       "    send({ method: 'turn/started', params: { threadId: 'thr_child', turn: { id: 'turn_child', status: 'inProgress', items: [] } } });",
       "    send({ method: 'item/started', params: { threadId: 'thr_child', turnId: 'turn_child', item: { id: 'msg_shared', type: 'agentMessage', text: '', phase: 'commentary' } } });",
       "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thr_child', turnId: 'turn_child', itemId: 'msg_shared', delta: 'child fragment' } });",
@@ -1750,7 +1750,7 @@ test("runCodex isolates current-schema root AppServer output from child agents",
   assert.deepEqual(
     progressEvents.map((event) => [event.item_type, event.label, event.status]),
     [
-      ["collab_agent_tool_call", "Starting a subagent.", "in_progress"],
+      ["collab_tool_call", "Starting a subagent.", "in_progress"],
       ["collab_agent_tool_call", "Sending context to a subagent.", "in_progress"],
       ["reasoning", "Inspected the root route.", "completed"],
       ["agent_message_progress", "Root commentary is complete.", "completed"],
@@ -1769,10 +1769,10 @@ test("id-less AppServer collaboration replay uses a stable prompt-free key", () 
     threadId: "thr_root",
     turnId: "turn_root",
     item: {
-      type: "collabAgentToolCall",
+      type: "collabToolCall",
       tool: "sendInput",
       senderThreadId: "thr_root",
-      receiverThreadIds: ["thr_child"],
+      receiverThreadId: "thr_child",
       prompt: "secret follow-up",
     },
   };
@@ -1783,7 +1783,7 @@ test("id-less AppServer collaboration replay uses a stable prompt-free key", () 
   assert.notEqual(
     buildAppServerCollaborationProgressKey({
       ...params,
-      item: { ...params.item, receiverThreadIds: ["thr_other"] },
+      item: { ...params.item, receiverThreadId: "thr_other" },
     }),
     key,
   );

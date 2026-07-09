@@ -7337,9 +7337,10 @@ function isAppServerAgentMessageItemType(value) {
 }
 
 function isAppServerCollaborationItemType(value) {
+  const normalized = normalizeAppServerActionsTranscriptItemType(value);
   return (
-    normalizeAppServerActionsTranscriptItemType(value) ===
-    "collab_agent_tool_call"
+    normalized === "collab_tool_call" ||
+    normalized === "collab_agent_tool_call"
   );
 }
 
@@ -7378,7 +7379,8 @@ function buildAppServerCollaborationProgressKey(params) {
   }
   const object = normalizeObject(params);
   const item = normalizeObject(object.item);
-  const receiverThreadIds = (
+  const receiverThreadIds = [...new Set([
+    ...(
     Array.isArray(item.receiverThreadIds)
       ? item.receiverThreadIds
       : Array.isArray(item.receiver_thread_ids)
@@ -7388,10 +7390,19 @@ function buildAppServerCollaborationProgressKey(params) {
           : Array.isArray(object.receiver_thread_ids)
             ? object.receiver_thread_ids
             : []
-  )
+    ),
+    item.receiverThreadId,
+    item.receiver_thread_id,
+    item.newThreadId,
+    item.new_thread_id,
+    object.receiverThreadId,
+    object.receiver_thread_id,
+    object.newThreadId,
+    object.new_thread_id,
+  ]
     .map((value) => normalizeCodexSessionId(value))
     .filter(Boolean)
-    .sort();
+  )].sort();
   const shape = JSON.stringify({
     receiverThreadIds,
     senderThreadId: normalizeCodexSessionId(
