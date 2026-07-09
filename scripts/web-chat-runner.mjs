@@ -7125,7 +7125,7 @@ function normalizeAppServerMethod(value) {
 }
 
 function isAppServerDeltaMethod(method) {
-  return /\/delta$/i.test(normalizeAppServerMethod(method));
+  return /delta$/i.test(normalizeAppServerMethod(method));
 }
 
 function extractAppServerTextPreservingWhitespace(value, keys = []) {
@@ -7172,6 +7172,29 @@ function extractAppServerThreadId(value) {
       object.thread_id ||
       object.id ||
       "",
+  );
+}
+
+function extractAppServerNotificationThreadId(value) {
+  const object = normalizeObject(value);
+  const thread = normalizeObject(object.thread || object.threadInfo || object.session);
+  return normalizeCodexSessionId(
+    object.threadId ||
+      object.thread_id ||
+      thread.id ||
+      thread.threadId ||
+      thread.thread_id ||
+      "",
+  );
+}
+
+function isRootAppServerNotification(params, appServerThreadId) {
+  const notificationThreadId = extractAppServerNotificationThreadId(params);
+  const normalizedRootThreadId = normalizeCodexSessionId(appServerThreadId);
+  return (
+    !notificationThreadId ||
+    !normalizedRootThreadId ||
+    notificationThreadId === normalizedRootThreadId
   );
 }
 
@@ -7306,6 +7329,7 @@ function normalizeAppServerItemType(params, fallback = "") {
 
 function normalizeAppServerActionsTranscriptItemType(value) {
   const normalized = normalizeText(value)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
@@ -7327,6 +7351,26 @@ function isAppServerAgentMessageItemType(value) {
     normalized === "assistant_message" ||
     normalized === "assistant" ||
     normalized === "agent"
+  );
+}
+
+function extractAppServerAgentMessagePhase(params) {
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  const normalized = normalizeAppServerActionsTranscriptItemType(
+    item.phase || object.phase || "",
+  );
+  return normalized === "commentary" || normalized === "final_answer"
+    ? normalized
+    : "";
+}
+
+function isAppServerReasoningProgressNotification(method, params) {
+  const normalizedMethod = normalizeAppServerMethod(method);
+  return (
+    isAppServerReasoningItem(params) ||
+    normalizedMethod === "item/reasoning/delta" ||
+    normalizedMethod.startsWith("item/reasoning/")
   );
 }
 
@@ -7507,8 +7551,12 @@ function createAppServerActionsReasoningTranscript({
   const recordNotification = (method, params = {}) => {
     const normalizedMethod = normalizeAppServerMethod(method);
     const isAgentDelta = normalizedMethod === "item/agentMessage/delta";
-    const isAnyDelta = /\/delta$/i.test(normalizedMethod);
-    const fallbackType = isAgentDelta ? "agent_message" : "";
+    const isAnyDelta = isAppServerDeltaMethod(normalizedMethod);
+    const fallbackType = isAgentDelta
+      ? "agent_message"
+      : normalizedMethod.startsWith("item/reasoning/")
+        ? "reasoning"
+        : "";
     const itemType = normalizeAppServerItemType(params, fallbackType);
     if (!isAppServerActionsTranscriptItemType(itemType)) {
       return false;
@@ -7675,8 +7723,10 @@ function summarizeAppServerProgressNotification({
       object.kind ||
       object.itemType ||
       object.item_type ||
-      "agent_message",
-  ).toLowerCase();
+      (normalizedMethod.startsWith("item/reasoning/")
+        ? "reasoning"
+        : "agent_message"),
+  );
   const normalizedTranscriptItemType =
     normalizeAppServerActionsTranscriptItemType(normalizedItemType);
   const isAgentItem = isAppServerAgentMessageItemType(normalizedTranscriptItemType);
@@ -9395,16 +9445,17 @@ async function runCodexAppServer({
   return new Promise((resolve) => {
     const startMs = Date.now();
     let stderr = "";
-    let currentAgentMessageItemId = "";
-    let currentAgentMessageOutput = "";
-    let currentAgentMessageProgressItemId = "";
     let lastAgentMessageOutput = "";
     let agentMessageSequence = 0;
+    let reasoningProgressSequence = 0;
+    let currentLegacyAgentMessageCaptureKey = "";
+    let currentLegacyReasoningProgressKey = "";
     let timedOut = false;
     let settled = false;
     let appServerThreadId = "";
     let activeTurnId = "";
     let activeTurnPurpose = "main";
+    let activeTurnCompletionHandled = false;
     let appServerContinuationTurnCount = 0;
     let nextRequestId = 1;
     let appServerTraceCount = 0;
@@ -9413,7 +9464,10 @@ async function runCodexAppServer({
     const appServerNotificationCounts = new Map();
     const appServerRequestCounts = new Map();
     const actionsReasoningTranscript = createAppServerActionsReasoningTranscript();
+    const agentMessageCaptures = new Map();
     const pendingReasoningProgressEvents = new Map();
+    const emittedReasoningProgressKeys = new Set();
+    const completedRootTurnIds = new Set();
     const pendingRequests = new Map();
     const progressReporter =
       firestoreBridge?.progressReporter || createNoopAppServerProgressReporter();
@@ -9504,24 +9558,43 @@ async function runCodexAppServer({
       return truncate(`${target}${nextChunk}`, MAX_OUTPUT_CHARS * 2);
     };
 
-    const getAssistantOutput = () => lastAgentMessageOutput || currentAgentMessageOutput;
-    const getReasoningProgressNotificationKey = (params, event) => {
+    const readLatestAgentMessageCaptureOutput = () => {
+      const captures = Array.from(agentMessageCaptures.values())
+        .filter((capture) => normalizeText(capture.output))
+        .sort((left, right) => left.sequence - right.sequence);
+      return captures[captures.length - 1]?.output || "";
+    };
+    const getAssistantOutput = () =>
+      lastAgentMessageOutput || readLatestAgentMessageCaptureOutput();
+    const getReasoningProgressNotificationKey = (method, params) => {
       const itemId = extractAppServerItemId(params);
       if (itemId) {
         return `item:${itemId}`;
       }
-      const normalizedEvent = normalizeObject(event);
-      return [
-        "shape",
-        normalizeText(normalizedEvent.item_type),
-        normalizeText(normalizedEvent.label),
-      ].join(":");
+      const normalizedMethod = normalizeAppServerMethod(method);
+      if (
+        normalizedMethod === "item/started" ||
+        !currentLegacyReasoningProgressKey
+      ) {
+        reasoningProgressSequence += 1;
+        currentLegacyReasoningProgressKey =
+          `legacy_reasoning:${reasoningProgressSequence}`;
+      }
+      return currentLegacyReasoningProgressKey;
     };
-    const enqueueReasoningProgressEvent = (event, { markCompleted = false } = {}) => {
+    const enqueueReasoningProgressEvent = (
+      progressKey,
+      event,
+      { markCompleted = false } = {},
+    ) => {
       const normalizedEvent = normalizeObject(event);
-      if (!normalizeText(normalizedEvent.kind)) {
+      if (
+        !normalizeText(normalizedEvent.kind) ||
+        emittedReasoningProgressKeys.has(progressKey)
+      ) {
         return;
       }
+      emittedReasoningProgressKeys.add(progressKey);
       progressReporter.enqueue(
         markCompleted && normalizeText(normalizedEvent.status) === "in_progress"
           ? { ...normalizedEvent, status: "completed" }
@@ -9537,99 +9610,188 @@ async function runCodexAppServer({
       ) {
         return;
       }
-      const progressEvent = summarizeAppServerProgressNotification({
+      let progressEvent = summarizeAppServerProgressNotification({
         method: normalizedMethod,
         params,
       });
       if (!progressEvent) {
         return;
       }
-      const progressKey = getReasoningProgressNotificationKey(params, progressEvent);
+      const progressKey = getReasoningProgressNotificationKey(
+        normalizedMethod,
+        params,
+      );
+      if (emittedReasoningProgressKeys.has(progressKey)) {
+        return;
+      }
       if (normalizedMethod === "item/started") {
         pendingReasoningProgressEvents.set(progressKey, progressEvent);
         return;
       }
       if (isAppServerDeltaMethod(normalizedMethod)) {
+        const pendingEvent = normalizeObject(
+          pendingReasoningProgressEvents.get(progressKey),
+        );
+        progressEvent = {
+          ...pendingEvent,
+          ...progressEvent,
+          event_id:
+            normalizeText(pendingEvent.event_id) || progressEvent.event_id,
+          label: appendOutput(
+            normalizeText(pendingEvent.label),
+            progressEvent.label,
+          ),
+          status: "in_progress",
+        };
+        // Cost boundary: AppServer reasoning deltas stay process-local. Only
+        // one finalized event per item may reach the progress reporter.
         pendingReasoningProgressEvents.set(progressKey, progressEvent);
-        enqueueReasoningProgressEvent(progressEvent);
         return;
       }
+      const pendingEvent = normalizeObject(
+        pendingReasoningProgressEvents.get(progressKey),
+      );
+      progressEvent = {
+        ...pendingEvent,
+        ...progressEvent,
+        event_id: normalizeText(pendingEvent.event_id) || progressEvent.event_id,
+        label:
+          normalizeText(progressEvent.label) || normalizeText(pendingEvent.label),
+        status: "completed",
+      };
       pendingReasoningProgressEvents.delete(progressKey);
-      enqueueReasoningProgressEvent(progressEvent);
+      enqueueReasoningProgressEvent(progressKey, progressEvent);
     };
     const flushPendingReasoningProgressEvents = ({ markCompleted = false } = {}) => {
-      const pendingEvents = Array.from(pendingReasoningProgressEvents.values());
+      const pendingEvents = Array.from(pendingReasoningProgressEvents.entries());
       pendingReasoningProgressEvents.clear();
-      for (const event of pendingEvents) {
-        enqueueReasoningProgressEvent(event, { markCompleted });
+      for (const [progressKey, event] of pendingEvents) {
+        enqueueReasoningProgressEvent(progressKey, event, { markCompleted });
       }
     };
-    const enqueueCurrentAgentMessageProgress = () => {
-      if (activeTurnPurpose === "hidden_thread_title") {
-        return;
+    const selectAgentMessageCapture = (
+      params,
+      { startNewLegacyCapture = false } = {},
+    ) => {
+      const itemId = extractAppServerItemId(params);
+      let captureKey = itemId ? `item:${itemId}` : currentLegacyAgentMessageCaptureKey;
+      if (!captureKey || (!itemId && startNewLegacyCapture)) {
+        agentMessageSequence += 1;
+        captureKey = `legacy_agent_message:${agentMessageSequence}`;
+        currentLegacyAgentMessageCaptureKey = captureKey;
       }
-      const progressItemId = currentAgentMessageItemId;
-      const progressOutput = currentAgentMessageOutput;
+      let capture = agentMessageCaptures.get(captureKey);
+      if (!capture) {
+        if (itemId) {
+          agentMessageSequence += 1;
+        }
+        capture = {
+          captureKey,
+          completed: false,
+          itemId: itemId || `agent_message:${agentMessageSequence}`,
+          output: "",
+          phase: "",
+          progressEmitted: false,
+          sequence: agentMessageSequence,
+        };
+        agentMessageCaptures.set(captureKey, capture);
+      }
+      const phase = extractAppServerAgentMessagePhase(params);
+      if (phase) {
+        capture.phase = phase;
+      }
+      return capture;
+    };
+    const enqueueAgentMessageProgress = (capture) => {
       if (
-        !progressItemId ||
-        !normalizeText(progressOutput) ||
-        currentAgentMessageProgressItemId === progressItemId
+        activeTurnPurpose === "hidden_thread_title" ||
+        capture.progressEmitted ||
+        !normalizeText(capture.output)
       ) {
         return;
       }
       const progressEvent = buildAppServerAgentMessageProgressEvent({
-        itemId: progressItemId,
-        label: progressOutput,
+        itemId: capture.itemId,
+        label: capture.output,
       });
       if (progressEvent) {
-        currentAgentMessageProgressItemId = progressItemId;
+        capture.progressEmitted = true;
         progressReporter.enqueue(progressEvent);
       }
     };
     const resetAgentMessageCapture = () => {
-      currentAgentMessageItemId = "";
-      currentAgentMessageOutput = "";
-      currentAgentMessageProgressItemId = "";
+      agentMessageCaptures.clear();
+      currentLegacyAgentMessageCaptureKey = "";
       lastAgentMessageOutput = "";
+    };
+    const resetReasoningProgressCapture = () => {
+      pendingReasoningProgressEvents.clear();
+      emittedReasoningProgressKeys.clear();
+      currentLegacyReasoningProgressKey = "";
     };
 
     const startAgentMessage = (params) => {
-      agentMessageSequence += 1;
-      const itemId = extractAppServerItemId(params) || `agent_message:${agentMessageSequence}`;
-      if (itemId !== currentAgentMessageItemId) {
-        enqueueCurrentAgentMessageProgress();
-        currentAgentMessageItemId = itemId;
-        currentAgentMessageOutput = "";
-        currentAgentMessageProgressItemId = "";
+      const capture = selectAgentMessageCapture(params, {
+        startNewLegacyCapture: !extractAppServerItemId(params),
+      });
+      const startedText = extractAppServerCompletedAgentText(params);
+      if (startedText) {
+        capture.output = truncate(startedText, MAX_OUTPUT_CHARS * 2);
       }
     };
 
     const appendAgentMessageDelta = (params) => {
-      const itemId = extractAppServerItemId(params);
-      if (itemId && itemId !== currentAgentMessageItemId) {
-        enqueueCurrentAgentMessageProgress();
-        currentAgentMessageItemId = itemId;
-        currentAgentMessageOutput = "";
-        currentAgentMessageProgressItemId = "";
-      }
-      currentAgentMessageOutput = appendOutput(
-        currentAgentMessageOutput,
+      const capture = selectAgentMessageCapture(params);
+      // Cost boundary: AppServer agent-message deltas stay process-local.
+      // They never enqueue live or durable progress writes.
+      capture.output = appendOutput(
+        capture.output,
         extractAppServerAgentDelta(params),
       );
     };
 
     const completeAgentMessage = (params) => {
-      const itemId = extractAppServerItemId(params);
+      const capture = selectAgentMessageCapture(params);
       const completedText = extractAppServerCompletedAgentText(params);
-      if (itemId && itemId !== currentAgentMessageItemId) {
-        enqueueCurrentAgentMessageProgress();
-        currentAgentMessageItemId = itemId;
-        currentAgentMessageOutput = "";
-        currentAgentMessageProgressItemId = "";
+      if (completedText) {
+        capture.output = truncate(completedText, MAX_OUTPUT_CHARS * 2);
       }
-      const output = completedText || currentAgentMessageOutput;
-      if (output) {
-        lastAgentMessageOutput = truncate(output, MAX_OUTPUT_CHARS * 2);
+      capture.completed = true;
+      if (capture.phase === "final_answer" && capture.output) {
+        lastAgentMessageOutput = capture.output;
+        return;
+      }
+      if (capture.phase === "commentary") {
+        enqueueAgentMessageProgress(capture);
+      }
+    };
+    const finalizeAgentMessageCapturesForTurn = () => {
+      const captures = Array.from(agentMessageCaptures.values())
+        .filter((capture) => normalizeText(capture.output))
+        .sort((left, right) => left.sequence - right.sequence);
+      const explicitFinalCaptures = captures.filter(
+        (capture) => capture.phase === "final_answer",
+      );
+      const explicitFinal =
+        explicitFinalCaptures[explicitFinalCaptures.length - 1] || null;
+      const legacyCaptures = captures.filter((capture) => !capture.phase);
+      const legacyFinal = explicitFinal
+        ? null
+        : legacyCaptures[legacyCaptures.length - 1] ||
+          captures[captures.length - 1] ||
+          null;
+      const finalCapture = explicitFinal || legacyFinal;
+      if (finalCapture?.output) {
+        lastAgentMessageOutput = finalCapture.output;
+      }
+      for (const capture of captures) {
+        if (
+          capture === finalCapture ||
+          capture.phase === "final_answer"
+        ) {
+          continue;
+        }
+        enqueueAgentMessageProgress(capture);
       }
     };
 
@@ -9806,7 +9968,9 @@ async function runCodexAppServer({
       let title = "";
       let hiddenTitleTurnId = "";
       activeTurnPurpose = "hidden_thread_title";
+      activeTurnCompletionHandled = false;
       resetAgentMessageCapture();
+      resetReasoningProgressCapture();
       try {
         const completionPromise = waitForHiddenTitleTurnCompletion();
         const turnResult = await sendRequest("turn/start", {
@@ -10070,7 +10234,10 @@ async function runCodexAppServer({
     const startAppServerMainTurn = async (inputText) => {
       activeTurnPurpose = "main";
       activeTurnId = "";
+      activeTurnCompletionHandled = false;
+      latestAppServerFailureMessage = "";
       resetAgentMessageCapture();
+      resetReasoningProgressCapture();
       armMainTurnStartupTimeout({
         reason: appServerContinuationTurnCount > 0 ? "final_continuation" : "main_turn",
       });
@@ -10138,17 +10305,21 @@ async function runCodexAppServer({
 
     const handleNotification = (method, params) => {
       const normalizedMethod = normalizeAppServerMethod(method);
-      incrementCount(appServerNotificationCounts, normalizedMethod);
-      const notificationTurnId =
-        normalizedMethod.startsWith("turn/") ? extractAppServerTurnId(params) : "";
-      if (
-        normalizedMethod === "turn/completed" &&
-        notificationTurnId &&
-        ignoredHiddenTitleTurnIds.has(notificationTurnId)
-      ) {
-        ignoredHiddenTitleTurnIds.delete(notificationTurnId);
+      if (!isRootAppServerNotification(params, appServerThreadId)) {
         return;
       }
+      const notificationTurnId = extractAppServerTurnId(params);
+      if (
+        notificationTurnId &&
+        (
+          ignoredHiddenTitleTurnIds.has(notificationTurnId) ||
+          completedRootTurnIds.has(notificationTurnId) ||
+          (activeTurnId && notificationTurnId !== activeTurnId)
+        )
+      ) {
+        return;
+      }
+      incrementCount(appServerNotificationCounts, normalizedMethod);
       const hiddenTitleTurnActive = activeTurnPurpose === "hidden_thread_title";
       const appServerFailureMessage = hiddenTitleTurnActive
         ? ""
@@ -10209,7 +10380,7 @@ async function runCodexAppServer({
           normalizedMethod === "item/completed" ||
           isAppServerDeltaMethod(normalizedMethod)
         ) &&
-        isAppServerReasoningItem(params)
+        isAppServerReasoningProgressNotification(normalizedMethod, params)
       ) {
         recordReasoningProgressNotification(normalizedMethod, params);
       }
@@ -10222,14 +10393,22 @@ async function runCodexAppServer({
         completeAgentMessage(params);
       }
       if (normalizedMethod === "turn/completed") {
+        if (activeTurnCompletionHandled) {
+          return;
+        }
+        activeTurnCompletionHandled = true;
         const status = extractAppServerTurnStatus(params);
-        const ok = !/failed|error|cancel/i.test(status);
+        const ok = !/failed|error|cancel|interrupt/i.test(status);
         const failureMessage = ok
           ? ""
           : extractAppServerTurnFailureMessage(params) ||
             latestAppServerFailureMessage ||
             `Codex app-server turn completed with status ${status || "unknown"}.`;
+        finalizeAgentMessageCapturesForTurn();
         if (hiddenTitleTurnActive) {
+          if (notificationTurnId) {
+            ignoredHiddenTitleTurnIds.add(notificationTurnId);
+          }
           completeHiddenTitleTurn({
             ok,
             output: truncate(normalizeText(getAssistantOutput()), MAX_OUTPUT_CHARS),
@@ -10238,6 +10417,9 @@ async function runCodexAppServer({
           return;
         }
         flushPendingReasoningProgressEvents({ markCompleted: ok });
+        if (notificationTurnId) {
+          completedRootTurnIds.add(notificationTurnId);
+        }
         activeTurnId = "";
         controlListener?.pauseProcessing?.();
         void finishAfterTurnCompleted({

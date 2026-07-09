@@ -353,6 +353,33 @@ test("AppServer live bridge uses Firestore instead of runner HTTP polling", asyn
     source,
     /normalizedMethod\s*===\s*["']item\/agentMessage\/delta["'][\s\S]{0,900}\bprogressReporter\.enqueue\s*\(/,
   );
+  const appendAgentMessageDeltaSource = source.slice(
+    source.indexOf("const appendAgentMessageDelta ="),
+    source.indexOf("const completeAgentMessage ="),
+  );
+  const reasoningProgressSource = source.slice(
+    source.indexOf("const recordReasoningProgressNotification ="),
+    source.indexOf("const flushPendingReasoningProgressEvents ="),
+  );
+  const notificationHandlerSource = source.slice(
+    source.indexOf("const handleNotification ="),
+    source.indexOf("const rl = readline.createInterface", source.indexOf("const handleNotification =")),
+  );
+  assert.match(source, /\.replace\(\/\(\[a-z0-9\]\)\(\[A-Z\]\)\/g, "\$1_\$2"\)/);
+  assert.match(appendAgentMessageDeltaSource, /selectAgentMessageCapture/);
+  assert.doesNotMatch(appendAgentMessageDeltaSource, /progressReporter\.enqueue/);
+  assert.match(reasoningProgressSource, /pendingReasoningProgressEvents\.set/);
+  assert.doesNotMatch(
+    reasoningProgressSource.match(
+      /if \(isAppServerDeltaMethod\(normalizedMethod\)\) \{[\s\S]*?\n\s*\}/,
+    )?.[0] || "",
+    /progressReporter\.enqueue|enqueueReasoningProgressEvent/,
+  );
+  assert.match(
+    notificationHandlerSource,
+    /if \(!isRootAppServerNotification\(params, appServerThreadId\)\) \{\s*return;\s*\}/,
+  );
+  assert.match(notificationHandlerSource, /completedRootTurnIds\.has/);
   assert.doesNotMatch(source, /function createAppServerControlPoller/);
   assert.doesNotMatch(source, /setInterval[\s\S]{0,700}APP_SERVER_CONTROL_PATH/);
   assert.doesNotMatch(source, /\bsetInterval\s*\(/);
@@ -1637,7 +1664,6 @@ test("runCodex forwards delta-shaped AppServer reasoning to durable progress", a
   assert.deepEqual(
     reasoningEvents.map((event) => [event.label, event.status]),
     [
-      ["Inspecting active run state", "in_progress"],
       ["Found missing progress projection", "completed"],
     ],
   );
@@ -1645,6 +1671,106 @@ test("runCodex forwards delta-shaped AppServer reasoning to durable progress", a
     reasoningEvents.every((event) =>
       /^app_server:reasoning:[a-f0-9]+$/.test(String(event.event_id || "")),
     ),
+  );
+});
+
+test("runCodex isolates current-schema root AppServer output from child agents", async (t) => {
+  const workspacePath = await fs.mkdtemp(
+    path.join(os.tmpdir(), "codeq8-codex-app-server-multi-agent-"),
+  );
+  const fakeCodexPath = path.join(workspacePath, "fake-codex.mjs");
+  t.after(async () => {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  });
+
+  await fs.writeFile(
+    fakeCodexPath,
+    [
+      "#!/usr/bin/env node",
+      "import readline from 'node:readline';",
+      "const rl = readline.createInterface({ input: process.stdin });",
+      "const send = (message) => process.stdout.write(`${JSON.stringify(message)}\\n`);",
+      "rl.on('line', (line) => {",
+      "  const message = JSON.parse(line);",
+      "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thr_root' } } });",
+      "  if (message.method === 'turn/start') {",
+      "    send({ id: message.id, result: { turn: { id: 'turn_root', status: 'inProgress' } } });",
+      "    send({ method: 'turn/started', params: { threadId: 'thr_root', turn: { id: 'turn_root', status: 'inProgress', items: [] } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'reason_shared', type: 'reasoning', summary: [], content: [] } } });",
+      "    send({ method: 'item/reasoning/summaryTextDelta', params: { threadId: 'thr_root', turnId: 'turn_root', itemId: 'reason_shared', delta: 'Inspecting ' } });",
+      "    send({ method: 'turn/started', params: { threadId: 'thr_child', turn: { id: 'turn_child', status: 'inProgress', items: [] } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_child', turnId: 'turn_child', item: { id: 'msg_shared', type: 'agentMessage', text: '', phase: 'commentary' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thr_child', turnId: 'turn_child', itemId: 'msg_shared', delta: 'child fragment' } });",
+      "    send({ method: 'item/reasoning/summaryTextDelta', params: { threadId: 'thr_root', turnId: 'turn_root', itemId: 'reason_shared', delta: 'the root route.' } });",
+      "    send({ method: 'item/completed', params: { threadId: 'thr_child', turnId: 'turn_child', item: { id: 'msg_shared', type: 'agentMessage', text: 'Child commentary must stay hidden.', phase: 'commentary' } } });",
+      "    send({ method: 'item/completed', params: { threadId: 'thr_child', turnId: 'turn_child', item: { id: 'child_final', type: 'agentMessage', text: 'Child final must not win.', phase: 'final_answer' } } });",
+      "    send({ method: 'error', params: { threadId: 'thr_child', turnId: 'turn_child', error: { message: 'Child failed after useful work.' }, willRetry: false } });",
+      "    send({ method: 'turn/completed', params: { threadId: 'thr_child', turn: { id: 'turn_child', status: 'failed', error: { message: 'Child failed after useful work.' } } } });",
+      "    send({ method: 'turn/completed', params: { threadId: 'thr_root', turn: { id: 'turn_stale', status: 'failed', error: { message: 'Stale turn must not terminate the root.' } } } });",
+      "    send({ method: 'item/completed', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'reason_shared', type: 'reasoning', summary: ['Inspected the root route.'], content: [] } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'msg_shared', type: 'agentMessage', text: '', phase: 'commentary' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thr_root', turnId: 'turn_root', itemId: 'msg_shared', delta: 'Root commentary ' } });",
+      "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thr_root', turnId: 'turn_root', itemId: 'msg_shared', delta: 'is complete.' } });",
+      "    send({ method: 'item/completed', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'msg_shared', type: 'agentMessage', text: 'Root commentary is complete.', phase: 'commentary' } } });",
+      "    send({ method: 'item/completed', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'msg_shared', type: 'agentMessage', text: 'Root commentary is complete.', phase: 'commentary' } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'root_final', type: 'agentMessage', text: '', phase: 'final_answer' } } });",
+      "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thr_root', turnId: 'turn_root', itemId: 'root_final', delta: 'Root final answer.' } });",
+      "    send({ method: 'item/completed', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'root_final', type: 'agentMessage', text: 'Root final answer.', phase: 'final_answer' } } });",
+      "    setTimeout(() => send({ method: 'turn/completed', params: { threadId: 'thr_root', turn: { id: 'turn_root', status: 'completed', items: [] } } }), 25);",
+      "  }",
+      "});",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const progressEvents = [];
+  const output = await captureRunnerOutput(() =>
+    runCodex({
+      codexPath: fakeCodexPath,
+      model: "gpt-5.6-sol",
+      task: "keep root AppServer output authoritative",
+      workspacePath,
+      commandEnv: process.env,
+      timeoutSeconds: 30,
+      appServerContext: {
+        publicBaseUrl: "https://codeq8.example",
+        webChatRunToken: "runner_token",
+        workspaceRepository: "Codeq8/Codeq8",
+        threadId: "wct_app",
+        runId: "wcr_app",
+        createAppServerFirestoreBridgeImpl: async () => ({
+          progressReporter: {
+            enqueue(event) {
+              progressEvents.push(event);
+            },
+            flush: async () => {},
+          },
+          createControlListener: () => ({
+            start: () => {},
+            stop: async () => {},
+          }),
+          close: async () => {},
+        }),
+      },
+    }),
+  );
+
+  assert.equal(output.result.ok, true);
+  assert.equal(output.result.output, "Root final answer.");
+  assert.deepEqual(
+    progressEvents.map((event) => [event.item_type, event.label, event.status]),
+    [
+      ["reasoning", "Inspected the root route.", "completed"],
+      ["agent_message_progress", "Root commentary is complete.", "completed"],
+    ],
+  );
+  assert.equal(new Set(progressEvents.map((event) => event.event_id)).size, 2);
+  assert.doesNotMatch(output.logs, /Child commentary|Child final|Child failed/);
+  assert.doesNotMatch(
+    JSON.stringify(progressEvents),
+    /child fragment|Child commentary|Child final|Root commentary $/,
   );
 });
 
