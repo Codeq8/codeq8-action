@@ -270,6 +270,153 @@ function hasUnmanagedServerTable(contents, serverId) {
   return pattern.test(String(contents || ""));
 }
 
+function isTomlTableHeader(line) {
+  return /^\s*\[{1,2}[^\]]+\]{1,2}\s*(?:#.*)?$/.test(String(line || ""));
+}
+
+function isMcpServerTableHeader(line, serverId) {
+  const escapedServerId = normalizeText(serverId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `^\\s*\\[\\s*mcp_servers\\.(?:${escapedServerId}|"${escapedServerId}"|'${escapedServerId}')\\s*\\]\\s*(?:#.*)?$`,
+  ).test(String(line || ""));
+}
+
+function scanTomlValue(value) {
+  const source = String(value || "");
+  let arrayDepth = 0;
+  let quote = "";
+  let escaped = false;
+  let normalized = "";
+  for (const current of source) {
+    if (quote) {
+      normalized += current;
+      if (quote === '"' && escaped) {
+        escaped = false;
+        continue;
+      }
+      if (quote === '"' && current === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (current === quote) {
+        quote = "";
+      }
+      continue;
+    }
+    if (current === "#") {
+      break;
+    }
+    if (current === '"' || current === "'") {
+      quote = current;
+      normalized += current;
+      continue;
+    }
+    if (current === "[") {
+      arrayDepth += 1;
+      normalized += current;
+      continue;
+    }
+    if (current === "]") {
+      arrayDepth -= 1;
+      normalized += current;
+      continue;
+    }
+    if (!/\s/.test(current)) {
+      normalized += current;
+    }
+  }
+  return {
+    complete: !quote && arrayDepth === 0,
+    valid: arrayDepth >= 0,
+    normalized,
+  };
+}
+
+function findMcpServerTableRanges(contents, serverId) {
+  const lines = String(contents || "").split(/\r?\n/g);
+  const ranges = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!isMcpServerTableHeader(lines[index], serverId)) {
+      continue;
+    }
+    let end = lines.length;
+    for (let nextIndex = index + 1; nextIndex < lines.length; nextIndex += 1) {
+      if (isTomlTableHeader(lines[nextIndex])) {
+        end = nextIndex;
+        break;
+      }
+    }
+    ranges.push({ start: index, end });
+  }
+  return { lines, ranges };
+}
+
+function parseMcpServerTableAssignments(contents, serverId) {
+  const { lines, ranges } = findMcpServerTableRanges(contents, serverId);
+  if (ranges.length !== 1) {
+    return null;
+  }
+  const [{ start, end }] = ranges;
+  const assignments = new Map();
+  for (let index = start + 1; index < end; index += 1) {
+    const rawLine = String(lines[index] || "");
+    const trimmedLine = rawLine.trim();
+    if (!trimmedLine || trimmedLine.startsWith("#")) {
+      continue;
+    }
+    const assignment = rawLine.match(/^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(.*)$/);
+    if (!assignment || assignments.has(assignment[1])) {
+      return null;
+    }
+    let rawValue = assignment[2];
+    let scannedValue = scanTomlValue(rawValue);
+    while (scannedValue.valid && !scannedValue.complete && index + 1 < end) {
+      index += 1;
+      rawValue += `\n${lines[index]}`;
+      scannedValue = scanTomlValue(rawValue);
+    }
+    if (!scannedValue.valid || !scannedValue.complete || !scannedValue.normalized) {
+      return null;
+    }
+    assignments.set(assignment[1], scannedValue.normalized);
+  }
+  return assignments;
+}
+
+function haveEquivalentAssignments(left, right) {
+  if (!(left instanceof Map) || !(right instanceof Map) || left.size !== right.size) {
+    return false;
+  }
+  for (const [key, value] of left) {
+    if (right.get(key) !== value) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function stripEquivalentCodeq8ServerTable(contents, serverId, managedBlock) {
+  const actualAssignments = parseMcpServerTableAssignments(contents, serverId);
+  const expectedAssignments = parseMcpServerTableAssignments(managedBlock, serverId);
+  if (!haveEquivalentAssignments(actualAssignments, expectedAssignments)) {
+    return null;
+  }
+  const { lines, ranges } = findMcpServerTableRanges(contents, serverId);
+  const [{ start, end }] = ranges;
+  return lines
+    .filter((line, index) => {
+      const trimmed = String(line || "").trim();
+      return (
+        (index < start || index >= end) &&
+        trimmed !== CODEQ8_PLAYWRIGHT_MCP_CONFIG_START &&
+        trimmed !== CODEQ8_PLAYWRIGHT_MCP_CONFIG_END
+      );
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trimEnd();
+}
+
 export function buildCodeq8PlaywrightMcpManagedBlock({
   serverId = CODEQ8_PLAYWRIGHT_MCP_SERVER_ID,
   playwrightMcpPath,
@@ -391,29 +538,48 @@ export async function syncCodeq8PlaywrightMcpCodexConfig({
     ? await fs.readFile(configPath, "utf8")
     : "";
   let strippedConfig = null;
+  let recoveredEquivalentTable = false;
   try {
     strippedConfig = stripManagedBlock(existingConfig);
   } catch (error) {
-    return {
-      ok: false,
-      status: "skipped",
-      code: "invalid_config",
-      reason: error instanceof Error ? error.message : String(error),
-      capability: CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
-      target: CODEQ8_PLAYWRIGHT_MCP_CONFIG_TARGET,
-      configPath,
-    };
+    const recoveredConfig = stripEquivalentCodeq8ServerTable(
+      existingConfig,
+      normalizedServerId,
+      managedBlock,
+    );
+    if (recoveredConfig === null) {
+      return {
+        ok: false,
+        status: "skipped",
+        code: "invalid_config",
+        reason: error instanceof Error ? error.message : String(error),
+        capability: CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
+        target: CODEQ8_PLAYWRIGHT_MCP_CONFIG_TARGET,
+        configPath,
+      };
+    }
+    strippedConfig = { contents: recoveredConfig, removed: 1 };
+    recoveredEquivalentTable = true;
   }
   if (hasUnmanagedServerTable(strippedConfig.contents, normalizedServerId)) {
-    return {
-      ok: false,
-      status: "skipped",
-      code: "collision",
-      reason: `Codex config already has an unmarked [mcp_servers.${normalizedServerId}] table.`,
-      capability: CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
-      target: CODEQ8_PLAYWRIGHT_MCP_CONFIG_TARGET,
-      configPath,
-    };
+    const recoveredConfig = stripEquivalentCodeq8ServerTable(
+      strippedConfig.contents,
+      normalizedServerId,
+      managedBlock,
+    );
+    if (recoveredConfig === null) {
+      return {
+        ok: false,
+        status: "skipped",
+        code: "collision",
+        reason: `Codex config already has an unmarked [mcp_servers.${normalizedServerId}] table.`,
+        capability: CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
+        target: CODEQ8_PLAYWRIGHT_MCP_CONFIG_TARGET,
+        configPath,
+      };
+    }
+    strippedConfig = { contents: recoveredConfig, removed: 1 };
+    recoveredEquivalentTable = true;
   }
 
   const nextConfig = `${strippedConfig.contents ? `${strippedConfig.contents}\n\n` : ""}${managedBlock}`;
@@ -435,12 +601,13 @@ export async function syncCodeq8PlaywrightMcpCodexConfig({
 
   await fs.mkdir(path.dirname(configPath), { recursive: true });
   await fs.writeFile(configPath, nextConfig, "utf8");
+  const configuredStatus = recoveredEquivalentTable ? "recovered" : "configured";
   logger?.log?.(
-    `[codeq8-playwright-mcp-config] status=configured capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} server=${normalizedServerId}`,
+    `[codeq8-playwright-mcp-config] status=${configuredStatus} capability=${CODEQ8_PLAYWRIGHT_MCP_CAPABILITY} server=${normalizedServerId}`,
   );
   return {
     ok: true,
-    status: "configured",
+    status: configuredStatus,
     capability: CODEQ8_PLAYWRIGHT_MCP_CAPABILITY,
     target: CODEQ8_PLAYWRIGHT_MCP_CONFIG_TARGET,
     serverId: normalizedServerId,
