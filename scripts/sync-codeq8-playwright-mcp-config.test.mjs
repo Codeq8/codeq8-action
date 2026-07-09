@@ -78,7 +78,7 @@ test("sync Codeq8 Playwright MCP config creates a managed Codex config block wit
     await fs.writeFile(
       configPath,
       [
-        'model = "gpt-5.5"',
+        'model = "gpt-5.6-sol"',
         "",
         "[mcp_servers.playwright]",
         'command = "/usr/local/bin/user-playwright"',
@@ -100,7 +100,7 @@ test("sync Codeq8 Playwright MCP config creates a managed Codex config block wit
     const config = await fs.readFile(configPath, "utf8");
     const pluginInstallPath = path.join(codexHome, "plugins", "codeq8");
     const initPagePath = path.join(pluginInstallPath, "playwright-mcp-auth-init.ts");
-    assert.match(config, /model = "gpt-5\.5"/);
+    assert.match(config, /model = "gpt-5\.6-sol"/);
     assert.match(config, /\[mcp_servers\.playwright\]/);
     assert.match(config, new RegExp(`\\[mcp_servers\\.${CODEQ8_PLAYWRIGHT_MCP_SERVER_ID}\\]`));
     assert.match(config, new RegExp(`command = ${JSON.stringify(playwrightMcpPath)}`));

@@ -42,8 +42,8 @@ const WEB_CHAT_RUNNER_PROCESS_STARTED_AT_MS = Math.max(
   Math.round(globalThis.performance?.timeOrigin || Date.now()),
 );
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
-const DEFAULT_CODEX_MODEL = "gpt-5.5";
-const DEFAULT_CODEX_REASONING_EFFORT = "xhigh";
+const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
+const DEFAULT_CODEX_REASONING_EFFORT = "ultra";
 const DEFAULT_TIMEOUT_SECONDS = 72 * 60 * 60;
 const DEFAULT_FETCH_JSON_TIMEOUT_MS = 15_000;
 const CODEX_SESSION_CONTENTS_FETCH_JSON_TIMEOUT_MS = 60_000;

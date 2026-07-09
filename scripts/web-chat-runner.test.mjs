@@ -501,7 +501,7 @@ test("Codex session capture uses the expected App Server session id", async () =
           payload: {
             id: sessionId,
             cli_version: "0.133.0",
-            model: "gpt-5.5",
+            model: "gpt-5.6-sol",
           },
         }),
         `session ${sessionId}`,
@@ -527,7 +527,7 @@ test("Codex session capture uses the expected App Server session id", async () =
     const captured = await captureCodexSessionBundle({
       codexHome,
       existingSessionState: {},
-      model: "gpt-5.5",
+      model: "gpt-5.6-sol",
       expectedSessionId,
     });
 
@@ -537,7 +537,7 @@ test("Codex session capture uses the expected App Server session id", async () =
       captureCodexSessionBundle({
         codexHome,
         existingSessionState: {},
-        model: "gpt-5.5",
+        model: "gpt-5.6-sol",
         expectedSessionId: "019fffffffffffffffffffffffffffff",
       }),
       /expected session bundle/i,
@@ -549,7 +549,7 @@ test("Codex session capture uses the expected App Server session id", async () =
 
 test("buildCodexRunMetadata advertises AppServer attachment steering support", () => {
   const metadata = buildCodexRunMetadata({
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     mode: "fresh",
   });
 
@@ -560,7 +560,7 @@ test("buildCodexRunMetadata advertises AppServer attachment steering support", (
 
 test("buildCodexRunMetadata preserves final AppServer control statuses", () => {
   const metadata = buildCodexRunMetadata({
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     mode: "fresh",
     appServerControlRequests: [
       {
@@ -751,7 +751,7 @@ test("runCodex applies dedicated Node options only to the Codex process env", as
   };
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "print env",
     workspacePath,
     commandEnv,
@@ -806,7 +806,7 @@ test("runCodex allows Git metadata writes without approval prompts", async (t) =
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "stay sandboxed",
     workspacePath,
     commandEnv: process.env,
@@ -874,7 +874,7 @@ test("runCodex can drive codex app-server over stdio and report bounded progress
   let progressReporterCloseCount = 0;
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "use app server",
     workspacePath,
     commandEnv: {
@@ -972,7 +972,7 @@ test("runCodex ignores AppServer progress notifications after final flush", asyn
   let progressReporterClosed = false;
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "ignore late progress",
     workspacePath,
     commandEnv: {
@@ -1054,7 +1054,7 @@ test("runCodex preserves AppServer usage-limit failures as the terminal reason",
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "use app server",
     workspacePath,
     commandEnv: process.env,
@@ -1087,7 +1087,7 @@ test("runCodex reports AppServer Firestore session HTTP failure details", async 
   const diagnostics = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "use app server with degraded session",
     workspacePath,
     commandEnv: process.env,
@@ -1157,7 +1157,7 @@ test("runCodex reports invalid AppServer Firestore session payload fields", asyn
   const diagnostics = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "use app server with invalid session payload",
     workspacePath,
     commandEnv: process.env,
@@ -1329,7 +1329,7 @@ test("runCodex writes a clean AppServer reasoning transcript to Actions logs", a
   const output = await captureRunnerOutput(() =>
     runCodex({
       codexPath: fakeCodexPath,
-      model: "gpt-5.5",
+      model: "gpt-5.6-sol",
       task: "log reasoning cleanly",
       workspacePath,
       commandEnv: process.env,
@@ -1388,7 +1388,7 @@ test("runCodex forwards AppServer reasoning items to durable progress", async (t
   const progressEvents = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "persist reasoning progress",
     workspacePath,
     commandEnv: process.env,
@@ -1476,7 +1476,7 @@ test("runCodex flushes started-only AppServer reasoning to durable progress", as
   const progressEvents = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "persist started-only reasoning progress",
     workspacePath,
     commandEnv: process.env,
@@ -1555,7 +1555,7 @@ test("runCodex forwards delta-shaped AppServer reasoning to durable progress", a
   const progressEvents = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "persist delta-shaped reasoning progress",
     workspacePath,
     commandEnv: process.env,
@@ -1638,7 +1638,7 @@ test("runCodex forwards AppServer agent-message progress fragments without final
   const progressEvents = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "persist agent progress",
     workspacePath,
     commandEnv: process.env,
@@ -1723,7 +1723,7 @@ test("runCodex summarizes AppServer chatter and suppresses successful stderr", a
   const output = await captureRunnerOutput(() =>
     runCodex({
       codexPath: fakeCodexPath,
-      model: "gpt-5.5",
+      model: "gpt-5.6-sol",
       task: "use app server quietly",
       workspacePath,
       commandEnv: process.env,
@@ -1759,7 +1759,7 @@ test("runCodex sends AppServer steer requests with the active expected turn id",
   const acknowledgementBodies = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "use app server steering",
     workspacePath,
     commandEnv: {
@@ -1987,7 +1987,7 @@ test("runCodex continues an AppServer turn for follow-ups visible at turn comple
   let consumedPending = false;
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "answer before late follow-up",
     workspacePath,
     commandEnv: {
@@ -2454,7 +2454,7 @@ test("runCodex synchronizes Codeq8 Codex goals through AppServer", async (t) => 
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "continue the goal",
     workspacePath,
     commandEnv: {
@@ -2575,7 +2575,7 @@ test("runCodex preserves the web goal when the final AppServer goal read is empt
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "continue the goal",
     workspacePath,
     commandEnv: {
@@ -2632,7 +2632,7 @@ test("runCodex treats unsupported AppServer goal methods as optional", async (t)
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "continue without goal api support",
     workspacePath,
     commandEnv: {
@@ -2696,7 +2696,7 @@ test("runCodex materializes AppServer steer attachments before forwarding them",
   const acknowledgementBodies = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "use app server attachment steering",
     workspacePath,
     commandEnv: {
@@ -2850,7 +2850,7 @@ test("runCodex completes while an AppServer progress flush is active", async (t)
   let progressFlushCount = 0;
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "complete during flush",
     workspacePath,
     commandEnv: {
@@ -3579,7 +3579,7 @@ test("runCodex treats auth-like agent text as normal output", async (t) => {
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "inspect auth fixtures",
     workspacePath,
     commandEnv: process.env,
@@ -3617,7 +3617,7 @@ test("runCodex preserves AppServer agent delta whitespace without streaming part
   const progressEvents = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "preserve streaming whitespace",
     workspacePath,
     commandEnv: process.env,
@@ -3686,7 +3686,7 @@ test("runCodex returns only the last AppServer agent message", async (t) => {
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "do not persist status text",
     workspacePath,
     commandEnv: process.env,
@@ -3782,7 +3782,7 @@ test("runCodex runs hidden AppServer title pre-turn before the visible task turn
   const diagnostics = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "visible work prompt",
     workspacePath,
     commandEnv: process.env,
@@ -3919,7 +3919,7 @@ test("runCodex runs hidden AppServer title pre-turn for low-signal greeting prom
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "visible work prompt",
     workspacePath,
     commandEnv: process.env,
@@ -4033,7 +4033,7 @@ test("runCodex runs hidden AppServer title pre-turn for hosted runner pool start
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "visible work prompt",
     workspacePath,
     commandEnv: {
@@ -4150,7 +4150,7 @@ test("runCodex runs hidden AppServer title pre-turn for provisional resume mode"
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "visible resume prompt",
     workspacePath,
     commandEnv: process.env,
@@ -4269,7 +4269,7 @@ test("runCodex fails hosted main turn startup when no AppServer item appears aft
   const diagnostics = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "visible hosted prompt",
     workspacePath,
     commandEnv: {
@@ -4357,7 +4357,7 @@ test("runCodex keeps hosted main turn alive after first AppServer item activity"
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "visible hosted prompt",
     workspacePath,
     commandEnv: {
@@ -4426,7 +4426,7 @@ test("runCodex can stop after hidden setup before starting the visible task turn
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "visible work prompt",
     workspacePath,
     commandEnv: process.env,
@@ -4521,7 +4521,7 @@ test("runCodex keeps title provisional when hidden AppServer title pre-turn time
   const diagnostics = [];
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "visible timeout prompt",
     workspacePath,
     commandEnv: process.env,
@@ -4592,7 +4592,7 @@ test("runCodex returns normal diagnostics for auth-like stderr", async (t) => {
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.5",
+    model: "gpt-5.6-sol",
     task: "run with stale auth",
     workspacePath,
     commandEnv: process.env,
@@ -6549,7 +6549,7 @@ test("persistCapturedCodexSessionBundleWithRetries accepts duplicate same-run re
       payload: {
         id: "019dd643-e3ec-76e1-952c-3dc25053e8c3",
         cli_version: "0.128.0",
-        model: "gpt-5.5",
+        model: "gpt-5.6-sol",
       },
     }),
     "",
@@ -6607,7 +6607,7 @@ test("persistCapturedCodexSessionBundleWithRetries accepts duplicate same-run re
         session_file_relative_path: sessionFileRelativePath,
         bundle_revision: 161,
       },
-      model: "gpt-5.5",
+      model: "gpt-5.6-sol",
       targetSignature: "target",
       expectedBundleRevision: 161,
       expectedRunMarker: buildWebChatRunMarker({
