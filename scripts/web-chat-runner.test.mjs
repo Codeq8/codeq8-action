@@ -20,8 +20,10 @@ import {
   appendWebChatRunMarkerToPrompt,
   buildFirebaseStorageDownloadUrl,
   buildFinalWorkspaceStateCallbackPayload,
+  buildCodexModelOverride,
   buildCodexPrompt,
   buildCodexRunMetadata,
+  buildCodexTurnSelectionOverrides,
   buildPublicActionStartupTimingMetadata,
   buildWorkspacePreparationRunMetadata,
   buildResumePrompt,
@@ -550,12 +552,34 @@ test("Codex session capture uses the expected App Server session id", async () =
 test("buildCodexRunMetadata advertises AppServer attachment steering support", () => {
   const metadata = buildCodexRunMetadata({
     model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
     mode: "fresh",
   });
 
+  assert.equal(metadata.model, "gpt-5.6-sol");
+  assert.equal(metadata.reasoning_effort, "ultra");
   assert.deepEqual(metadata.app_server_control_capabilities, [
     "codex_app_server_attachment_turn_control",
   ]);
+});
+
+test("Codex selection overrides are absent unless explicitly configured", () => {
+  assert.deepEqual(buildCodexModelOverride(), {});
+  assert.deepEqual(buildCodexTurnSelectionOverrides(), {});
+  assert.deepEqual(
+    buildCodexTurnSelectionOverrides({
+      model: " gpt-5.6-sol ",
+      reasoningEffort: " ultra ",
+    }),
+    {
+      model: "gpt-5.6-sol",
+      effort: "ultra",
+    },
+  );
+
+  const metadata = buildCodexRunMetadata({ mode: "fresh" });
+  assert.equal("model" in metadata, false);
+  assert.equal("reasoning_effort" in metadata, false);
 });
 
 test("buildCodexRunMetadata preserves final AppServer control statuses", () => {
@@ -806,7 +830,6 @@ test("runCodex allows Git metadata writes without approval prompts", async (t) =
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.6-sol",
     task: "stay sandboxed",
     workspacePath,
     commandEnv: process.env,
@@ -824,8 +847,32 @@ test("runCodex allows Git metadata writes without approval prompts", async (t) =
 
   assert.equal(threadStart?.params?.approvalPolicy, "never");
   assert.equal(threadStart?.params?.sandbox, "danger-full-access");
+  assert.equal("model" in threadStart.params, false);
   assert.equal(turnStart?.params?.approvalPolicy, "never");
   assert.deepEqual(turnStart?.params?.sandboxPolicy, { type: "dangerFullAccess" });
+  assert.equal("model" in turnStart.params, false);
+  assert.equal("effort" in turnStart.params, false);
+
+  const explicitResult = await runCodex({
+    codexPath: fakeCodexPath,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+    task: "use explicit selection",
+    workspacePath,
+    commandEnv: process.env,
+    timeoutSeconds: 30,
+  });
+  assert.equal(explicitResult.ok, true);
+  const explicitRequests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
+  const explicitThreadStart = explicitRequests.find(
+    (request) => request.method === "thread/start",
+  );
+  const explicitTurnStart = explicitRequests.find(
+    (request) => request.method === "turn/start",
+  );
+  assert.equal(explicitThreadStart?.params?.model, "gpt-5.6-sol");
+  assert.equal(explicitTurnStart?.params?.model, "gpt-5.6-sol");
+  assert.equal(explicitTurnStart?.params?.effort, "ultra");
 });
 
 test("runCodex can drive codex app-server over stdio and report bounded progress", async (t) => {
@@ -4150,7 +4197,6 @@ test("runCodex runs hidden AppServer title pre-turn for provisional resume mode"
 
   const result = await runCodex({
     codexPath: fakeCodexPath,
-    model: "gpt-5.6-sol",
     task: "visible resume prompt",
     workspacePath,
     commandEnv: process.env,
@@ -4187,9 +4233,19 @@ test("runCodex runs hidden AppServer title pre-turn for provisional resume mode"
   assert.equal(titleCalls[0]?.target_thread_id, "wct_title_resume");
   assert.equal(titleCalls[0]?.title, "Hosted title smoke");
   const requests = JSON.parse(await fs.readFile(requestsOutputPath, "utf8"));
-  assert.equal(requests.some((request) => request.method === "thread/resume"), true);
+  const threadResume = requests.find(
+    (request) => request.method === "thread/resume",
+  );
+  assert.equal(Boolean(threadResume), true);
+  assert.equal("model" in threadResume.params, false);
   const turnStarts = requests.filter((request) => request.method === "turn/start");
   assert.equal(turnStarts.length, 2);
+  assert.equal(
+    turnStarts.every(
+      (request) => !("model" in request.params) && !("effort" in request.params),
+    ),
+    true,
+  );
   assert.match(turnStarts[0]?.params?.input?.[0]?.text, /Create a concise title/);
   assert.equal(turnStarts[1]?.params?.input?.[0]?.text, "visible resume prompt");
 });
