@@ -64,6 +64,7 @@ import {
   readWebChatAttachment,
   readWebChatAttachmentReadUrl,
   resolveCodexPath,
+  resolveHostedAccountDefaultCodexSelection,
   resolveHostedPrecheckedWorkspacePlan,
   runCodex,
   sessionContainsWebChatRunMarker,
@@ -607,6 +608,51 @@ test("Codex selection overrides are absent unless explicitly configured", () => 
   const metadata = buildCodexRunMetadata({ mode: "fresh" });
   assert.equal("model" in metadata, false);
   assert.equal("reasoning_effort" in metadata, false);
+});
+
+test("hosted Codex selection resolves the authenticated account default", () => {
+  assert.deepEqual(
+    resolveHostedAccountDefaultCodexSelection({
+      data: [
+        {
+          id: "gpt-5.4",
+          model: "gpt-5.4",
+          defaultReasoningEffort: "medium",
+          isDefault: true,
+        },
+        {
+          id: "gpt-5.6-sol",
+          model: "gpt-5.6-sol",
+          defaultReasoningEffort: "high",
+          isDefault: false,
+        },
+      ],
+    }),
+    {
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      source: "hosted_account_default",
+    },
+  );
+  assert.equal(
+    resolveHostedAccountDefaultCodexSelection(
+      {
+        data: [
+          {
+            id: "gpt-5.4",
+            defaultReasoningEffort: "medium",
+            isDefault: true,
+          },
+        ],
+      },
+      { reasoningEffort: "high" },
+    ).reasoningEffort,
+    "high",
+  );
+  assert.throws(
+    () => resolveHostedAccountDefaultCodexSelection({ data: [] }),
+    /did not return an account default model/i,
+  );
 });
 
 test("buildCodexRunMetadata preserves final AppServer control statuses", () => {
@@ -4302,6 +4348,7 @@ test("runCodex runs hidden AppServer title pre-turn for provisional resume mode"
       "  await persistRequests();",
       "  if (!Object.prototype.hasOwnProperty.call(message, 'id')) return;",
       "  if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } });",
+      "  if (message.method === 'model/list') send({ id: message.id, result: { data: [{ id: 'gpt-5.4', model: 'gpt-5.4', defaultReasoningEffort: 'medium', isDefault: true }], nextCursor: null } });",
       "  if (message.method === 'thread/resume') send({ id: message.id, result: { thread: { id: message.params.threadId } } });",
       "  if (message.method === 'turn/start') {",
       "    turnCount += 1;",
@@ -4325,7 +4372,10 @@ test("runCodex runs hidden AppServer title pre-turn for provisional resume mode"
     codexPath: fakeCodexPath,
     task: "visible resume prompt",
     workspacePath,
-    commandEnv: process.env,
+    commandEnv: {
+      ...process.env,
+      CODEQ8_EXECUTION_BACKEND: "runner_pool",
+    },
     timeoutSeconds: 30,
     mode: "resume",
     sessionId: "thr_existing_session",
@@ -4354,6 +4404,9 @@ test("runCodex runs hidden AppServer title pre-turn for provisional resume mode"
 
   assert.equal(result.ok, true);
   assert.equal(result.output, "READY");
+  assert.equal(result.resolvedModel, "gpt-5.4");
+  assert.equal(result.resolvedReasoningEffort, "medium");
+  assert.equal(result.codexSelectionSource, "hosted_account_default");
   assert.equal(titleCalls.length, 1);
   assert.equal(titleCalls[0]?.workspace_repository, "example-org/example-repo");
   assert.equal(titleCalls[0]?.target_thread_id, "wct_title_resume");
@@ -4363,12 +4416,18 @@ test("runCodex runs hidden AppServer title pre-turn for provisional resume mode"
     (request) => request.method === "thread/resume",
   );
   assert.equal(Boolean(threadResume), true);
-  assert.equal("model" in threadResume.params, false);
+  assert.equal(
+    requests.some((request) => request.method === "model/list"),
+    true,
+  );
+  assert.equal(threadResume.params.model, "gpt-5.4");
   const turnStarts = requests.filter((request) => request.method === "turn/start");
   assert.equal(turnStarts.length, 2);
   assert.equal(
     turnStarts.every(
-      (request) => !("model" in request.params) && !("effort" in request.params),
+      (request) =>
+        request.params.model === "gpt-5.4" &&
+        request.params.effort === "medium",
     ),
     true,
   );

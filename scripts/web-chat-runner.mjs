@@ -386,6 +386,36 @@ function buildCodexTurnSelectionOverrides({
   };
 }
 
+export function resolveHostedAccountDefaultCodexSelection(
+  modelListResult,
+  { reasoningEffort = "" } = {},
+) {
+  const models = Array.isArray(normalizeObject(modelListResult).data)
+    ? normalizeObject(modelListResult).data
+    : [];
+  const defaultModel = models
+    .map((entry) => normalizeObject(entry))
+    .find((entry) => entry.isDefault === true);
+  if (!defaultModel) {
+    throw new Error(
+      "Codex AppServer model/list did not return an account default model for this hosted login.",
+    );
+  }
+  const model = normalizeText(defaultModel.model || defaultModel.id);
+  if (!model) {
+    throw new Error(
+      "Codex AppServer account default model is missing its model identifier.",
+    );
+  }
+  return {
+    model,
+    reasoningEffort:
+      normalizeText(reasoningEffort) ||
+      normalizeText(defaultModel.defaultReasoningEffort),
+    source: "hosted_account_default",
+  };
+}
+
 function normalizeRepository(value) {
   const normalized = normalizeText(value);
   if (!normalized || !REPOSITORY_PATTERN.test(normalized)) {
@@ -9444,6 +9474,14 @@ async function runCodexAppServer({
 
   return new Promise((resolve) => {
     const startMs = Date.now();
+    let effectiveModel = normalizedModel;
+    let effectiveReasoningEffort = normalizedReasoningEffort;
+    let codexSelectionSource =
+      normalizedModel || normalizedReasoningEffort
+        ? "explicit_override"
+        : executionBackend === "runner_pool"
+          ? "hosted_account_default"
+          : "system_default";
     let stderr = "";
     let lastAgentMessageOutput = "";
     let agentMessageSequence = 0;
@@ -9883,6 +9921,9 @@ async function runCodexAppServer({
         codexGoalState: normalizeCodexGoalState(
           result.codexGoalState || goalReporter.latestGoalState(),
         ),
+        resolvedModel: effectiveModel,
+        resolvedReasoningEffort: effectiveReasoningEffort,
+        codexSelectionSource,
         durationMs: Date.now() - startMs,
       });
     };
@@ -9985,8 +10026,8 @@ async function runCodexAppServer({
           ],
           cwd: workspacePath,
           ...buildCodexTurnSelectionOverrides({
-            model: normalizedModel,
-            reasoningEffort: normalizedReasoningEffort,
+            model: effectiveModel,
+            reasoningEffort: effectiveReasoningEffort,
           }),
           approvalPolicy: "never",
           sandboxPolicy: {
@@ -10246,8 +10287,8 @@ async function runCodexAppServer({
         input: [{ type: "text", text: inputText }],
         cwd: workspacePath,
         ...buildCodexTurnSelectionOverrides({
-          model: normalizedModel,
-          reasoningEffort: normalizedReasoningEffort,
+          model: effectiveModel,
+          reasoningEffort: effectiveReasoningEffort,
         }),
         approvalPolicy: "never",
         sandboxPolicy: {
@@ -10554,17 +10595,44 @@ async function runCodexAppServer({
       });
       sendNotification("initialized", {});
       markAppServerStartupTiming("initialized");
+      if (executionBackend === "runner_pool" && !effectiveModel) {
+        const modelListResult = await sendRequest("model/list", {
+          limit: 100,
+          includeHidden: false,
+        });
+        const hostedSelection = resolveHostedAccountDefaultCodexSelection(
+          modelListResult,
+          { reasoningEffort: effectiveReasoningEffort },
+        );
+        effectiveModel = hostedSelection.model;
+        effectiveReasoningEffort = hostedSelection.reasoningEffort;
+        codexSelectionSource = hostedSelection.source;
+        await maybeReportRunnerDiagnostic(
+          appServerContext?.reportRunnerDiagnostic,
+          {
+            event: "runner_hosted_codex_account_default_resolved",
+            failureClass: "runner_hosted_codex_account_default_resolved",
+            severity: "info",
+            ok: true,
+            details: {
+              model: effectiveModel,
+              reasoning_effort:
+                effectiveReasoningEffort || "model_default",
+            },
+          },
+        );
+      }
       const threadResult =
         normalizedMode === "resume"
           ? await sendRequest("thread/resume", {
               threadId: normalizedSessionId,
-              ...buildCodexModelOverride(normalizedModel),
+              ...buildCodexModelOverride(effectiveModel),
               cwd: workspacePath,
               approvalPolicy: "never",
               sandbox: "danger-full-access",
             })
           : await sendRequest("thread/start", {
-              ...buildCodexModelOverride(normalizedModel),
+              ...buildCodexModelOverride(effectiveModel),
               cwd: workspacePath,
               approvalPolicy: "never",
               sandbox: "danger-full-access",
@@ -10582,6 +10650,11 @@ async function runCodexAppServer({
         markAppServerStartupTiming("before_main_turn");
         const beforeMainTurnResult = await beforeMainTurn({
           appServerStartupTimings: { ...appServerStartupTimings },
+          codexSelection: {
+            model: effectiveModel,
+            reasoningEffort: effectiveReasoningEffort,
+            source: codexSelectionSource,
+          },
           hiddenThreadTitleResult,
           mode: normalizedMode,
         });
@@ -11704,8 +11777,8 @@ async function main() {
   const fallbackPullRequestHeadRepository = normalizeText(
     process.env.CODE_CHAT_PULL_REQUEST_HEAD_REPOSITORY,
   );
-  const codexModel = normalizeText(process.env.CODEX_MODEL);
-  const codexReasoningEffort = normalizeText(
+  let codexModel = normalizeText(process.env.CODEX_MODEL);
+  let codexReasoningEffort = normalizeText(
     process.env.CODEX_REASONING_EFFORT,
   );
   const timeoutSeconds = parsePositiveInteger(
@@ -11835,6 +11908,8 @@ async function main() {
   let persistedCodexSessionState = normalizeCodexSessionState(null);
   let nonFatalCodexSessionLoadWarning = "";
   let executionMode = "fresh";
+  let codexSelectionSource =
+    codexModel || codexReasoningEffort ? "explicit_override" : "system_default";
   let threadTargetRestartCount = 0;
   let codexResumeRecoveryCount = 0;
   let lastPersistenceSummary = "";
@@ -12365,7 +12440,16 @@ async function main() {
           },
         });
 
-        const postVisibleRunningState = async ({ appServerStartupTimings = {} } = {}) => {
+        const postVisibleRunningState = async ({
+          appServerStartupTimings = {},
+          codexSelection = {},
+        } = {}) => {
+          codexModel = normalizeText(codexSelection.model) || codexModel;
+          codexReasoningEffort =
+            normalizeText(codexSelection.reasoningEffort) ||
+            codexReasoningEffort;
+          codexSelectionSource =
+            normalizeText(codexSelection.source) || codexSelectionSource;
           if (!startedAt) {
             startedAt = Date.now();
           }
@@ -12401,6 +12485,7 @@ async function main() {
                     ...workspacePreparationRunMetadata,
                     ...latestPublicActionTimingMetadata,
                     bundle_revision: persistedCodexSessionState.bundle_revision || 0,
+                    codex_selection_source: codexSelectionSource,
                     ...(materializedContinuationRequests.length > 0
                       ? {
                           app_server_final_continuation_attempt: true,
@@ -12441,6 +12526,7 @@ async function main() {
               branch: preparedWorkspace.effectiveWriteBranch,
               model: codexModel || "system_default",
               reasoning_effort: codexReasoningEffort || "system_default",
+              selection_source: codexSelectionSource,
               session_state: summarizeCodexSessionStateForDiagnostic(codexSessionState),
               thread_target_restart_count: threadTargetRestartCount,
             },
@@ -12479,6 +12565,12 @@ async function main() {
             initialContinuationControlRequests: materializedContinuationRequests,
           },
         });
+        codexModel = normalizeText(execution.resolvedModel) || codexModel;
+        codexReasoningEffort =
+          normalizeText(execution.resolvedReasoningEffort) ||
+          codexReasoningEffort;
+        codexSelectionSource =
+          normalizeText(execution.codexSelectionSource) || codexSelectionSource;
         if (execution.stoppedBeforeCodex) {
           return;
         }
@@ -12507,6 +12599,9 @@ async function main() {
             diagnostic_output_chars: normalizeText(execution.diagnosticOutput).length,
             has_codex_goal: Boolean(executionCodexGoalState.objective),
             codex_goal_status: executionCodexGoalState.status,
+            model: codexModel || "system_default",
+            reasoning_effort: codexReasoningEffort || "system_default",
+            selection_source: codexSelectionSource,
             reason: execution.ok ? "" : execution.reason,
           },
         });
