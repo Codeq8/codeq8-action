@@ -172,6 +172,87 @@ test("sync Codeq8 Playwright MCP config replaces only the managed block when pat
   });
 });
 
+test("sync Codeq8 Playwright MCP config reclaims an equivalent table after ownership comments are lost", async () => {
+  await withMcpConfigFixture(async ({ codexHome, env }) => {
+    const firstResult = await syncCodeq8PlaywrightMcpCodexConfig({
+      repoRoot: process.cwd(),
+      env,
+    });
+    assert.equal(firstResult.ok, true);
+
+    const configPath = path.join(codexHome, "config.toml");
+    const managedConfig = await fs.readFile(configPath, "utf8");
+    const unmarkedConfig = managedConfig
+      .replace(`${CODEQ8_PLAYWRIGHT_MCP_CONFIG_START}\n`, "")
+      .replace(`${CODEQ8_PLAYWRIGHT_MCP_CONFIG_END}\n`, "")
+      .replace(/args = \[([\s\S]*?)\]\n/, (_match, entries) => {
+        return `args = [${entries.replace(/\s+/g, " ").trim()}]\n`;
+      });
+    await fs.writeFile(configPath, unmarkedConfig, "utf8");
+
+    const recoveredResult = await syncCodeq8PlaywrightMcpCodexConfig({
+      repoRoot: process.cwd(),
+      env,
+    });
+
+    assert.equal(recoveredResult.ok, true);
+    assert.equal(recoveredResult.status, "recovered");
+    const recoveredConfig = await fs.readFile(configPath, "utf8");
+    assert.equal(
+      (recoveredConfig.match(new RegExp(CODEQ8_PLAYWRIGHT_MCP_CONFIG_START, "g")) || [])
+        .length,
+      1,
+    );
+    assert.equal(
+      (recoveredConfig.match(new RegExp(CODEQ8_PLAYWRIGHT_MCP_CONFIG_END, "g")) || [])
+        .length,
+      1,
+    );
+    assert.equal(
+      (recoveredConfig.match(new RegExp(`\\[mcp_servers\\.${CODEQ8_PLAYWRIGHT_MCP_SERVER_ID}\\]`, "g")) || [])
+        .length,
+      1,
+    );
+  });
+});
+
+test("sync Codeq8 Playwright MCP config recovers an equivalent table with an unterminated marker", async () => {
+  await withMcpConfigFixture(async ({ codexHome, env }) => {
+    const firstResult = await syncCodeq8PlaywrightMcpCodexConfig({
+      repoRoot: process.cwd(),
+      env,
+    });
+    assert.equal(firstResult.ok, true);
+
+    const configPath = path.join(codexHome, "config.toml");
+    const managedConfig = await fs.readFile(configPath, "utf8");
+    await fs.writeFile(
+      configPath,
+      managedConfig.replace(`${CODEQ8_PLAYWRIGHT_MCP_CONFIG_END}\n`, ""),
+      "utf8",
+    );
+
+    const recoveredResult = await syncCodeq8PlaywrightMcpCodexConfig({
+      repoRoot: process.cwd(),
+      env,
+    });
+
+    assert.equal(recoveredResult.ok, true);
+    assert.equal(recoveredResult.status, "recovered");
+    const recoveredConfig = await fs.readFile(configPath, "utf8");
+    assert.equal(
+      (recoveredConfig.match(new RegExp(CODEQ8_PLAYWRIGHT_MCP_CONFIG_START, "g")) || [])
+        .length,
+      1,
+    );
+    assert.equal(
+      (recoveredConfig.match(new RegExp(CODEQ8_PLAYWRIGHT_MCP_CONFIG_END, "g")) || [])
+        .length,
+      1,
+    );
+  });
+});
+
 test("sync Codeq8 Playwright MCP config refuses to overwrite an unmarked server table", async () => {
   await withMcpConfigFixture(async ({ codexHome, env }) => {
     const configPath = path.join(codexHome, "config.toml");
