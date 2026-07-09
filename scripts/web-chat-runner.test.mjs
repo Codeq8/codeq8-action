@@ -1652,6 +1652,8 @@ test("runCodex isolates current-schema root AppServer output from child agents",
       "    send({ method: 'turn/started', params: { threadId: 'thr_root', turn: { id: 'turn_root', status: 'inProgress', items: [] } } });",
       "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'reason_shared', type: 'reasoning', summary: [], content: [] } } });",
       "    send({ method: 'item/reasoning/summaryTextDelta', params: { threadId: 'thr_root', turnId: 'turn_root', itemId: 'reason_shared', delta: 'Inspecting ' } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'collab_spawn', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Inspect the progress producer.', model: null, reasoningEffort: 'high', agentsStates: { thr_child: { status: 'running', message: null } } } } });",
+      "    send({ method: 'item/started', params: { threadId: 'thr_root', turnId: 'turn_root', item: { id: 'collab_spawn', type: 'collabAgentToolCall', tool: 'spawnAgent', status: 'inProgress', senderThreadId: 'thr_root', receiverThreadIds: ['thr_child'], prompt: 'Inspect the progress producer.', model: null, reasoningEffort: 'high', agentsStates: { thr_child: { status: 'running', message: null } } } } });",
       "    send({ method: 'turn/started', params: { threadId: 'thr_child', turn: { id: 'turn_child', status: 'inProgress', items: [] } } });",
       "    send({ method: 'item/started', params: { threadId: 'thr_child', turnId: 'turn_child', item: { id: 'msg_shared', type: 'agentMessage', text: '', phase: 'commentary' } } });",
       "    send({ method: 'item/agentMessage/delta', params: { threadId: 'thr_child', turnId: 'turn_child', itemId: 'msg_shared', delta: 'child fragment' } });",
@@ -1715,11 +1717,12 @@ test("runCodex isolates current-schema root AppServer output from child agents",
   assert.deepEqual(
     progressEvents.map((event) => [event.item_type, event.label, event.status]),
     [
+      ["collab_agent_tool_call", "Starting a subagent.", "in_progress"],
       ["reasoning", "Inspected the root route.", "completed"],
       ["agent_message_progress", "Root commentary is complete.", "completed"],
     ],
   );
-  assert.equal(new Set(progressEvents.map((event) => event.event_id)).size, 2);
+  assert.equal(new Set(progressEvents.map((event) => event.event_id)).size, 3);
   assert.doesNotMatch(output.logs, /Child commentary|Child final|Child failed/);
   assert.doesNotMatch(
     JSON.stringify(progressEvents),

@@ -7336,6 +7336,41 @@ function isAppServerAgentMessageItemType(value) {
   );
 }
 
+function isAppServerCollaborationItemType(value) {
+  return (
+    normalizeAppServerActionsTranscriptItemType(value) ===
+    "collab_agent_tool_call"
+  );
+}
+
+function isAppServerCollaborationItem(params) {
+  return isAppServerCollaborationItemType(normalizeAppServerItemType(params));
+}
+
+function formatAppServerCollaborationProgressLabel(params) {
+  const object = normalizeObject(params);
+  const item = normalizeObject(object.item);
+  const tool = normalizeAppServerActionsTranscriptItemType(
+    item.tool || object.tool || "",
+  );
+  if (tool === "spawn_agent") {
+    return "Starting a subagent.";
+  }
+  if (tool === "send_input") {
+    return "Sending context to a subagent.";
+  }
+  if (tool === "resume_agent") {
+    return "Resuming a subagent.";
+  }
+  if (tool === "wait") {
+    return "Waiting for subagent results.";
+  }
+  if (tool === "close_agent") {
+    return "Closing a subagent.";
+  }
+  return "Working with a subagent.";
+}
+
 function extractAppServerAgentMessagePhase(params) {
   const object = normalizeObject(params);
   const item = normalizeObject(object.item);
@@ -7717,6 +7752,9 @@ function summarizeAppServerProgressNotification({
     isAgentItem && normalizedMethod === "item/agentMessage/delta";
   const isAgentCompletion =
     isAgentItem && normalizedMethod === "item/completed";
+  const isCollaborationStart =
+    isAppServerCollaborationItemType(normalizedTranscriptItemType) &&
+    normalizedMethod === "item/started";
   const isReasoningProgress =
     isReasoningItem &&
     (
@@ -7724,11 +7762,18 @@ function summarizeAppServerProgressNotification({
       normalizedMethod === "item/completed" ||
       isAppServerDeltaMethod(normalizedMethod)
     );
-  if (!isAgentDelta && !isAgentCompletion && !isReasoningProgress) {
+  if (
+    !isAgentDelta &&
+    !isAgentCompletion &&
+    !isCollaborationStart &&
+    !isReasoningProgress
+  ) {
     return null;
   }
   const itemLabel = normalizeText(
-    isReasoningProgress
+    isCollaborationStart
+      ? formatAppServerCollaborationProgressLabel(params)
+      : isReasoningProgress
       ? extractAppServerReasoningText(params)
       : label || extractAppServerCompletedAgentText(params),
   );
@@ -7744,7 +7789,8 @@ function summarizeAppServerProgressNotification({
         item_type: normalizedTranscriptItemType || normalizedItemType || "agent_message",
         label: itemLabel,
         status:
-          isAgentCompletion || normalizedMethod === "item/completed"
+          isAgentCompletion ||
+          normalizedMethod === "item/completed"
             ? "completed"
             : "in_progress",
         at: now,
@@ -9447,6 +9493,7 @@ async function runCodexAppServer({
     const agentMessageCaptures = new Map();
     const pendingReasoningProgressEvents = new Map();
     const emittedReasoningProgressKeys = new Set();
+    const emittedCollaborationProgressKeys = new Set();
     const completedRootTurnIds = new Set();
     const pendingRequests = new Map();
     const progressReporter =
@@ -9709,6 +9756,28 @@ async function runCodexAppServer({
       emittedReasoningProgressKeys.clear();
       currentLegacyReasoningProgressKey = "";
     };
+    const resetCollaborationProgressCapture = () => {
+      emittedCollaborationProgressKeys.clear();
+    };
+
+    const recordCollaborationProgressNotification = (method, params) => {
+      const progressEvent = summarizeAppServerProgressNotification({
+        method,
+        params,
+      });
+      const progressKey = normalizeText(progressEvent?.event_id);
+      if (
+        !progressEvent ||
+        !progressKey ||
+        emittedCollaborationProgressKeys.has(progressKey)
+      ) {
+        return;
+      }
+      // Cost boundary: a root collaboration item emits one immutable live
+      // snapshot. Child-thread notifications and deltas remain silent.
+      emittedCollaborationProgressKeys.add(progressKey);
+      progressReporter.enqueue(progressEvent);
+    };
 
     const startAgentMessage = (params) => {
       const capture = selectAgentMessageCapture(params, {
@@ -9951,6 +10020,7 @@ async function runCodexAppServer({
       activeTurnCompletionHandled = false;
       resetAgentMessageCapture();
       resetReasoningProgressCapture();
+      resetCollaborationProgressCapture();
       try {
         const completionPromise = waitForHiddenTitleTurnCompletion();
         const turnResult = await sendRequest("turn/start", {
@@ -10216,6 +10286,7 @@ async function runCodexAppServer({
       latestAppServerFailureMessage = "";
       resetAgentMessageCapture();
       resetReasoningProgressCapture();
+      resetCollaborationProgressCapture();
       armMainTurnStartupTimeout({
         reason: appServerContinuationTurnCount > 0 ? "final_continuation" : "main_turn",
       });
@@ -10367,6 +10438,13 @@ async function runCodexAppServer({
       }
       if (normalizedMethod === "item/completed" && isAppServerAgentMessageItem(params)) {
         completeAgentMessage(params);
+      }
+      if (
+        !hiddenTitleTurnActive &&
+        normalizedMethod === "item/started" &&
+        isAppServerCollaborationItem(params)
+      ) {
+        recordCollaborationProgressNotification(normalizedMethod, params);
       }
       if (normalizedMethod === "turn/completed") {
         if (activeTurnCompletionHandled) {
