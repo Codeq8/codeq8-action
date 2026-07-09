@@ -42,8 +42,10 @@ const WEB_CHAT_RUNNER_PROCESS_STARTED_AT_MS = Math.max(
   Math.round(globalThis.performance?.timeOrigin || Date.now()),
 );
 const DEFAULT_CODE_PUBLIC_URL = "https://codeq8.com";
-const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
-const DEFAULT_CODEX_REASONING_EFFORT = "ultra";
+// Hosted pools do not have a user-managed local Codex config. Self-hosted
+// runners leave these unset so Codex honors the runner account/config.
+const DEFAULT_HOSTED_CODEX_MODEL = "gpt-5.6-sol";
+const DEFAULT_HOSTED_CODEX_REASONING_EFFORT = "ultra";
 const DEFAULT_TIMEOUT_SECONDS = 72 * 60 * 60;
 const DEFAULT_FETCH_JSON_TIMEOUT_MS = 15_000;
 const CODEX_SESSION_CONTENTS_FETCH_JSON_TIMEOUT_MS = 60_000;
@@ -340,17 +342,21 @@ function normalizeAppServerControlRequestsForRunMetadata(requests) {
 
 function buildCodexRunMetadata({
   model = "",
+  reasoningEffort = "",
   mode = "",
   extra = {},
   appServerControlRequests = [],
 }) {
   const normalizedModel = normalizeText(model);
+  const normalizedReasoningEffort = normalizeText(reasoningEffort);
   const normalizedMode = normalizeText(mode);
   const normalizedControlRequests =
     normalizeAppServerControlRequestsForRunMetadata(appServerControlRequests);
   return {
     ...(normalizedModel ? { model: normalizedModel } : {}),
-    reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT,
+    ...(normalizedReasoningEffort
+      ? { reasoning_effort: normalizedReasoningEffort }
+      : {}),
     ...(normalizedMode ? { codex_session_mode: normalizedMode } : {}),
     app_server_control_capabilities: [...APP_SERVER_CONTROL_CAPABILITIES],
     ...(normalizedControlRequests.length > 0
@@ -365,6 +371,45 @@ function buildCodexRunMetadata({
         }
       : {}),
     ...extra,
+  };
+}
+
+function buildCodexModelOverride(model = "") {
+  const normalizedModel = normalizeText(model);
+  return normalizedModel ? { model: normalizedModel } : {};
+}
+
+function buildCodexTurnSelectionOverrides({
+  model = "",
+  reasoningEffort = "",
+} = {}) {
+  const normalizedReasoningEffort = normalizeText(reasoningEffort);
+  return {
+    ...buildCodexModelOverride(model),
+    ...(normalizedReasoningEffort ? { effort: normalizedReasoningEffort } : {}),
+  };
+}
+
+function resolveCodexSelectionForExecutionBackend({
+  env = process.env,
+  executionBackend = "",
+} = {}) {
+  const normalizedExecutionBackend = normalizeRunExecutionBackend(
+    executionBackend,
+  );
+  const explicitModel = normalizeText(env.CODEX_MODEL);
+  const explicitReasoningEffort = normalizeText(env.CODEX_REASONING_EFFORT);
+  return {
+    model:
+      explicitModel ||
+      (normalizedExecutionBackend === "runner_pool"
+        ? DEFAULT_HOSTED_CODEX_MODEL
+        : ""),
+    reasoningEffort:
+      explicitReasoningEffort ||
+      (normalizedExecutionBackend === "runner_pool"
+        ? DEFAULT_HOSTED_CODEX_REASONING_EFFORT
+        : ""),
   };
 }
 
@@ -9444,6 +9489,7 @@ async function writeRunnerThreadTitle({
 async function runCodexAppServer({
   codexPath,
   model,
+  reasoningEffort,
   task,
   workspacePath,
   commandEnv,
@@ -9455,7 +9501,8 @@ async function runCodexAppServer({
   codexThreadGoalsEnabled = false,
   beforeMainTurn = null,
 }) {
-  const normalizedModel = normalizeText(model) || DEFAULT_CODEX_MODEL;
+  const normalizedModel = normalizeText(model);
+  const normalizedReasoningEffort = normalizeText(reasoningEffort);
   const normalizedTask = normalizeText(task);
   const normalizedMode = normalizeText(mode).toLowerCase() === "resume" ? "resume" : "fresh";
   const normalizedSessionId = normalizeCodexSessionId(sessionId);
@@ -10085,12 +10132,14 @@ async function runCodexAppServer({
             },
           ],
           cwd: workspacePath,
-          model: normalizedModel,
+          ...buildCodexTurnSelectionOverrides({
+            model: normalizedModel,
+            reasoningEffort: normalizedReasoningEffort,
+          }),
           approvalPolicy: "never",
           sandboxPolicy: {
             type: "dangerFullAccess",
           },
-          effort: DEFAULT_CODEX_REASONING_EFFORT,
         });
         hiddenTitleTurnId = extractAppServerTurnId(turnResult) || activeTurnId;
         activeTurnId = hiddenTitleTurnId || activeTurnId;
@@ -10345,12 +10394,14 @@ async function runCodexAppServer({
         threadId: appServerThreadId,
         input: [{ type: "text", text: inputText }],
         cwd: workspacePath,
-        model: normalizedModel,
+        ...buildCodexTurnSelectionOverrides({
+          model: normalizedModel,
+          reasoningEffort: normalizedReasoningEffort,
+        }),
         approvalPolicy: "never",
         sandboxPolicy: {
           type: "dangerFullAccess",
         },
-        effort: DEFAULT_CODEX_REASONING_EFFORT,
       });
       activeTurnId = extractAppServerTurnId(turnResult) || activeTurnId;
       controlListener?.flushPending?.();
@@ -10663,13 +10714,13 @@ async function runCodexAppServer({
         normalizedMode === "resume"
           ? await sendRequest("thread/resume", {
               threadId: normalizedSessionId,
-              model: normalizedModel,
+              ...buildCodexModelOverride(normalizedModel),
               cwd: workspacePath,
               approvalPolicy: "never",
               sandbox: "danger-full-access",
             })
           : await sendRequest("thread/start", {
-              model: normalizedModel,
+              ...buildCodexModelOverride(normalizedModel),
               cwd: workspacePath,
               approvalPolicy: "never",
               sandbox: "danger-full-access",
@@ -10742,6 +10793,7 @@ async function runCodexAppServer({
 async function runCodex({
   codexPath,
   model,
+  reasoningEffort,
   task,
   workspacePath,
   commandEnv,
@@ -10753,7 +10805,8 @@ async function runCodex({
   codexThreadGoalsEnabled = false,
   beforeMainTurn = null,
 }) {
-  const normalizedModel = normalizeText(model) || DEFAULT_CODEX_MODEL;
+  const normalizedModel = normalizeText(model);
+  const normalizedReasoningEffort = normalizeText(reasoningEffort);
   const normalizedTask = normalizeText(task);
   const normalizedMode = normalizeText(mode).toLowerCase() === "resume" ? "resume" : "fresh";
   const normalizedSessionId = normalizeCodexSessionId(sessionId);
@@ -10785,6 +10838,7 @@ async function runCodex({
   return runCodexAppServer({
     codexPath,
     model: normalizedModel,
+    reasoningEffort: normalizedReasoningEffort,
     task: normalizedTask,
     workspacePath,
     commandEnv,
@@ -11806,7 +11860,14 @@ async function main() {
   const fallbackPullRequestHeadRepository = normalizeText(
     process.env.CODE_CHAT_PULL_REQUEST_HEAD_REPOSITORY,
   );
-  const codexModel = normalizeText(process.env.CODEX_MODEL) || DEFAULT_CODEX_MODEL;
+  const initialExecutionBackend =
+    resolveRunControlPlaneContext(process.env).execution_backend;
+  const codexSelection = resolveCodexSelectionForExecutionBackend({
+    env: process.env,
+    executionBackend: initialExecutionBackend,
+  });
+  const codexModel = codexSelection.model;
+  const codexReasoningEffort = codexSelection.reasoningEffort;
   const timeoutSeconds = parsePositiveInteger(
     process.env.CODEX_TIMEOUT_SECONDS,
     DEFAULT_TIMEOUT_SECONDS,
@@ -11841,7 +11902,10 @@ async function main() {
     CODE_WORKER_URL: workerUrl,
     CODE_PUBLIC_BASE_URL: publicBaseUrl,
     CODE_WORKSPACE_REPOSITORY: workspaceRepository,
-    CODEX_MODEL: codexModel,
+    ...(codexModel ? { CODEX_MODEL: codexModel } : {}),
+    ...(codexReasoningEffort
+      ? { CODEX_REASONING_EFFORT: codexReasoningEffort }
+      : {}),
     GIT_TERMINAL_PROMPT: "0",
     GIT_HTTP_LOW_SPEED_LIMIT: DEFAULT_GIT_HTTP_LOW_SPEED_LIMIT,
     GIT_HTTP_LOW_SPEED_TIME: DEFAULT_GIT_HTTP_LOW_SPEED_TIME,
@@ -12490,6 +12554,7 @@ async function main() {
                 started_at: startedAt,
                 metadata: buildCodexRunMetadata({
                   model: codexModel,
+                  reasoningEffort: codexReasoningEffort,
                   mode: executionMode,
                   appServerControlRequests: latestAppServerControlRequests,
                   extra: {
@@ -12526,7 +12591,7 @@ async function main() {
           }
           log(
             "Starting web chat codex run",
-            `repository=${activeWorkspaceRepository} branch=${preparedWorkspace.effectiveWriteBranch} model=${codexModel} mode=${executionMode} restart_count=${threadTargetRestartCount}`,
+            `repository=${activeWorkspaceRepository} branch=${preparedWorkspace.effectiveWriteBranch} model=${codexModel || "system_default"} effort=${codexReasoningEffort || "system_default"} mode=${executionMode} restart_count=${threadTargetRestartCount}`,
           );
           await reportRunnerDiagnostic({
             event: "runner_codex_command_started",
@@ -12534,7 +12599,8 @@ async function main() {
             details: {
               repository: activeWorkspaceRepository,
               branch: preparedWorkspace.effectiveWriteBranch,
-              model: codexModel,
+              model: codexModel || "system_default",
+              reasoning_effort: codexReasoningEffort || "system_default",
               session_state: summarizeCodexSessionStateForDiagnostic(codexSessionState),
               thread_target_restart_count: threadTargetRestartCount,
             },
@@ -12545,6 +12611,7 @@ async function main() {
         const execution = await runCodex({
           codexPath,
           model: codexModel,
+          reasoningEffort: codexReasoningEffort,
           task: prompt,
           workspacePath: preparedWorkspace.workspacePath,
           commandEnv: codexCommandEnv,
@@ -12718,6 +12785,7 @@ async function main() {
                 completed_at: Date.now(),
                 metadata: buildCodexRunMetadata({
                   model: codexModel,
+                  reasoningEffort: codexReasoningEffort,
                   mode: executionMode,
                   appServerControlRequests: latestAppServerControlRequests,
                   extra: {
@@ -12801,6 +12869,7 @@ async function main() {
               started_at: startedAt,
               metadata: buildCodexRunMetadata({
                 model: codexModel,
+                reasoningEffort: codexReasoningEffort,
                 mode: "resume",
                 extra: {
                   ...workspacePreparationRunMetadata,
@@ -13119,6 +13188,7 @@ async function main() {
                 started_at: startedAt,
                 metadata: buildCodexRunMetadata({
                   model: codexModel,
+                  reasoningEffort: codexReasoningEffort,
                   mode: "resume",
                   appServerControlRequests: latestAppServerControlRequests,
                   extra: {
@@ -13232,6 +13302,7 @@ async function main() {
             completed_at: completedAt,
             metadata: buildCodexRunMetadata({
               model: codexModel,
+              reasoningEffort: codexReasoningEffort,
               mode: executionMode,
               appServerControlRequests: latestAppServerControlRequests,
               extra: {
@@ -13378,6 +13449,7 @@ async function main() {
           completed_at: Date.now(),
           metadata: buildCodexRunMetadata({
             model: codexModel,
+            reasoningEffort: codexReasoningEffort,
             mode: executionMode,
             appServerControlRequests: latestAppServerControlRequests,
             extra: {
@@ -13427,7 +13499,9 @@ export {
   applyCodexSessionContinuityGuidance,
   appendWebChatRunMarkerToPrompt,
   buildCodexPrompt,
+  buildCodexModelOverride,
   buildCodexRunMetadata,
+  buildCodexTurnSelectionOverrides,
   buildPublicActionStartupTimingMetadata,
   buildWorkspacePreparationRunMetadata,
   buildGitHubActionsControlPlaneUrl,
@@ -13498,6 +13572,7 @@ export {
   resolveReviewBaseBranch,
   resolveHostedPrecheckedWorkspacePlan,
   resolveRunControlPlaneContext,
+  resolveCodexSelectionForExecutionBackend,
   resolveWebChatGitHubWriteToken,
   resolveWebChatRunnerAdminToken,
   resolveWebChatGitHubUserToken,
